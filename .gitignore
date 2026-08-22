@@ -39,3 +39,23 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ---------------------------------------------------------------
+# Local Data Workbench — added in Phase 0 (docs/build-plan.md §0.5)
+# ---------------------------------------------------------------
+
+# env files
+# The `.env*` rule above already ignores every env file, including
+# `.env.example`. The build plan (§20 and Phase 1.7) requires `.env.example`
+# to be committed as documentation, so it is explicitly un-ignored here.
+!.env.example
+.env.local
+
+# run artifacts (preserved uploads, internal working files, exports)
+data/runs/*
+!data/runs/.gitkeep
+
+# python backend
+backend/.venv/
+__pycache__/
+.pytest_cache/
