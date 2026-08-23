@@ -1,0 +1,1 @@
+"""Pydantic schemas describing the backend's API-facing structured data."""
