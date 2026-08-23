@@ -1,16 +1,24 @@
 """FastAPI application for the Local Data Workbench backend.
 
-Phase 1 deliberately exposes a single endpoint, ``GET /health``, which the
-frontend uses to show whether the backend is reachable. Action discovery and
-Run execution arrive in later phases.
+Composes the application: configuration, CORS, the API routers and the single
+place internal exceptions become HTTP responses. Endpoint logic lives in
+``app.api``; ``GET /health`` stays here because it reports on this process
+rather than on any part of the domain.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import config
+from app.api import actions, runs
+from app.errors import WorkbenchError
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Local Data Workbench",
@@ -26,6 +34,26 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+app.include_router(actions.router)
+app.include_router(runs.router)
+
+
+@app.exception_handler(WorkbenchError)
+async def handle_workbench_error(
+    request: Request, exc: WorkbenchError
+) -> JSONResponse:
+    """Render an internal error as the structured API error of section 22.
+
+    This is the only place backend exceptions become HTTP responses. The body
+    carries a stable `code`, a plain-language `message` and structured
+    `details`; a traceback is logged locally and never returned to the browser.
+    """
+    if exc.http_status >= 500:
+        logger.error(
+            "%s %s failed: %s", request.method, request.url.path, exc.message
+        )
+    return JSONResponse(status_code=exc.http_status, content=exc.as_response_body())
 
 
 @app.get("/health")

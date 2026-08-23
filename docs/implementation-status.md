@@ -2,7 +2,8 @@
 
 Last Updated: 2026-08-23
 Current Phase: None
-Last Completed Phase: Phase 2 — Backend Data Engine and Action Contract
+Last Completed Phase: Phase 3 — Upload, Parsing, Run Execution, Storage, and
+Export Pipeline
 
 This file is the durable cross-thread project state required by
 `docs/build-plan.md` §33. Every Phase must update it.
@@ -195,6 +196,128 @@ from `http://127.0.0.1:3000`. See **Tests** below.
 
 ---
 
+### Phase 3 — Upload, Parsing, Run Execution, Storage, and Export Pipeline
+
+All sixteen sub-steps were implemented and verified.
+
+#### Repository repair performed first
+
+Phase 3 could not begin until a defect in the committed Phase 2 state was
+fixed. Commit `90dd7e8` ("phase 2 complete") wrote the entire backend Python
+package into **`src/app/`** — the Next.js App Router directory — instead of
+`backend/app/`, and named `schemas.py` as `schema.py`. Consequences:
+
+- `backend/app/` contained only `__init__.py`, `config.py` and the Phase 1
+  `main.py`; `actions/`, `api/`, `models/` and `services/` were absent.
+- The whole backend suite failed at collection with
+  `ModuleNotFoundError: No module named 'app.models'` — 0 of 48 tests ran.
+- Every intra-package import (`from app.models.schemas import ...`) was
+  unresolvable, which is the source of the **"Import ... could not be
+  resolved"** warnings reported at the start of this session.
+
+This was a misplacement, not a design decision: the moved modules import
+`from app import config`, which resolves only under `backend/`, and
+`docs/implementation-status.md` already documented `backend/app/...` as their
+location. The files were restored with `git mv` (history preserved), and
+`src/app/main.py` — a strict superset of the Phase 1 `backend/app/main.py`,
+adding only the router import and `include_router` — replaced it. Verified
+immediately afterwards: **48 Phase 2 tests passed** and `npx pyright` reported
+**0 errors**, resolving the reported import warnings. No file content was
+edited during the repair; only locations changed.
+
+**3.1 Storage service.** `backend/app/services/storage.py` owns Run UUIDs, the
+`inputs/ working/ exports/` tree, upload preservation, atomic manifest writes
+and artifact lookup by logical ID. `RunPaths` is the only thing that builds a
+path; the API never supplies one. Slot and output IDs must match
+`SAFE_ID_PATTERN` before they contribute to a path, and `parse_run_id()`
+accepts only the canonical string form of a UUID — a traversal-shaped or
+truncated ID raises `UnknownRunError` before the filesystem is touched.
+`runs_directory()` reads `config.RUNS_DIRECTORY` at call time rather than at
+import, so tests redirect it at one place and never touch the real
+`data/runs`.
+
+**3.2 Safe filenames.** Every upload is stored as `source<ext>` inside its own
+slot directory. The client's filename is recorded as `original_filename`
+metadata and is used for nothing else. `extension_of()` strips any directory
+component before reading the suffix, so `../../evil.csv` yields `.csv`.
+
+**3.3 Upload limit.** `store_upload()` copies in 1 MiB chunks and checks the
+running total against `MAX_UPLOAD_BYTES`, raising `UploadTooLargeError` (413).
+A partial file from a rejected upload is deleted before the error propagates.
+Starlette's `max_part_size` was investigated and does **not** apply to file
+parts (only to non-file fields), so the limit is enforced here; Starlette
+spools file parts to disk, so an oversized upload never becomes a memory
+error.
+
+**3.4-3.6 Parser service.** `backend/app/services/parser.py` exposes
+`parse_tabular_file(path, extension)` returning a `ParsedFile` (dataframe,
+`parser_engine`, `worksheet`, and row/column/columns metadata).
+
+- CSV via Polars. `try_parse_dates` is deliberately left off, so date-shaped
+  text stays text and no value is silently retyped (§3.3).
+- XLSX via fastexcel/calamine, read through `ExcelReader.load_sheet(...)`
+  rather than `pl.read_excel`, because the latter defaults to
+  `drop_empty_rows=True` / `drop_empty_cols=True` and would silently drop data
+  (§3.3 forbids that).
+- Worksheet ambiguity (§17): a sheet counts as a data sheet if it holds any
+  cells. Exactly one -> used and recorded. Zero -> "contains no data". Two or
+  more -> `AmbiguousWorkbookError` naming the sheets, with the message §17
+  specifies. A header-only sheet counts as a valid dataset with zero rows.
+- openpyxl is the compatibility fallback and the engine that actually
+  succeeded is what the manifest records (§6.2). A _structural_ refusal —
+  no data sheet, or several — is never retried with the fallback, since the
+  fallback would reach the same conclusion.
+- Both engines read stored values. Neither evaluates formulas nor runs macros.
+
+**3.7 Generic validation.** The runner checks, per slot: required slot
+present, extension accepted, file parsed, dataset non-empty, required columns
+present. Column comparison is exact and case-sensitive — `Sales Person` is
+reported against `Salesperson`, and `Sku` against `SKU`, rather than guessed.
+All slot problems in one request are collected and reported together.
+
+**3.8 Runner service.** `backend/app/services/runner.py` owns the whole
+generic workflow. It is framework-independent: it takes `PendingUpload`
+objects (a filename plus a readable stream), so the API and the tests drive
+the identical pipeline. Actions reproduce none of it.
+
+**3.9 Failed Runs.** Once a Run directory exists, every outcome writes a
+manifest. A failure records `status = failed`, the structured error, the full
+validation error list, and the inputs that were uploaded. The directory and
+the preserved upload are retained. Verified on disk for `MISSING_INPUT`,
+`UNSUPPORTED_EXTENSION`, `MISSING_COLUMNS`, `FILE_TOO_LARGE` and
+`AMBIGUOUS_WORKBOOK`.
+
+**3.10 Export service.** `backend/app/services/export.py` writes each output
+as `working/<id>.parquet`, `exports/<id>.csv` and `exports/<id>.xlsx`. Polars
+writes all three directly; the dataframe is never converted to Python objects
+on the way out.
+
+**3.11 Manifest writing.** Written at `running` and again at `succeeded` or
+`failed`. `write_manifest()` writes a temporary file in the same directory,
+`fsync`s it and `os.replace`s it over the destination, so an interrupted
+process cannot leave half-written JSON. The temp file is removed in a
+`finally`.
+
+**3.12-3.16 Runs API.** `backend/app/api/runs.py` adds `POST /api/runs`,
+`GET /api/runs/{run_id}`, the preview endpoint and the two download
+endpoints. `POST` reads the multipart form through
+`async with request.form()`, so uploaded streams stay open until the runner
+has copied them. Files are submitted under their Action slot IDs, never as one
+anonymous list. Downloads use `FileResponse` with a filename derived from the
+output ID, not from the upload.
+
+**Error boundary.** `backend/app/errors.py` defines the structured error
+taxonomy and `main.py` registers one `WorkbenchError` handler that renders
+`{"error": {code, message, details}}` with the matching status. Tracebacks are
+logged locally and never returned. Status codes follow §22: 400 malformed
+request, 404 unknown Action/Run/Output, 413 too large, 422 validation failure,
+500 unexpected.
+
+**No frontend file was created or modified in Phase 3.** The `npm run build`
+route list is unchanged (`/` and `/_not-found`).
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -234,7 +357,8 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
       app/
         __init__.py
         config.py             all backend settings
-        main.py               FastAPI app, CORS, routers, /health, dev entry
+        errors.py             structured error taxonomy (section 22)
+        main.py               FastAPI app, CORS, routers, error handler, /health
         actions/
           __init__.py
           base.py             Action contract + ActionResult
@@ -243,17 +367,30 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         api/
           __init__.py
           actions.py          GET /api/actions
+          runs.py             POST /api/runs, retrieval, preview, downloads
         models/
           __init__.py
           schemas.py          every Pydantic schema
         services/
-          __init__.py         empty until Phase 3
+          __init__.py
+          storage.py          Run dirs, safe filenames, upload limit, manifest
+          parser.py           parse_tabular_file: CSV + XLSX
+          runner.py           the generic Run pipeline
+          export.py           Parquet + CSV + XLSX artifacts
+          preview.py          paginated reads of the internal Parquet
       tests/
         __init__.py
-        helpers.py            make_action() throwaway Action builder
+        conftest.py           isolated runs dir, registry and client fixtures
+        helpers.py            make_action(), CSV/XLSX builders, upload helpers
         test_actions.py       Action contract + registry
         test_api.py           /health and /api/actions
         test_schemas.py       manifest / preview serialisation
+        test_storage.py       Run dirs, path safety, upload limit, manifest
+        test_parser.py        CSV, XLSX, worksheet ambiguity, engine fallback
+        test_runner.py        the pipeline, validation, failed Runs
+        test_export.py        Parquet/CSV/XLSX round trips
+        test_preview.py       paging limits and Parquet-sourced previews
+        test_runs_api.py      the Run endpoints and their status codes
 
 Installed backend packages (resolved 2026-08-22):
 
@@ -291,14 +428,36 @@ variable names.
 
 ### API surface (current)
 
-    GET /health        ->  200 {"status": "ok"}
-    GET /api/actions   ->  200 {"actions": [ActionDefinition, ...]}
+    GET  /health        ->  200 {"status": "ok"}
+    GET  /api/actions   ->  200 {"actions": [ActionDefinition, ...]}
+
+    POST /api/runs      ->  200 RunManifest
+                            multipart: action_id + one file field per slot ID
+                            400 malformed request (no action_id)
+                            404 unknown Action
+                            413 upload over MAX_UPLOAD_BYTES
+                            422 validation failure
+                            500 Action raised
+
+    GET  /api/runs/{run_id}
+                        ->  200 RunManifest | 404
+
+    GET  /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=
+                        ->  200 PreviewResponse (default 100, max 500)
+                            400 offset/limit out of range
+                            404 unknown Run or output
+
+    GET  /api/runs/{run_id}/outputs/{output_id}/download/csv
+    GET  /api/runs/{run_id}/outputs/{output_id}/download/xlsx
+                        ->  200 file attachment | 404
+
+Every error body has the shape build plan section 22 specifies:
+
+    {"error": {"code": "...", "message": "...", "details": {...}}}
 
 FastAPI's own `/docs`, `/redoc` and `/openapi.json` are present by default;
 the OpenAPI schema now documents `ActionDefinition`, `ActionInput`,
 `ActionOutput` and `ActionListResponse`.
-
-No Run, upload, preview or download endpoints exist yet — those are Phase 3.
 
 Registered Actions (1):
 
@@ -336,11 +495,11 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `src/components/`       | Exists (`backend/BackendStatus.jsx`)                        |
 | `lib/`                  | Missing — Phase 5.1 (`src/lib/api.js`)                      |
 | `backend/app/`          | Exists (`main.py`, `config.py`)                             |
-| `backend/app/api/`      | Exists (`actions.py`); `runs.py` is Phase 3.12              |
+| `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                            |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, placeholder Action)       |
 | `backend/app/models/`   | Exists (`schemas.py`)                                       |
-| `backend/app/services/` | Exists, empty — Phase 3                                     |
-| `backend/tests/`        | Exists (3 test modules); `fixtures/` arrives in Phase 4     |
+| `backend/app/services/` | Exists (storage, parser, runner, export, preview)           |
+| `backend/tests/`        | Exists (9 test modules); `fixtures/` arrives in Phase 4     |
 | `data/runs/`            | Exists (`.gitkeep`; run artifacts git-ignored)              |
 | `scripts/`              | Exists (`dev-backend.sh`)                                   |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)              |
@@ -350,7 +509,7 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/phase-2-backend-data-engine-d55tyx
+    Current branch: claude/phase-3-pipeline-b7o3qw
 
 Commit history at start of Phase 2 (4 commits):
 
@@ -397,13 +556,101 @@ Local addresses (verified running):
 
 ## Tests
 
-### Backend test suite (Phase 2)
+### Backend test suite (Phase 3)
 
-    cd backend && .venv/bin/python -m pytest        ->  48 passed, 1 warning
+    cd backend && .venv/bin/python -m pytest       ->  231 passed, 1 warning
 
-    tests/test_actions.py   26 passed   Action contract + registry
-    tests/test_api.py       10 passed   /health and GET /api/actions
-    tests/test_schemas.py   12 passed   manifest / preview serialisation
+    tests/test_actions.py    26 passed   Action contract + registry
+    tests/test_api.py        10 passed   /health and GET /api/actions
+    tests/test_schemas.py    12 passed   manifest / preview serialisation
+    tests/test_storage.py    57 passed   Run dirs, path safety, limit, manifest
+    tests/test_parser.py     26 passed   CSV, XLSX, ambiguity, engine fallback
+    tests/test_runner.py     28 passed   pipeline, validation, failed Runs
+    tests/test_export.py     11 passed   Parquet/CSV/XLSX round trips
+    tests/test_preview.py    15 passed   paging limits, Parquet-sourced preview
+    tests/test_runs_api.py   46 passed   Run endpoints and status codes
+
+The 48 Phase 2 tests still pass unchanged; Phase 3 added 183.
+
+Every test that touches storage runs against its own temporary runs directory
+(`conftest.py` redirects `config.RUNS_DIRECTORY`), so the suite never reads or
+writes the real `data/runs`.
+
+**Build plan Phase 3 testing list, and the tests that prove each:**
+
+| Phase 3 requirement               | Tests                                                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| supported file accepted           | `test_a_supported_file_is_accepted`, `test_an_xlsx_upload_is_accepted`                                                                           |
+| unsupported extension rejected    | `test_an_unsupported_extension_returns_422`, `test_unsupported_extensions_are_rejected` (8 cases), `test_an_unsupported_upload_is_never_stored`  |
+| oversized file rejected           | `test_an_oversized_upload_returns_413`, `test_an_oversized_upload_is_rejected`, `test_a_rejected_upload_leaves_no_partial_file`                  |
+| unknown Action rejected           | `test_an_unknown_action_returns_404`                                                                                                             |
+| missing required input rejected   | `test_a_missing_required_input_returns_422`, `test_a_missing_required_input_fails_the_run`                                                       |
+| missing required columns rejected | `test_missing_required_columns_return_422_with_the_missing_names`, `test_column_comparison_is_exact`, `test_column_comparison_is_case_sensitive` |
+| Run directory created             | `test_create_run_creates_the_full_directory_tree`, `test_each_run_gets_its_own_isolated_directory`                                               |
+| source preserved                  | `test_the_source_upload_is_preserved_byte_for_byte`, `test_the_uploaded_source_is_preserved_under_a_generated_name`                              |
+| manifest created                  | `test_the_manifest_records_the_run_end_to_end`, `test_the_manifest_on_disk_matches_what_was_returned`                                            |
+| Parquet output created            | `test_write_output_creates_all_three_artifacts`, `test_the_parquet_round_trips_with_its_schema_intact`                                           |
+| CSV output created                | `test_the_csv_export_round_trips`, `test_a_downloaded_csv_reads_back_with_the_expected_data`                                                     |
+| XLSX output created               | `test_the_xlsx_export_is_a_real_workbook_that_round_trips`, `test_the_xlsx_download_returns_a_real_workbook`                                     |
+| preview returns limited rows      | `test_the_preview_returns_only_the_requested_rows`, `test_only_the_requested_rows_are_returned`                                                  |
+| invalid Run ID returns 404        | `test_a_malformed_run_id_returns_404` (4 cases), `test_an_unknown_run_id_returns_404`                                                            |
+| invalid output returns 404        | `test_an_unknown_output_returns_404`, `test_a_traversal_shaped_output_id_returns_404` (3 cases)                                                  |
+
+Beyond the required list, the suite also proves: failed Runs retain their
+directory, manifest, uploaded file and full error list (3.9); the manifest
+contains no dataframe rows and no filesystem paths (sections 11 and 23); the
+Excel engine fallback is exercised and recorded (section 6.2); worksheet
+ambiguity is refused and never retried with the fallback (section 17); an
+Action that raises or omits a declared output fails cleanly without leaking a
+traceback; accented text survives every hop; and a hostile upload filename
+cannot write outside its Run directory.
+
+### Phase 3 end-to-end verification over real HTTP
+
+Backend started with the real `scripts/dev-backend.sh`; requests issued with
+`curl` against `http://127.0.0.1:8000`.
+
+    POST /api/runs (CSV, Origin: http://127.0.0.1:3000)
+                          ->  200, status "succeeded", duration_ms 42,
+                              inputs[0].parser_engine "polars-csv",
+                              stored_filename "source.csv"
+    GET  /api/runs/{id}   ->  200
+    GET  .../preview?limit=2
+                          ->  200, 2 of 3 rows, columns ["a","b"]
+    GET  .../download/csv ->  200, text/csv,
+                              content-disposition: attachment;
+                              filename="passthrough_data.csv"
+                              body matched the uploaded data exactly
+    GET  .../download/xlsx
+                          ->  200, `file` reports "Microsoft Excel 2007+"
+
+    Error paths:
+      unknown action      ->  404 UNKNOWN_ACTION
+      missing input       ->  422 MISSING_INPUT
+      unsupported ext     ->  422 UNSUPPORTED_EXTENSION
+      no action_id        ->  400 INVALID_REQUEST
+      malformed run id    ->  404 UNKNOWN_RUN
+      oversized upload    ->  413 FILE_TOO_LARGE
+                              "sample.csv is larger than the 8 bytes upload
+                               limit." (FORGEXL_MAX_UPLOAD_BYTES=8)
+      multi-sheet .xlsx   ->  422 AMBIGUOUS_WORKBOOK, message matching the
+                              wording of build plan section 17
+
+### Run directory layout on disk (build plan section 11)
+
+    data/runs/<run-id>/
+      manifest.json
+      inputs/source_file/source.csv     preserved upload, generated name
+      working/passthrough_data.parquet  internal representation
+      exports/passthrough_data.csv
+      exports/passthrough_data.xlsx
+
+Failed Runs were confirmed retained on disk with `status: failed` and a
+populated `error.code` for `FILE_TOO_LARGE`, `MISSING_INPUT`,
+`UNSUPPORTED_EXTENSION` and `AMBIGUOUS_WORKBOOK`. `git check-ignore` confirmed
+run artifacts are ignored while `data/runs/.gitkeep` is not. The Run
+directories created during verification were removed afterwards, leaving
+`data/runs/` as it was found.
 
 The single warning is third-party and is recorded under **Known Issues**.
 
@@ -437,13 +684,17 @@ at least one Action, and that its IDs are unique.
 
 ### Frontend lint
 
-    npm run lint          ->  exit 0, no errors, no warnings   (run twice)
+    npm run lint          ->  exit 0, no errors, no warnings
+                              (re-run in Phase 3: still clean)
 
 ### Frontend production build
 
     npm run build         ->  exit 0
-                              ✓ Compiled successfully in 6.5s
+                              ✓ Compiled successfully in 5.9s
                               Routes: ○ /   ○ /_not-found  (both static)
+
+    Unchanged from Phase 2 — Phase 3 added no frontend code, and the route
+    list proves it.
 
 ### Backend import
 
@@ -463,7 +714,17 @@ at least one Action, and that its IDs are unique.
                               FORGEXL_ALLOWED_FRONTEND_ORIGINS=... honoured
                               defaults restored when unset
 
-### Combined startup
+### Combined startup (re-verified in Phase 3)
+
+    npm run dev           ->  [api] Uvicorn running on http://127.0.0.1:8000
+                              [web] - Local: http://127.0.0.1:3000
+                              [web] ✓ Ready in 398ms
+                              [api] Application startup complete.
+                              GET http://127.0.0.1:8000/health   -> {"status":"ok"}
+                              GET http://127.0.0.1:8000/api/actions -> 200
+                              GET http://127.0.0.1:3000/          -> 200
+
+### Combined startup (Phase 1 record)
 
     npm run dev           ->  [web] ✓ Ready in 390ms
                               [web] - Local: http://127.0.0.1:3000
@@ -536,6 +797,22 @@ output reports `id=passthrough_data`, `label="Passthrough Data"`,
                     'ActionListResponse', 'ActionOutput']
       /api/actions 200 -> $ref #/components/schemas/ActionListResponse
 
+### CORS on /api/runs (Phase 3)
+
+    Origin: http://127.0.0.1:3000   ->  access-control-allow-origin:
+                                        http://127.0.0.1:3000
+    Origin: http://localhost:3000   ->  access-control-allow-origin:
+                                        http://localhost:3000
+    Origin: http://evil.example.com ->  no access-control-* headers at all
+                                        (origin not echoed, no wildcard)
+
+### Loopback binding (Phase 3)
+
+    /proc/net/tcp         ->  0100007F:1F40 state 0A  (127.0.0.1:8000 LISTEN)
+                              nothing bound to 0.0.0.0
+    http://192.0.2.2:8000/health    ->  connection refused
+                              (192.0.2.2 = this host's non-loopback address)
+
 ### CORS on /api/actions
 
     Origin: http://127.0.0.1:3000   ->  200, access-control-allow-origin:
@@ -577,7 +854,8 @@ was installed outside the repository, in the session scratchpad.
 ### Type checking
 
     npx pyright           ->  0 errors, 0 warnings, 0 informations
-                              (all backend source and test files)
+                              (all backend source and test files, including
+                               every module added in Phase 3)
 
 Control test: appending a deliberately invalid assignment to
 `backend/app/actions/registry.py` reproduced a `reportAssignmentType` error,
@@ -652,14 +930,54 @@ them. The file was restored and re-verified clean.
     application registry is non-empty with unique IDs, so they will keep
     passing after the swap.
 
-9.  **The Action contract is defined but has never executed inside a Run.**
-    `Action.run()`, `Action.validate()` and `ActionResult` are exercised only
-    by direct unit calls; nothing yet parses a file, persists Parquet or writes
-    a manifest. The `RunManifest` and `PreviewResponse` schemas are likewise
-    proven only by serialisation round-trips. Phase 3 is the first real test of
-    whether the contract's shape is right.
+9.  ~~**The Action contract is defined but has never executed inside a
+    Run.**~~ Resolved in Phase 3. The contract now drives the real pipeline:
+    `Action.run()`, `Action.validate()` and `ActionResult` are exercised
+    through `POST /api/runs`, and `RunManifest` / `PreviewResponse` are
+    produced from real Runs rather than from synthetic round-trips. The
+    contract's shape held: no change to `base.py`, `registry.py` or
+    `schemas.py` was needed to build the pipeline on top of it.
 
-None of the above blocks Phase 3.
+**Added in Phase 3:**
+
+10. **Phase 2 was committed into the wrong directory; repaired here.**
+    Commit `90dd7e8` placed the backend Python package under `src/app/`
+    instead of `backend/app/`, and named `schemas.py` as `schema.py`. The
+    entire backend suite failed at collection (0 of 48 tests ran) and every
+    intra-package import was unresolvable — the cause of the reported
+    "Import ... could not be resolved" warnings. Repaired with `git mv` at the
+    start of this session; see the Phase 3 entry under **Completed**. Nothing
+    outstanding, but the earlier Phase 2 notes in this file describe a state
+    that did not exist on disk until the repair.
+
+11. **The upload limit is enforced after the request body has been received.**
+    Starlette's `max_part_size` bounds only non-file form fields, so the
+    250 MB limit is enforced while the runner copies each file into its Run
+    directory. Starlette spools file parts to disk rather than memory, so an
+    oversized upload cannot become a memory error, and the response is a clean
+    413 — but the bytes do reach the machine before being rejected. Enforcing
+    it earlier would mean rejecting on `Content-Length`, which would wrongly
+    reject a legitimate multi-file Action whose files are individually under
+    the limit but collectively over it. Revisit in Phase 7 if it matters.
+
+12. **A workbook whose second sheet holds even one cell is refused.**
+    `_select_data_worksheet` treats any sheet containing cells as a data
+    sheet, so a workbook with a data sheet plus a one-cell "Notes" tab raises
+    `AMBIGUOUS_WORKBOOK`. This is the conservative reading of build plan
+    section 17 ("Accuracy is more important than pretending to support every
+    workbook") and is what the section's own error message tells the user to
+    fix. A worksheet-selection UI is the intended later replacement.
+
+13. **`POST /api/runs` executes synchronously.** As build plan 3.12 requires
+    — no job queue. A large upload therefore holds the request open for the
+    duration of the Run. Phase 7G/7H will measure how long that actually is.
+
+14. **Performance has not been measured.** No benchmark fixtures were
+    generated and no timing was recorded beyond incidental `duration_ms`
+    values on tiny files. That is Phase 7G-7I, and must be done on the real
+    target machine.
+
+None of the above blocks Phase 4.
 
 ---
 
@@ -774,6 +1092,48 @@ None of the above blocks Phase 3.
     a comment — the static error _is_ the assertion. No error in application
     code was suppressed; pyright reports 0 errors.
 
+**Added in Phase 3:**
+
+13. **`backend/app/errors.py` is a new module not sketched in section 10.**
+    Build plan section 15 requires "Python exceptions internally … converted
+    into structured API errors at the boundary", and section 22 fixes the
+    error shape. Putting the taxonomy in one `app`-level module lets
+    `main.py` convert every internal failure with a single handler instead of
+    a long `except` chain spread across the API modules, and lets a service
+    raise the right error without importing FastAPI. It is shared vocabulary
+    rather than a service, so it sits beside `config.py` rather than under
+    `services/`.
+
+14. **Three test modules beyond the three section 10 sketches.** Section 10
+    lists `test_actions.py`, `test_parser.py` and `test_api.py`.
+    `test_parser.py` exists as named; the Run endpoints went into
+    `test_runs_api.py` rather than swelling `test_api.py`, and
+    `test_storage.py`, `test_runner.py`, `test_export.py` and
+    `test_preview.py` each cover one service. Section 15 asks for small files;
+    one 230-test module would not be that. `conftest.py` holds the shared
+    fixtures. `fixtures/` still does not exist — test data is generated in
+    process by `helpers.csv_bytes` / `helpers.xlsx_bytes`, so there are no
+    binary blobs in the repository; Phase 4 may add real fixture files.
+
+15. **XLSX is read through fastexcel directly, not `pl.read_excel`.**
+    `pl.read_excel` defaults to `drop_empty_rows=True` and
+    `drop_empty_cols=True`, which would silently discard data and violate
+    build plan section 3.3 ("never silently drop rows"). Calling
+    `ExcelReader.load_sheet(...).to_polars()` uses the same calamine engine
+    the build plan prefers, with no implicit row or column removal.
+
+16. **A submitted form field the Action does not declare produces a warning,
+    not an error.** The build plan does not say what to do with an unexpected
+    input slot. Ignoring it silently would hide a frontend/backend mismatch;
+    failing the Run would be harsher than the situation warrants. It is
+    recorded as an `UNEXPECTED_INPUT` warning in the manifest, and warnings
+    never fail a Run (section 6.2).
+
+17. **An over-large preview `limit` is refused, not clamped.** Build plan
+    section 21 sets the maximum at 500 without saying what to do above it.
+    A silently clamped page would misreport what the caller received, so
+    `limit=501` returns 400 with the maximum in `details`.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -785,29 +1145,41 @@ Next.js — the browser calls FastAPI directly, as §5 requires.
 
 ## Next Phase
 
-**Phase 3 — Upload, Parsing, Run Execution, Storage, and Export Pipeline**
+**Phase 4 — Proof Actions and Accuracy Tests**
 
-Not started. Scope, per build plan Phase 3:
+Not started. Scope, per build plan Phase 4:
 
-- 3.1–3.3 `services/storage.py` — Run UUID and directory creation, safe
-  generated filenames, atomic manifest writes, artifact lookup by logical ID,
-  `MAX_UPLOAD_BYTES` enforcement returning 413.
-- 3.4–3.6 `services/parser.py` — `parse_tabular_file(...)` for CSV and XLSX
-  via Polars/fastexcel, returning the dataframe plus parser engine, worksheet,
-  row/column counts and column names. Reject ambiguous multi-sheet workbooks
-  (§17).
-- 3.7 Generic validation: slot present, extension supported, parsed, non-empty,
-  required columns present — compared exactly.
-- 3.8–3.9 `services/runner.py` — the generic pipeline. Failed Runs keep their
-  directory and get a `status = failed` manifest.
-- 3.10–3.11 `services/export.py` — Parquet under `working/`, CSV and XLSX
-  under `exports/`; manifest written atomically at each state transition.
-- 3.12–3.16 `api/runs.py` — `POST /api/runs`, `GET /api/runs/{run_id}`,
-  the preview endpoint (default 100, max 500) and the two download endpoints.
-- Phase 3 testing list, per the build plan.
+- **4A Exact Duplicate Remover** — `backend/app/actions/exact_duplicate_remover.py`
+  per build plan section 26: one `source_file` slot, no required columns,
+  remove rows that are exact duplicates across every column, preserve the
+  first occurrence, preserve column order and retained-row order. Output
+  `deduplicated_data`. Metrics `input_rows`, `output_rows`,
+  `duplicates_removed`. No trimming, casing, normalisation or fuzzy matching.
+- **4B Product Master Builder** — `backend/app/actions/product_master_builder.py`
+  per build plan section 27: one `sales_file` slot requiring exactly `SKU`,
+  `Vintage`, `Supplier`, `Producer`, `Selection`, `Volume`; select those six
+  columns in that order, remove exact duplicate combinations, preserve
+  first-occurrence order. Output `product_master`. Metrics `input_rows`,
+  `output_rows`, `duplicate_product_rows_removed`. Accented text must remain
+  accented.
+- **4C Negative tests** — missing SKU, misspelled Supplier, empty file,
+  unsupported extension; each must fail clearly with no partial output.
+- **4D Excel round trip** — generate a known XLSX fixture, run each Action,
+  download the generated XLSX, read it back in test code and verify columns,
+  row count and values. Same for CSV.
+- **4E Extensibility check** — confirm no frontend file was modified and that
+  `GET /api/actions` exposes both definitions.
 
-The `example_passthrough` Action is sufficient to drive the Phase 3 pipeline
-end to end; build plan Phase 3 explicitly permits "a simple temporary Action"
-while the final Actions do not exist. The two real Actions remain Phase 4.
+Phase 4 must also **delete `backend/app/actions/example_passthrough.py`** and
+remove its import and registry entry, replacing it with the two real Actions
+(Known Issue 8). The Phase 3 tests do not depend on it: they build their own
+throwaway Actions through `tests/helpers.make_action` and the
+`registered_actions` fixture, so the swap will not break them.
 
-Do not begin Phase 4.
+The Phase 3 pipeline is what both Actions will run on. Adding each one should
+require only its module, a registry entry and tests — no change to
+`storage.py`, `parser.py`, `runner.py`, `export.py`, `preview.py`,
+`api/runs.py` or any frontend file. That expectation is the thing Phase 4
+tests.
+
+Do not begin Phase 5.

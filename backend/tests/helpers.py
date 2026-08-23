@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import csv
+import io
+from collections.abc import Iterable, Mapping, Sequence
 
 import polars as pl
+import xlsxwriter
 
 from app.actions.base import Action, ActionResult
 from app.models.schemas import ActionInput, ActionOutput
+from app.services.runner import PendingUpload
 
 
 def make_action(
@@ -47,3 +51,43 @@ def make_action(
             return ActionResult(outputs={"result": inputs["source_file"]})
 
     return _TestAction()
+
+
+# ---------------------------------------------------------------------------
+# Fixture data builders (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def csv_bytes(header: Sequence[str], rows: Iterable[Sequence[object]]) -> bytes:
+    """Build a small CSV payload from a header and rows."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+def xlsx_bytes(sheets: Mapping[str, Sequence[Sequence[object]]]) -> bytes:
+    """Build a workbook from ``{sheet name: rows}``, first row as the header.
+
+    A sheet mapped to an empty row list is created but left blank, which is how
+    the worksheet-ambiguity tests express "this sheet holds no data".
+    """
+    buffer = io.BytesIO()
+    workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+    for name, rows in sheets.items():
+        worksheet = workbook.add_worksheet(name)
+        for row_index, row in enumerate(rows):
+            worksheet.write_row(row_index, 0, row)
+    workbook.close()
+    return buffer.getvalue()
+
+
+def upload(filename: str, payload: bytes) -> PendingUpload:
+    """Build a :class:`PendingUpload` over in-memory bytes."""
+    return PendingUpload(filename=filename, stream=io.BytesIO(payload))
+
+
+def upload_file(filename: str, payload: bytes) -> tuple[str, io.BytesIO]:
+    """Build the ``(filename, stream)`` pair httpx expects for a file field."""
+    return (filename, io.BytesIO(payload))
