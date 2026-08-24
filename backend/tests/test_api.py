@@ -1,4 +1,4 @@
-"""HTTP surface tests (build plan Phase 2.6 and 2.7)."""
+"""HTTP surface tests (build plan Phase 2.6, 2.7 and 4E)."""
 
 from __future__ import annotations
 
@@ -191,3 +191,79 @@ def test_actions_endpoint_does_not_allow_an_unexpected_origin(client):
 
 def test_unknown_api_path_returns_404(client):
     assert client.get("/api/does-not-exist").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Both proof Actions are exposed (build plan Phase 4E)
+#
+# The frontend builds its Action selector and its upload slots from nothing but
+# this response, so what it contains is the whole contract between the two
+# proof Actions and the UI.
+# ---------------------------------------------------------------------------
+
+
+def test_get_actions_exposes_both_proof_actions(client):
+    payload = client.get("/api/actions").json()
+
+    assert [entry["id"] for entry in payload["actions"]] == [
+        "exact_duplicate_remover",
+        "product_master_builder",
+    ]
+
+
+def test_get_actions_describes_the_exact_duplicate_remover(client):
+    payload = client.get("/api/actions").json()
+    entry = next(
+        e for e in payload["actions"] if e["id"] == "exact_duplicate_remover"
+    )
+
+    assert entry["version"] == "1.0.0"
+    assert entry["name"] == "Exact Duplicate Remover"
+    (slot,) = entry["inputs"]
+    assert slot["id"] == "source_file"
+    assert slot["label"] == "Source File"
+    assert slot["required"] is True
+    assert slot["accepted_extensions"] == [".csv", ".xlsx"]
+    assert slot["required_columns"] == []
+    (output,) = entry["outputs"]
+    assert output["id"] == "deduplicated_data"
+    assert output["label"] == "Deduplicated Data"
+    assert output["formats"] == ["csv", "xlsx"]
+
+
+def test_get_actions_describes_the_product_master_builder(client):
+    payload = client.get("/api/actions").json()
+    entry = next(
+        e for e in payload["actions"] if e["id"] == "product_master_builder"
+    )
+
+    assert entry["version"] == "1.0.0"
+    assert entry["name"] == "Product Master Builder"
+    (slot,) = entry["inputs"]
+    assert slot["id"] == "sales_file"
+    assert slot["label"] == "Sales File"
+    assert slot["required"] is True
+    assert slot["accepted_extensions"] == [".csv", ".xlsx"]
+    # The six columns the UI must tell the user to supply, in output order.
+    assert slot["required_columns"] == [
+        "SKU",
+        "Vintage",
+        "Supplier",
+        "Producer",
+        "Selection",
+        "Volume",
+    ]
+    (output,) = entry["outputs"]
+    assert output["id"] == "product_master"
+    assert output["label"] == "Product Master"
+    assert output["formats"] == ["csv", "xlsx"]
+
+
+def test_the_two_actions_declare_different_input_slot_ids(client):
+    """The frontend renders slots from these IDs; it never hardcodes them."""
+    payload = client.get("/api/actions").json()
+    slot_ids = [
+        slot["id"] for entry in payload["actions"] for slot in entry["inputs"]
+    ]
+
+    assert slot_ids == ["source_file", "sales_file"]

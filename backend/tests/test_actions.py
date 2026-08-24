@@ -1,6 +1,8 @@
-"""Action contract and registry tests (build plan Phase 2.8)."""
+"""Action contract and registry tests (build plan Phase 2.8 and 4E)."""
 
 from __future__ import annotations
+
+import importlib
 
 import polars as pl
 import pytest
@@ -216,3 +218,56 @@ def test_an_action_cannot_be_instantiated_without_run():
 
     with pytest.raises(TypeError):
         Incomplete()  # pyright: ignore[reportAbstractUsage] — the error is the assertion
+
+# ---------------------------------------------------------------------------
+# The proof Actions are registered (build plan Phase 4E)
+#
+# These read the application registry deliberately: 4E's claim is about what
+# this application actually exposes, not about an isolated test registry.
+# ---------------------------------------------------------------------------
+
+
+def test_the_application_registers_both_proof_actions():
+    assert [action.id for action in registry_module.list_actions()] == [
+        "exact_duplicate_remover",
+        "product_master_builder",
+    ]
+
+
+def test_the_placeholder_action_is_no_longer_registered():
+    """The Phase 2 placeholder was replaced, not merely joined."""
+    assert registry_module.get_action("example_passthrough") is None
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("app.actions.example_passthrough")
+
+
+@pytest.mark.parametrize(
+    ("action_id", "version", "name", "slot_id", "output_id"),
+    [
+        (
+            "exact_duplicate_remover",
+            "1.0.0",
+            "Exact Duplicate Remover",
+            "source_file",
+            "deduplicated_data",
+        ),
+        (
+            "product_master_builder",
+            "1.0.0",
+            "Product Master Builder",
+            "sales_file",
+            "product_master",
+        ),
+    ],
+)
+def test_each_proof_action_is_reachable_by_its_id(
+    action_id: str, version: str, name: str, slot_id: str, output_id: str
+):
+    action = registry_module.get_action(action_id)
+
+    assert action is not None
+    definition = action.definition()
+    assert definition.version == version
+    assert definition.name == name
+    assert [slot.id for slot in definition.inputs] == [slot_id]
+    assert [output.id for output in definition.outputs] == [output_id]

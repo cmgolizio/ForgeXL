@@ -15,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from app.actions.base import Action
-from app.actions.example_passthrough import ExamplePassthroughAction
+from app.actions.exact_duplicate_remover import ExactDuplicateRemoverAction
+from app.actions.product_master_builder import ProductMasterBuilderAction
 
 
 class DuplicateActionIdError(ValueError):
@@ -75,11 +76,12 @@ class ActionRegistry:
         return action_id in self._actions
 
 
-#: The application's Actions. Register new Actions by adding them here.
+#: The application's Actions, in the order the Action selector shows them.
+#: Register a new Action by importing it above and adding it here.
 ACTION_REGISTRY = ActionRegistry(
     (
-        # Placeholder; replaced by the two proof Actions in Phase 4.
-        ExamplePassthroughAction(),
+        ExactDuplicateRemoverAction(),
+        ProductMasterBuilderAction(),
     )
 )
 
