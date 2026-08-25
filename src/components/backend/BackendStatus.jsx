@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+import { fetchHealth } from "@/lib/api";
 
 const PRESENTATION = {
   checking: { label: "Checking backend…", dot: "bg-zinc-400" },
@@ -25,12 +24,8 @@ export default function BackendStatus() {
 
     async function checkHealth() {
       try {
-        const response = await fetch(`${API_BASE_URL}/health`, {
-          signal: controller.signal,
-          cache: "no-store",
-        });
-        const payload = response.ok ? await response.json() : null;
-        setStatus(payload?.status === "ok" ? "connected" : "unavailable");
+        const healthy = await fetchHealth({ signal: controller.signal });
+        setStatus(healthy ? "connected" : "unavailable");
       } catch {
         if (controller.signal.aborted) return;
         setStatus("unavailable");

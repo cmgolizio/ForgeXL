@@ -1,9 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-08-23
+Last Updated: 2026-08-24
 Current Phase: None
-Last Completed Phase: Phase 3 — Upload, Parsing, Run Execution, Storage, and
-Export Pipeline
+Last Completed Phase: Phase 5 — Dynamic Frontend Action Runner
 
 This file is the durable cross-thread project state required by
 `docs/build-plan.md` §33. Every Phase must update it.
@@ -318,6 +317,137 @@ route list is unchanged (`/` and `/_not-found`).
 
 ---
 
+### Phase 4 — Proof Actions and Accuracy Tests
+
+**Recorded retroactively during the Phase 5 session.** Phase 4 was implemented
+and committed (`584fea3`, "added a couple premade 'example' actions and test
+files for them") but the session that did the work did not update this file, so
+the entry below records what the Phase 5 session **verified by execution**,
+not a narrative of how it was built. See **Known Issues** item 15.
+
+Verified present and passing at the start of Phase 5:
+
+- `backend/app/actions/exact_duplicate_remover.py` implements build plan
+  section 26: one `source_file` slot, no required columns,
+  `unique(keep="first", maintain_order=True)` across every column, metrics
+  `input_rows` / `output_rows` / `duplicates_removed`. No trimming, casing or
+  normalisation.
+- `backend/app/actions/product_master_builder.py` implements section 27: one
+  `sales_file` slot requiring exactly `SKU`, `Vintage`, `Supplier`,
+  `Producer`, `Selection`, `Volume`; selects those six in that fixed order,
+  removes duplicate combinations, metrics `input_rows` / `output_rows` /
+  `duplicate_product_rows_removed`.
+- `backend/app/actions/example_passthrough.py` is **gone**, and
+  `ACTION_REGISTRY` now holds exactly the two real Actions. Known Issue 8 is
+  resolved.
+- `backend/tests/fixtures/` exists, alongside `test_exact_duplicate_remover.py`,
+  `test_product_master_builder.py` and `test_action_round_trip.py`.
+- `cd backend && .venv/bin/python -m pytest` → **311 passed, 1 warning**
+  (Phase 3 left 231; Phase 4 added 80).
+- `GET /api/actions` returns both definitions with their input slots, required
+  columns and outputs (4E).
+- No frontend file had been modified: at the start of Phase 5 the only
+  frontend files were the Phase 1 set, and `npm run build` still listed only
+  `/` and `/_not-found`.
+
+---
+
+### Phase 5 — Dynamic Frontend Action Runner
+
+All ten sub-steps were implemented and verified. This is the first Phase to
+write frontend application code since Phase 1.
+
+**5.1 API utility.** `src/lib/api.js` is the only module in the frontend that
+knows a backend URL or an endpoint path. It exports `API_BASE_URL` (from
+`NEXT_PUBLIC_API_BASE_URL`, falling back to `http://127.0.0.1:8000`, with
+trailing slashes trimmed), `fetchActions()`, `createRun()`, `fetchHealth()` and
+the `ApiError` class. Every request goes from the browser straight to FastAPI;
+nothing is proxied through a Next.js Route Handler (build plan section 5).
+
+`src/components/backend/BackendStatus.jsx` was refactored to call
+`fetchHealth()` instead of holding its own copy of the base URL — it was the
+one place a backend URL was still duplicated. Its rendered behaviour is
+unchanged.
+
+`src/lib/formatters.js` holds the three pure display helpers the upload slot
+needs: `formatFileSize`, `fileExtension` (mirrors the backend's
+`extension_of`, so `../../evil.csv` yields `.csv`) and `joinWithOr` (phrases a
+list the same way the backend's own validation messages do).
+
+**5.2 Loading Actions.** `ActionRunner` requests `GET /api/actions` on mount
+with an `AbortController`, and renders three distinct outcomes: "Loading
+Actions…", an "Actions Unavailable" panel carrying the reason, or the populated
+interface.
+
+**5.3 Action selector.** `ActionSelector.jsx` renders a native `<select>`
+populated exclusively from the API response. Selecting an option stores the ID;
+the full Action metadata object is resolved from the loaded list and drives
+everything below it.
+
+**5.4 Action description.** `ActionDescription.jsx` shows name, description and
+`Version 1.0.0`. The Action ID is deliberately not displayed — it is an
+internal identifier, not something a user needs (build plan 5.4).
+
+**5.5 Dynamic input slots.** `ActionRunner` maps over `selectedAction.inputs`
+and renders one `FileUploadSlot` per entry. The slot component receives the
+input ID, label, description, `required` flag, `accepted_extensions` and
+`required_columns` and renders from those alone. **There is no branch on any
+Action ID anywhere in the frontend** — verified by grep and by the
+extensibility test below.
+
+**5.6 Drag-and-drop.** `FileUploadSlot.jsx` uses only native browser APIs: a
+visually-hidden `<input type="file">` paired with a `<label>` that carries the
+`onDragOver` / `onDrop` handlers, so clicking to browse, keyboard focus and
+dropping all work with no upload dependency. The chosen file's name, extension
+and formatted size are shown, with a **Remove** button; choosing another file
+replaces the current one. The file input's value is cleared after each change
+so the same file can be re-chosen after a removal.
+
+**5.7 Client-side preliminary validation.** Before submission the UI confirms
+an Action is selected, that every required slot holds a file, and that each
+file's extension is one that slot accepts. A rejected file is not stored and
+produces a per-slot message. This is convenience only — the backend re-checks
+all of it and stays authoritative (verified: the backend still returns 422
+`UNSUPPORTED_EXTENSION` when the same file is posted directly).
+
+**5.8 Run submission.** `createRun()` builds `FormData`, appends `action_id`,
+then appends each file under **the Action's own input slot ID**. Keys are never
+renamed in the frontend. Confirmed on disk: Runs submitted through the browser
+produced `inputs/source_file/source.csv` and `inputs/sales_file/source.xlsx`,
+and the manifests recorded `slot_id` `source_file` / `sales_file`.
+
+**5.9 Running state.** While a Run executes: the Action selector, every file
+input and the Remove buttons are disabled, and the Run button is disabled and
+reads "Processing…". A `useRef` guard blocks a second submission slipping
+through between the click and the re-render. **No progress percentage is
+displayed** — the real progress is unknown, so the indicator says
+"Processing…" rather than inventing a number (build plan 5.9).
+
+**5.10 Error display.** `ApiError` normalises the backend's error contract
+(section 22) into a list of issues: a single failure becomes one issue; a Run
+that failed several checks at once (`VALIDATION_FAILED` with
+`details.issues`) becomes one issue per check. `RunStatus.jsx` renders each
+issue's `message`, and lists `details.missing_columns` by name when present.
+Nothing is ever stringified blindly — `IssueColumns` renders only entries that
+are genuinely strings, so a differently-shaped `details` payload cannot become
+`[object Object]`. Tracebacks never arrive (the backend does not send them) and
+are never rendered.
+
+**Frontend state model (build plan section 30).** `ActionRunner` derives one
+of the seven named states — `loading_actions`, `idle`, `ready`, `running`,
+`success`, `validation_error`, `server_error` — and publishes it as
+`data-workbench-state` on its root element. A failed Run is classified as
+`validation_error` for the statuses the backend uses for a problem with the
+uploaded data (422, 413) and `server_error` otherwise, so a backend fault is
+never blamed on the user's file.
+
+**Run result presentation is deliberately minimal.** On success the UI confirms
+"Run Successful" and names the Action. Metrics, validation summary, the
+paginated preview, Run ID display, the export buttons and "Start New Run" are
+Phase 6 (build plan 6.1-6.9) and were **not** built.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -337,14 +467,34 @@ route list is unchanged (`/` and `/_not-found`).
 Frontend files:
 
     src/app/layout.jsx             root layout, project metadata
-    src/app/page.jsx               minimal Phase 1 page
+    src/app/page.jsx               header + BackendStatus + ActionRunner
     src/app/globals.css            Tailwind import + theme tokens
     src/app/favicon.ico
+    src/lib/api.js                 the ONLY module holding a backend URL
+    src/lib/formatters.js          formatFileSize / fileExtension / joinWithOr
     src/components/backend/BackendStatus.jsx
                                    client component, /health indicator
+    src/components/workbench/ActionRunner.jsx
+                                   "use client" — owns all workflow state
+    src/components/workbench/ActionSelector.jsx
+                                   <select> populated from GET /api/actions
+    src/components/workbench/ActionDescription.jsx
+                                   name, description, version
+    src/components/workbench/FileUploadSlot.jsx
+                                   one slot; click or drag-and-drop
+    src/components/workbench/RunButton.jsx
+                                   Run / Processing…, disabled-state rules
+    src/components/workbench/RunStatus.jsx
+                                   running / success / structured errors
     public/.gitkeep
 
-Unchanged by Phase 2. (The Phase 1 entry above recorded these as `.js` at
+`page.jsx` stays a server component; `ActionRunner` is the client boundary, so
+server-only and client-only code remain separated (build plan §15).
+`ActionDescription` and `RunStatus` are pure presentation and carry no
+`"use client"` directive of their own — they are pulled into the client bundle
+by their importer.
+
+(The Phase 1 entry above recorded the health indicator as `.js` at
 `src/components/BackendStatus.js`; the paths shown here are the actual
 repository state. Build plan §15 permits both `.js` and `.jsx`.)
 
@@ -459,11 +609,19 @@ FastAPI's own `/docs`, `/redoc` and `/openapi.json` are present by default;
 the OpenAPI schema now documents `ActionDefinition`, `ActionInput`,
 `ActionOutput` and `ActionListResponse`.
 
-Registered Actions (1):
+Registered Actions (2):
 
-    example_passthrough  0.1.0  "Example Passthrough (Placeholder)"
-      input  source_file       .csv .xlsx   no required columns
-      output passthrough_data  csv, xlsx
+    exact_duplicate_remover  1.0.0  "Exact Duplicate Remover"
+      input  source_file         .csv .xlsx   no required columns
+      output deduplicated_data   csv, xlsx
+
+    product_master_builder   1.0.0  "Product Master Builder"
+      input  sales_file          .csv .xlsx
+             required columns    SKU, Vintage, Supplier, Producer,
+                                 Selection, Volume
+      output product_master      csv, xlsx
+
+The Phase 2 placeholder `example_passthrough` was removed in Phase 4.
 
 ### Adding an Action (the architecture being proven)
 
@@ -492,14 +650,14 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | Path                    | Status                                                      |
 | ----------------------- | ----------------------------------------------------------- |
 | `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1) |
-| `src/components/`       | Exists (`backend/BackendStatus.jsx`)                        |
-| `lib/`                  | Missing — Phase 5.1 (`src/lib/api.js`)                      |
+| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)    |
+| `src/lib/`              | Exists (`api.js`, `formatters.js`) — added in Phase 5       |
 | `backend/app/`          | Exists (`main.py`, `config.py`)                             |
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                            |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, placeholder Action)       |
 | `backend/app/models/`   | Exists (`schemas.py`)                                       |
 | `backend/app/services/` | Exists (storage, parser, runner, export, preview)           |
-| `backend/tests/`        | Exists (9 test modules); `fixtures/` arrives in Phase 4     |
+| `backend/tests/`        | Exists (12 test modules and `fixtures/`)                    |
 | `data/runs/`            | Exists (`.gitkeep`; run artifacts git-ignored)              |
 | `scripts/`              | Exists (`dev-backend.sh`)                                   |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)              |
@@ -682,10 +840,130 @@ Action (`tests/helpers.make_action`), so they neither depend on nor mutate the
 application registry. Two tests do assert against the real one: that it holds
 at least one Action, and that its IDs are unique.
 
+### Phase 5 browser verification (real headless Chromium)
+
+Both servers were started with the real `npm run dev`; the browser drove the
+actual UI at `http://127.0.0.1:3000`. Playwright was installed **outside** the
+repository, in the session scratchpad, and launched against the pre-installed
+Chromium. Nothing was stubbed or mocked — every Run below hit the real backend
+and produced a real Run directory.
+
+**34/34 checks passed.**
+
+| Build plan | Check                                                            | Result                                                                        |
+| ---------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 5.1        | Every backend request goes browser -> `127.0.0.1:8000` directly  | pass — no request to a Next.js route                                          |
+| 5.2        | Selector populated from `GET /api/actions`                       | pass — `["Select Action","Exact Duplicate Remover","Product Master Builder"]` |
+| 5.3        | Options come from the API, not a hardcoded list                  | pass                                                                          |
+| 5.4        | Name + `Version 1.0.0` shown; internal ID not shown              | pass                                                                          |
+| 5.5        | Exact Duplicate Remover renders only `Source File`               | pass                                                                          |
+| 5.5        | Product Master Builder renders only `Sales File`                 | pass                                                                          |
+| 5.5        | Required columns rendered from metadata                          | pass — `SKU, Vintage, Supplier, Producer, Selection, Volume`                  |
+| 5.6        | Filename, extension and size shown                               | pass — `sales.csv · .csv · 162 B`                                             |
+| 5.6        | File can be removed before the Run                               | pass — state returns to `idle`                                                |
+| 5.6        | Drag-and-drop accepts a dropped file                             | pass — synthetic `DragEvent` with a `DataTransfer`                            |
+| 5.7        | Run disabled with no Action selected                             | pass                                                                          |
+| 5.7        | Run disabled with no file chosen                                 | pass                                                                          |
+| 5.7        | Unsupported extension refused client-side                        | pass — "Sales File must be .csv or .xlsx."                                    |
+| 5.7        | Run enabled only with Action + required file                     | pass                                                                          |
+| 5.8        | Run posted to `POST /api/runs`                                   | pass                                                                          |
+| 5.8        | Files arrive under the Action's own slot IDs                     | pass — `inputs/source_file/`, `inputs/sales_file/` on disk                    |
+| 5.9        | "Processing…" shown while running                                | pass                                                                          |
+| 5.9        | Action selector disabled while running                           | pass                                                                          |
+| 5.9        | No fake progress percentage                                      | pass — no `NN%` anywhere                                                      |
+| 5.9        | Six rapid clicks submitted exactly one Run                       | pass — 1 `POST /api/runs`                                                     |
+| 5.10       | Missing columns listed by name                                   | pass — Supplier, Producer, Selection, Volume                                  |
+| 5.10       | No `[object Object]` rendered                                    | pass                                                                          |
+| 5.10       | No stack trace rendered                                          | pass                                                                          |
+| §30        | `idle` -> `ready` -> `running` -> `success` / `validation_error` | pass — read from `data-workbench-state`                                       |
+| —          | XLSX upload runs through the same dynamic slot                   | pass                                                                          |
+| —          | Switching Action clears the previous Run and files               | pass                                                                          |
+| —          | A second Action runs without reloading the app                   | pass                                                                          |
+| —          | No uncaught page errors across the whole session                 | pass                                                                          |
+
+The 19 MB / 400,000-row CSV fixture was also run through the browser
+end-to-end and succeeded; it is what the duplicate-submission check ran
+against, so the button really was hammered while a Run was genuinely in
+flight. (No timings are recorded here — benchmarking is Phase 7G.)
+
+Backend log for the whole session: four `POST /api/runs` 200, one
+`POST /api/runs` 422, `GET /api/actions` 200, `GET /health` 200. No traceback,
+no 500, no unhandled exception.
+
+### Phase 5 extensibility acceptance test (build plan section 32)
+
+Build plan section 32 calls this "a critical acceptance test", so it was run
+against a real third Action rather than reasoned about.
+
+A temporary Action (`tmp_three_slot_probe`, version `9.9.9`) declaring **three**
+input slots — `current_sales` (required, `.csv`/`.xlsx`, requires column `SKU`),
+`historical_sales` (required, **`.csv` only**) and `assignments`
+(**optional**) — was registered in the backend. **Not one frontend file was
+touched.**
+
+**11/11 checks passed:**
+
+    New Action appears in the selector                        pass
+    Three declared inputs render three upload areas           pass
+    Three independent file inputs exist                       pass
+    Required slots labelled Required, optional one Optional   pass
+    Per-slot accepted extensions come from metadata           pass
+    Version 9.9.9 shown from metadata                         pass
+    Run disabled with no files                                pass
+    Run still disabled with 1 of 2 required slots filled      pass
+    Run enabled with both REQUIRED slots filled               pass
+      (the optional slot is correctly not waited on)
+    .xlsx refused for the .csv-only slot, .csv accepted       pass
+      ("Historical Sales must be .csv.")
+    No uncaught page errors                                   pass
+
+The probe Action and its registry entry were **removed afterwards**;
+`git checkout backend/app/actions/registry.py` restored the registry, and
+`git status` confirms the backend is byte-identical to its committed state. The
+registry again holds exactly `ExactDuplicateRemoverAction` and
+`ProductMasterBuilderAction`.
+
+This is the requirement build plan §3.2 describes as "extremely important" and
+§8.5 re-tests at handoff: adding an ordinary Action requires a backend module,
+a registry entry and tests — and no frontend change at all.
+
+### Frontend static checks (Phase 5)
+
+    npm run lint          ->  exit 0, no errors, no warnings
+    npm run build         ->  exit 0
+                              ✓ Compiled successfully in 509ms
+                              Routes: ○ /   ○ /_not-found  (both static)
+
+The route list is unchanged from Phase 3: Phase 5 added components and library
+modules, not routes. The page remains statically prerendered — the Action list
+is fetched in the browser at runtime, so no build-time backend call exists.
+
+### Backend suite (unchanged by Phase 5)
+
+    cd backend && .venv/bin/python -m pytest   ->  311 passed, 1 warning
+
+Re-run after the extensibility probe was removed: still 311 passed. Phase 5
+added no backend code and changed no backend file.
+
+### Run artifacts created during verification
+
+Runs created while verifying were confirmed on disk with the expected layout —
+
+    data/runs/<run-id>/
+      manifest.json
+      inputs/<slot-id>/source.csv        preserved upload, generated name
+      working/<output-id>.parquet
+      exports/<output-id>.csv
+      exports/<output-id>.xlsx
+
+— including a `status: failed` directory retained for the 422 validation
+failure. All of them were removed afterwards, leaving `data/runs/` holding only
+`.gitkeep`, as it was found.
+
 ### Frontend lint
 
     npm run lint          ->  exit 0, no errors, no warnings
-                              (re-run in Phase 3: still clean)
+                              (re-run in Phase 3 and Phase 5: still clean)
 
 ### Frontend production build
 
@@ -919,16 +1197,13 @@ them. The file was restored and re-verified clean.
     §6.2 names, so switching to `httpx2` is a dependency decision that belongs
     to Phase 7A rather than to Phase 2.
 
-8.  **`example_passthrough` is a placeholder and must be removed in Phase 4.**
-    Registered under build plan 2.5 so `GET /api/actions` could be verified
-    against real data. It is a working, deterministic Action (it returns its
-    input unchanged), not a broken stub, but it is not one of the two proof
-    Actions. Phase 4 must delete
-    `backend/app/actions/example_passthrough.py`, drop its import and its
-    entry from `ACTION_REGISTRY`, and register `exact_duplicate_remover` and
-    `product_master_builder` instead. Two tests assert only that the
-    application registry is non-empty with unique IDs, so they will keep
-    passing after the swap.
+8.  ~~**`example_passthrough` is a placeholder and must be removed in
+    Phase 4.**~~ Resolved in Phase 4 and re-verified in Phase 5.
+    `backend/app/actions/example_passthrough.py` no longer exists, its import
+    and registry entry are gone, and `ACTION_REGISTRY` holds exactly
+    `ExactDuplicateRemoverAction` and `ProductMasterBuilderAction`. The two
+    tests that assert only that the application registry is non-empty with
+    unique IDs still pass, as predicted.
 
 9.  ~~**The Action contract is defined but has never executed inside a
     Run.**~~ Resolved in Phase 3. The contract now drives the real pipeline:
@@ -977,7 +1252,54 @@ them. The file was restored and re-verified clean.
     values on tiny files. That is Phase 7G-7I, and must be done on the real
     target machine.
 
-None of the above blocks Phase 4.
+**Added in Phase 5:**
+
+15. **Phase 4 was implemented but never recorded in this file.** Commit
+    `584fea3` added both proof Actions, their fixtures and their tests, and
+    removed the placeholder Action, but the session that did it did not update
+    `docs/implementation-status.md` — the file still read
+    "Last Completed Phase: Phase 3" and "Phase 4 … Not started" at the start of
+    the Phase 5 session. Phase 5 verified the Phase 4 work by execution (311
+    tests passing, both definitions served by `GET /api/actions`, no frontend
+    modification) and wrote the retroactive entry under **Completed**. That
+    entry is a record of what was _verified_, not of how the work was done, and
+    it does not claim the Phase 4 sub-steps were re-executed. Nothing is
+    outstanding, but Phase 4's own testing narrative (4A-4E, and in particular
+    the accented-text and Excel round-trip assertions) is described only by the
+    tests themselves.
+
+16. **The Run result view is intentionally minimal.** On success the UI shows
+    only "Run Successful" and the Action name. Metrics, the validation summary,
+    output selection, the paginated preview, cell formatting, Run ID display,
+    the CSV/XLSX download buttons and "Start New Run" are all build plan
+    Phase 6 (6.1-6.9) and were deliberately not built — Phase 5's exit criteria
+    stop at "show success/error". A user running the app today therefore cannot
+    yet see or export their results from the browser, even though the backend
+    has already written every export to `data/runs/<run-id>/exports/`.
+
+17. **Client-side extension checking duplicates a backend rule.** Build plan
+    5.7 requires the convenience check, so the accepted-extension list is
+    evaluated in two places. The frontend copy is driven entirely by the
+    `accepted_extensions` the backend sent for that slot, so the two cannot
+    disagree about _policy_ — but `fileExtension()` in
+    `src/lib/formatters.js` is a second implementation of the backend's
+    `extension_of()`, and the two would have to be changed together if the rule
+    for deriving an extension from a filename ever changed. The backend remains
+    authoritative: a file that slips past the browser is still refused with 422.
+
+18. **`ActionRunner` holds all workflow state in one component.** Six `useState`
+    hooks plus a `useRef` guard, with no reducer, context or state library. At
+    Phase 5's size this is the simpler option and keeps the data flow readable
+    in one file. If Phase 6 adds output selection and preview paging on top, a
+    `useReducer` may become the clearer expression; that is a refactor to judge
+    then, not a defect now.
+
+19. **Two `/api/actions` requests per page load in development.** The same
+    React Strict Mode double-invocation already recorded as Known Issue 2 for
+    `/health`. Dev-only; the aborted first request is harmless and a production
+    build issues one.
+
+None of the above blocks Phase 6.
 
 ---
 
@@ -1134,52 +1456,111 @@ None of the above blocks Phase 4.
     A silently clamped page would misreport what the caller received, so
     `limit=501` returns 400 with the maximum in `details`.
 
+**Added in Phase 5:**
+
+18. **Frontend files live under `src/lib/` and `src/components/workbench/`.**
+    Build plan §10 sketches root-level `lib/api.js`, `lib/formatters.js` and a
+    flat `components/` directory. The `src/` prefix is the deviation already
+    recorded as item 1 and carried forward. Within `src/components/`, the six
+    Phase 5 components are grouped in a `workbench/` subdirectory, matching the
+    `backend/BackendStatus.jsx` grouping Phase 1 established, rather than being
+    scattered at the top level. File names are otherwise exactly those §10
+    lists. Layout only; no architectural effect.
+
+19. **An extra component, `ActionRunner.jsx`, is not in §10's list.** §10 names
+    the presentational components; something has to own the state that connects
+    them. Putting that in `ActionRunner` rather than in `page.jsx` keeps
+    `page.jsx` a server component, so the client boundary is one explicit file
+    instead of the whole page (build plan §15, "keep server-only and
+    client-only code separated"). It contains no Action-specific logic.
+
+20. **`ResultsSummary.js`, `DataPreview.js` and `ExportButtons.js` were not
+    created.** §10 lists them among the eventual components, but they implement
+    build plan Phase 6 (6.1, 6.4, 6.7), and Phase 5's exit criteria explicitly
+    defer result presentation: "Result preview/export refinement is Phase 6."
+    Creating empty or placeholder versions now would be scaffolding for a Phase
+    that has not been authorised.
+
+21. **`src/lib/formatters.js` holds three helpers, not a general formatting
+    library.** §10 lists the file; Phase 5 only needs file-size rendering,
+    extension extraction and list phrasing, so only those exist. Number and
+    duration formatting arrive when Phase 6 needs them.
+
+22. **The frontend has no automated test suite.** Build plan Phase 5 specifies
+    no frontend tests, and §37's definition of done requires "frontend lint
+    passes" and "frontend production build passes" rather than frontend unit
+    tests. Phase 5 was verified instead by driving the real UI in a real
+    browser against the real backend (34 checks, plus 11 extensibility checks).
+    Those scripts live in the session scratchpad, outside the repository, so
+    they are evidence rather than a committed regression suite — re-running
+    them in a later session means rewriting them. If frontend regressions
+    become a concern, adding a committed browser test is a Phase 7A decision.
+
+23. **`BackendStatus.jsx` was modified in Phase 5.** It is Phase 1 code, but
+    build plan 5.1 requires that backend URLs not be scattered across
+    components, and it held the only other copy of the base URL. It now calls
+    `fetchHealth()` from `src/lib/api.js`. Behaviour is unchanged; this is the
+    only pre-existing frontend file Phase 5 touched other than `page.jsx`.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
 cloud service, no AI functionality, no job queue, no TypeScript, no plugin
-loader, no dynamic execution from disk. Uploads are not proxied through
-Next.js — the browser calls FastAPI directly, as §5 requires.
+loader, no dynamic execution from disk, no heavyweight upload or component
+library. Uploads are not proxied through Next.js — the browser calls FastAPI
+directly, as §5 requires, which Phase 5 confirmed by watching the requests the
+real browser actually made.
+
+Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and
+native browser APIs (`fetch`, `FormData`, `File`, `DataTransfer`). `package.json`
+is unchanged.
 
 ---
 
 ## Next Phase
 
-**Phase 4 — Proof Actions and Accuracy Tests**
+**Phase 6 — Results, Preview, Audit Summary, and Export UX**
 
-Not started. Scope, per build plan Phase 4:
+Not started. Scope, per build plan Phase 6:
 
-- **4A Exact Duplicate Remover** — `backend/app/actions/exact_duplicate_remover.py`
-  per build plan section 26: one `source_file` slot, no required columns,
-  remove rows that are exact duplicates across every column, preserve the
-  first occurrence, preserve column order and retained-row order. Output
-  `deduplicated_data`. Metrics `input_rows`, `output_rows`,
-  `duplicates_removed`. No trimming, casing, normalisation or fuzzy matching.
-- **4B Product Master Builder** — `backend/app/actions/product_master_builder.py`
-  per build plan section 27: one `sales_file` slot requiring exactly `SKU`,
-  `Vintage`, `Supplier`, `Producer`, `Selection`, `Volume`; select those six
-  columns in that order, remove exact duplicate combinations, preserve
-  first-occurrence order. Output `product_master`. Metrics `input_rows`,
-  `output_rows`, `duplicate_product_rows_removed`. Accented text must remain
-  accented.
-- **4C Negative tests** — missing SKU, misspelled Supplier, empty file,
-  unsupported extension; each must fail clearly with no partial output.
-- **4D Excel round trip** — generate a known XLSX fixture, run each Action,
-  download the generated XLSX, read it back in test code and verify columns,
-  row count and values. Same for CSV.
-- **4E Extensibility check** — confirm no frontend file was modified and that
-  `GET /api/actions` exposes both definitions.
+- **6.1 Result summary** — after a successful Run show Action, Action version,
+  Run ID, input rows, output rows and execution time, plus whatever Action
+  metrics the manifest actually carries (e.g. `duplicates_removed`,
+  `duplicate_product_rows_removed`). Do not invent a metric the backend did not
+  report.
+- **6.2 Validation summary** — distinguish Passed / Warning / Failed clearly.
+  The absence of an error must not render as a warning. Note that the backend
+  already emits `UNEXPECTED_INPUT` warnings on otherwise successful Runs, so
+  the warning path is reachable and should be shown.
+- **6.3 Output selection** — the manifest's `outputs` is a list. Both current
+  Actions declare exactly one output, which should be selected automatically,
+  but the frontend data structures must not assume there can only ever be one.
+  No elaborate tabs yet.
+- **6.4 Preview** — `DataPreview` fetching
+  `GET /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=`, a plain
+  HTML table, Previous/Next, "Showing 1–100 of 1,247", navigation disabled at
+  the ends. Backend defaults are `limit=100`, maximum 500, and an over-large
+  limit returns 400 rather than being clamped.
+- **6.5 Cell display** — handle null, text, numbers, dates and long strings.
+  Null renders as `—`; the literal string `"null"` must NOT render as blank.
+  Preview rows arrive as positional lists aligned to `columns`, not objects.
+- **6.6 Horizontal data** — horizontal scrolling rather than crushed columns.
+- **6.7 Export buttons** — link to the backend
+  `/download/csv` and `/download/xlsx` endpoints. Do not rebuild the files in
+  the browser. The manifest's `outputs[].formats` says which are available.
+- **6.8 New Run** — a "Start New Run" that clears the Run result and the
+  selected files, with predictable behaviour about whether the Action is kept.
+- **6.9 Run ID visibility** — show it unobtrusively for filesystem correlation.
 
-Phase 4 must also **delete `backend/app/actions/example_passthrough.py`** and
-remove its import and registry entry, replacing it with the two real Actions
-(Known Issue 8). The Phase 3 tests do not depend on it: they build their own
-throwaway Actions through `tests/helpers.make_action` and the
-`registered_actions` fixture, so the swap will not break them.
+Everything Phase 6 needs already exists on the backend and is covered by tests:
+the preview and both download endpoints were built in Phase 3 (3.14-3.16) and
+have not been called from the browser yet. No backend change is expected.
 
-The Phase 3 pipeline is what both Actions will run on. Adding each one should
-require only its module, a registry entry and tests — no change to
-`storage.py`, `parser.py`, `runner.py`, `export.py`, `preview.py`,
-`api/runs.py` or any frontend file. That expectation is the thing Phase 4
-tests.
+The Phase 5 pieces Phase 6 will build on: `src/lib/api.js` is where the preview
+and download calls belong (nothing else may hold a backend URL);
+`ActionRunner` already holds the returned `RunManifest` in state, which carries
+`outputs`, `metrics`, `validation`, `duration_ms` and `run_id`; and `RunStatus`
+is where the success branch currently renders. `src/lib/formatters.js` is the
+place for the number and duration formatting 6.1 needs.
 
-Do not begin Phase 5.
+Do not begin Phase 7.
