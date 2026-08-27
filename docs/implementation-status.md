@@ -1,8 +1,17 @@
 # Implementation Status
 
-Last Updated: 2026-08-24
+Last Updated: 2026-08-27
 Current Phase: None
-Last Completed Phase: Phase 5 — Dynamic Frontend Action Runner
+Last Completed Phase: Phase 6A — Compatibility Audit and Contract Freeze
+
+> **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
+> ("changed build plan. Updated architecture"). Phase 6 is no longer
+> "Results, Preview, Audit Summary, and Export UX" numbered 6.1–6.9; it is now
+> **"Filesystem-Independent Runtime, Results, Export, and Testing"**, split
+> into subphases **6A–6I**. The older Phase 6 scope survives inside 6E
+> (results/preview/metrics/audit) and 6F (export). Entries written before that
+> revision, and Known Issue 16 in particular, refer to the superseded
+> numbering.
 
 This file is the durable cross-thread project state required by
 `docs/build-plan.md` §33. Every Phase must update it.
@@ -448,6 +457,93 @@ Phase 6 (build plan 6.1-6.9) and were **not** built.
 
 ---
 
+### Phase 6A — Compatibility Audit and Contract Freeze
+
+All six items of build plan "Phase 6A" were carried out. Phase 6A is
+**defensive**: it changed **no runtime behaviour**. Not one line of
+`backend/app/**` or `src/**` was modified. Two files were added — an audit
+document and a test module — and nothing else in the repository changed.
+
+**1. Repository audit.** Every search the phase prescribes was run across the
+whole repository (excluding `node_modules/`, `backend/.venv/`, `.git/`):
+`data/`, `runs/`, `uploads/`, `inputs/`, `working/`, `exports/`,
+`manifest.json`, `tmp/`, `temp/`, and `file_path` / `filepath` / `input_path` /
+`output_path` / `run_path` / `export_path` / `Path(` / `open(` / `.write_*` /
+`mkdir` / `unlink` / `os.*` / `is_file` / `FileResponse` / `pathlib`, plus the
+frontend networking search for `localhost:8000` / `127.0.0.1:8000`. Every hit
+was classified rather than assumed wrong, using five classes: **MIGRATE**,
+**RESHAPE**, **KEEP**, **TEST-COUPLED**, **UNTOUCHED**.
+
+**2. Filesystem dependencies by category.** All fifteen categories the build
+plan lists were examined. The result, in short: the filesystem is confined to
+four service modules (`storage.py`, `export.py`, `preview.py`, and the plumbing
+inside `runner.py`), the `Path`-typed edges of `parser.py`, and the download
+half of `api/runs.py`. `api/actions.py`, `actions/*`, `models/schemas.py`,
+`errors.py` and `main.py` have no request-path filesystem dependency at all.
+**No frontend file touches a server filesystem concept** — the frontend's
+Phase 6 work is the same-origin network change of 6G, not a filesystem change.
+
+**3. Public contracts identified and frozen.** Action IDs, versions, names,
+registration order, input-slot IDs, accepted extensions, required columns,
+output IDs/labels/formats, metric key names, the Action/registry contract, the
+seven HTTP routes, the field names of all thirteen Pydantic models, the full
+error-code → HTTP-status table, `RunStatus` values, `MANIFEST_SCHEMA_VERSION`,
+the preview limits, the Run ID convention and the frontend's `FormData`
+contract. Recorded in `docs/phase-6a-compatibility-audit.md` §4 and pinned by
+tests.
+
+**4. Path-coupled Actions: there are none.** Both registered Actions were
+inspected and classified **DataFrame-compatible**:
+
+| Action                    | Classification       |
+| ------------------------- | -------------------- |
+| `exact_duplicate_remover` | DataFrame-compatible |
+| `product_master_builder`  | DataFrame-compatible |
+
+Both declare `run(self, inputs: Mapping[str, pl.DataFrame]) -> ActionResult`,
+and neither module imports `os`, `io`, `pathlib`, an Excel engine or any
+`app.services.*` module, nor calls `open()`. Build plan **6D.2 ("refactor
+filesystem-coupled Actions") therefore has no work to do on the Actions
+themselves** — 6D is entirely about the runner, parser and export plumbing
+around them.
+
+**5. Tests protecting existing behaviour.** Added
+`backend/tests/test_contract_freeze.py` — **84 tests**, all passing. It is
+deliberately filesystem-independent (it never uses the `runs_dir` /
+`run_paths` fixtures, which disappear with the on-disk model), so it must keep
+passing unchanged through 6B–6I and is the regression signal for the whole
+migration. It covers the five areas the build plan names — Action registration,
+Action input validation, Action execution, deterministic output, error handling
+— plus the public HTTP/schema surface and the DataFrame-first classification of
+item 4. The 311 pre-existing tests were **preserved unchanged**; none was
+weakened, skipped or deleted.
+
+**6. No migration performed.** No abstraction was introduced, no in-memory
+upload path was scaffolded, no Run Store was created. Phase 6B was not begun.
+
+**Feasibility verified rather than assumed.** Because a failure here would be
+an architectural conflict to report rather than an implementation detail, the
+in-memory capabilities 6C/6F depend on were checked by execution against the
+pinned dependency versions:
+
+| Capability                                                        | Result                                                                 |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pl.read_csv(bytes)` / `pl.read_csv(BytesIO)`                     | works                                                                  |
+| `fastexcel.read_excel(bytes)`                                     | works                                                                  |
+| `fastexcel.read_excel(BytesIO)`                                   | **fails** — `InvalidParametersError: source must be a string or bytes` |
+| `openpyxl.load_workbook(BytesIO, read_only=True, data_only=True)` | works                                                                  |
+| `pl.DataFrame.write_csv(BytesIO)`                                 | works                                                                  |
+| `pl.DataFrame.write_excel(workbook=BytesIO)`                      | works                                                                  |
+
+Consequence for Phase 6C: the parser must hold the upload as `bytes` and pass
+`bytes` to fastexcel, wrapping in `io.BytesIO` only for the openpyxl fallback.
+**No architectural conflict exists and no dependency change is required.**
+
+**Deliverable.** `docs/phase-6a-compatibility-audit.md` — the full inventory,
+the contract freeze, the Action classification, and §7's explicit two-column
+migration list: which components need modification (with the subphase that
+touches each) and which completed Phase 0/1–5 components must remain untouched.
+
 ## Current Architecture
 
 ### Frontend
@@ -713,6 +809,106 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6A)
+
+Environment note: this session started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist. Both were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`), with no undocumented
+step required. That is an incidental clean-setup confirmation; the formal
+clean-setup test is Phase 8.1.
+
+    cd backend && .venv/bin/python -m pytest   ->  395 passed, 1 warning
+
+    Before Phase 6A                                311 passed
+    tests/test_contract_freeze.py (new)             84 passed
+
+    tests/test_storage.py            57  (unchanged)
+    tests/test_runs_api.py           46  (unchanged)
+    tests/test_product_master_builder.py 34  (unchanged)
+    tests/test_actions.py            30  (unchanged)
+    tests/test_runner.py             28  (unchanged)
+    tests/test_parser.py             26  (unchanged)
+    tests/test_exact_duplicate_remover.py 21  (unchanged)
+    tests/test_action_round_trip.py  17  (unchanged)
+    tests/test_preview.py            15  (unchanged)
+    tests/test_api.py                14  (unchanged)
+    tests/test_schemas.py            12  (unchanged)
+    tests/test_export.py             11  (unchanged)
+    tests/test_contract_freeze.py    84  (added by Phase 6A)
+
+No existing test was modified, weakened, skipped or deleted. The single warning
+is the third-party `StarletteDeprecationWarning` already recorded as Known
+Issue 7.
+
+**What the contract freeze pins** (`docs/phase-6a-compatibility-audit.md` §4):
+
+| Area (build plan 6A.5)  | Coverage                                                                                                                                     |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Action registration     | Frozen inventory and registration order; ID uniqueness; `get_action` misses on 5 near-match forms; duplicate-ID and blank-ID rejection       |
+| Action input validation | Slot IDs, labels, `required`, accepted extensions and required columns (exact tuple **and order**) for both Actions; metadata immutability   |
+| Action execution        | `run()` receives frames keyed by slot ID and returns one frame per declared output ID; exact metric key sets; instances hold no state        |
+| Deterministic output    | Repeat execution identical; input frame never mutated; accents, blanks, nulls and near-duplicates survive; first-occurrence and column order |
+| Error handling          | Full 15-row code → HTTP-status table; response body shape; single- vs multi-issue `RunValidationError`; no traceback in any rendered error   |
+| Public HTTP surface     | The 7-route inventory read from the generated OpenAPI schema; `/health`; `GET /api/actions` against the frozen table; CORS is not wildcard   |
+| Schema freeze           | Field names of all 13 models; `RunStatus` values; `MANIFEST_SCHEMA_VERSION == 1`; preview 100/500 and refuse-don't-clamp; 250 MB limit       |
+| DataFrame-first (6A.4)  | Both Action modules structurally free of filesystem imports and `open()`; each executes with `DATA_DIRECTORY` pointing nowhere               |
+
+**Control tests — the freeze was proved to actually catch regressions**, not
+merely to pass. Three deliberate breakages were introduced one at a time and
+each was reverted immediately afterwards:
+
+| Deliberate break                                          | Result                                                                                         |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `exact_duplicate_remover.version` `1.0.0` -> `1.0.1`      | 3 failures (`..._frozen_identity`, `..._declared_metadata`, `..._serves_the_frozen_inventory`) |
+| `import os` / `Path` / `open()` added to an Action module | 2 failures (`..._imports_a_filesystem_module`, `..._opens_or_executes_anything`)               |
+| `RunManifest.duration_ms` renamed to `elapsed_ms`         | 1 failure (`test_schema_field_names_are_frozen[RunManifest]`)                                  |
+
+`git status` after each revert confirmed the tree was byte-identical to its
+committed state.
+
+### Type checking (Phase 6A)
+
+    npx pyright   ->  39 files analyzed, 0 errors, 0 warnings, 0 informations
+
+Control test: appending `_control: int = "not an int"` to
+`tests/test_contract_freeze.py` reproduced a `reportAssignmentType` error at
+that line, confirming pyright is genuinely analysing the new module rather than
+skipping it. The line was removed and pyright re-verified clean.
+
+### Frontend static checks (Phase 6A)
+
+    npm run lint   ->  exit 0, no errors, no warnings
+    npm run build  ->  exit 0
+                       ✓ Compiled successfully in 5.3s
+                       Routes: ○ /   ○ /_not-found  (both static)
+
+Unchanged from Phase 5, as expected: Phase 6A wrote no frontend code.
+
+### Phase 6A end-to-end confirmation over real HTTP
+
+Run to confirm the audited runtime still behaves exactly as documented — i.e.
+that Phase 6A changed nothing. The backend was started with
+`FORGEXL_DATA_DIRECTORY` pointed at a scratch directory, so the repository's
+`data/runs/` was never written to.
+
+    GET  /health                     ->  {"status":"ok"}
+    GET  /api/actions                ->  200, both Actions
+    POST /api/runs                   ->  200, status "succeeded", duration_ms 50,
+                                         parser_engine "polars-csv",
+                                         input 3 rows -> output 2 rows
+    GET  .../preview?limit=5         ->  200, 2 rows, positional lists,
+                                         "Château Réal" intact
+    GET  .../download/csv            ->  200, accented values intact
+    POST /api/runs (unknown action)  ->  404
+    manifest path-leakage grep       ->  0 occurrences of /home/, /tmp/ or data/runs
+
+On-disk layout in the scratch directory was the documented one
+(`manifest.json`, `inputs/sales_file/source.csv`,
+`working/product_master.parquet`, `exports/product_master.{csv,xlsx}`) —
+i.e. the model Phase 6B–6F will replace. The backend was stopped afterwards,
+port 8000 confirmed free, and `data/runs/` still holds only `.gitkeep`.
 
 ### Backend test suite (Phase 3)
 
@@ -1299,7 +1495,52 @@ them. The file was restored and re-verified clean.
     `/health`. Dev-only; the aborted first request is harmless and a production
     build issues one.
 
-None of the above blocks Phase 6.
+**Added in Phase 6A:**
+
+20. **`InputMetadata.stored_filename` and `MANIFEST_SCHEMA_VERSION` need an
+    explicit decision in Phase 6B/6D.** `stored_filename` records the generated
+    on-disk name (`source.csv`) and nothing is stored on disk in V1. The
+    options are to drop the field — a manifest shape change, so
+    `MANIFEST_SCHEMA_VERSION` must be bumped from 1 — or to keep it as the
+    logical name of the in-memory input. The frontend does not read it today,
+    so either is safe for the UI. It must not be dropped silently: the freeze
+    test `test_schema_field_names_are_frozen[RunManifest]` will fail, which is
+    the point.
+
+21. **`FORGEXL_DATA_DIRECTORY` becomes a documented setting with no consumer.**
+    `.env.example` documents it and `config.DATA_DIRECTORY` / `RUNS_DIRECTORY`
+    derive from it. Once run state lives in memory, nothing reads either
+    constant. `.env.example` must be corrected in the same phase the constants
+    are removed (6I), or the file will document a setting that does nothing.
+
+22. **Roughly half the existing backend suite is coupled to the on-disk model
+    and will need rewriting during 6B–6H.** `test_storage.py` (57),
+    `test_runner.py` (28), `test_parser.py` (26), `test_preview.py` (15) and
+    `test_export.py` (11) assert directories, manifests on disk, stored uploads
+    or Parquet files; parts of `test_runs_api.py`, `test_action_round_trip.py`
+    and the two Action test modules do the same. That is expected work, not a
+    defect — but the rule is **rewrite them against the new runtime, never
+    delete or skip one to make the suite green**. `test_actions.py`,
+    `test_api.py`, `test_schemas.py` and the new `test_contract_freeze.py` are
+    already filesystem-free and must keep passing untouched throughout.
+
+23. **The build plan's Phase 6 was renumbered after Phase 5 was written.** See
+    the note at the top of this file. Known Issue 16 and the Phase 5 entry
+    refer to "build plan Phase 6 (6.1-6.9)", which no longer exists under that
+    numbering; that scope now lives in 6E and 6F. Nothing is wrong in the
+    codebase — only the cross-references in the older entries are stale, and
+    they are left as written rather than rewritten after the fact.
+
+24. **Phase 6 will supersede build plan section 28 (internal Parquet).**
+    Section 28 requires the preview to read `working/<output-id>.parquet`.
+    Phase 6E.2 requires the preview to be built from the result DataFrame and
+    explicitly forbids generating a temporary spreadsheet to read back. The
+    Phase 6 architectural rules state that they override any earlier build-plan
+    instruction that conflicts with them, so Parquet becomes unnecessary. This
+    is recorded because it is a real, deliberate reversal of an earlier
+    requirement, not an oversight.
+
+None of the above blocks Phase 6B.
 
 ---
 
@@ -1502,6 +1743,26 @@ None of the above blocks Phase 6.
     `fetchHealth()` from `src/lib/api.js`. Behaviour is unchanged; this is the
     only pre-existing frontend file Phase 5 touched other than `page.jsx`.
 
+**Added in Phase 6A:**
+
+24. **A new document, `docs/phase-6a-compatibility-audit.md`.** Build plan §10
+    sketches `docs/` as holding `build-plan.md` and
+    `implementation-status.md` only. Phase 6A's deliverable is explicitly
+    "documented filesystem dependency points ... identified public contracts
+    ... a clear list of components requiring migration", which is a reference
+    document, not a status update. Folding a 300-line dependency inventory
+    into this status file would bury it; keeping it separate lets 6I re-run the
+    audit against it directly (build plan 6I.2). This file links to it and
+    summarises its conclusions.
+
+25. **The contract-freeze tests live in a new module rather than being spread
+    across the existing ones.** Build plan §10 sketches three test modules and
+    the suite already has twelve (Deviation 14). `test_contract_freeze.py`
+    exists as one module because its defining property is that it is
+    filesystem-independent and must survive 6B–6I unchanged — a property that
+    only holds if the tests are kept together and away from the fixtures
+    (`runs_dir`, `run_paths`) that disappear with the on-disk model.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -1519,48 +1780,47 @@ is unchanged.
 
 ## Next Phase
 
-**Phase 6 — Results, Preview, Audit Summary, and Export UX**
+**Phase 6B — Introduce Runtime and Storage Abstractions**
 
-Not started. Scope, per build plan Phase 6:
+Not started. Nothing for it was scaffolded, stubbed or prepared during
+Phase 6A.
 
-- **6.1 Result summary** — after a successful Run show Action, Action version,
-  Run ID, input rows, output rows and execution time, plus whatever Action
-  metrics the manifest actually carries (e.g. `duplicates_removed`,
-  `duplicate_product_rows_removed`). Do not invent a metric the backend did not
-  report.
-- **6.2 Validation summary** — distinguish Passed / Warning / Failed clearly.
-  The absence of an error must not render as a warning. Note that the backend
-  already emits `UNEXPECTED_INPUT` warnings on otherwise successful Runs, so
-  the warning path is reachable and should be shown.
-- **6.3 Output selection** — the manifest's `outputs` is a list. Both current
-  Actions declare exactly one output, which should be selected automatically,
-  but the frontend data structures must not assume there can only ever be one.
-  No elaborate tabs yet.
-- **6.4 Preview** — `DataPreview` fetching
-  `GET /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=`, a plain
-  HTML table, Previous/Next, "Showing 1–100 of 1,247", navigation disabled at
-  the ends. Backend defaults are `limit=100`, maximum 500, and an over-large
-  limit returns 400 rather than being clamped.
-- **6.5 Cell display** — handle null, text, numbers, dates and long strings.
-  Null renders as `—`; the literal string `"null"` must NOT render as blank.
-  Preview rows arrive as positional lists aligned to `columns`, not objects.
-- **6.6 Horizontal data** — horizontal scrolling rather than crushed columns.
-- **6.7 Export buttons** — link to the backend
-  `/download/csv` and `/download/xlsx` endpoints. Do not rebuild the files in
-  the browser. The manifest's `outputs[].formats` says which are available.
-- **6.8 New Run** — a "Start New Run" that clears the Run result and the
-  selected files, with predictable behaviour about whether the Action is kept.
-- **6.9 Run ID visibility** — show it unobtrusively for filesystem correlation.
+Scope, per build plan "Phase 6B":
 
-Everything Phase 6 needs already exists on the backend and is covered by tests:
-the preview and both download endpoints were built in Phase 3 (3.14-3.16) and
-have not been called from the browser yet. No backend change is expected.
+- **6B.1 Logical Run model** — represent a run independently of any directory:
+  run ID, Action ID, Action version, status, created/updated timestamps, input
+  metadata, validation results, metrics, result metadata, preview metadata,
+  audit information, errors. No filesystem paths.
+- **6B.2 Run Store abstraction** — a narrow interface equivalent to
+  `create_run()` / `get_run()` / `update_run()` / `delete_run()` /
+  `list_runs()`.
+- **6B.3 `InMemoryRunStore`** — process memory for V1.
+- **6B.4** No PostgreSQL, SQLite, Redis, Supabase, S3 or migrations.
+- **6B.5** Business logic depends on the interface, not on the dictionary, so a
+  `PersistentRunStore` can arrive later without redesigning the Action Engine.
+- **6B.6** Explicit `delete_run(run_id)` releasing the run's runtime state.
+- **6B.7** Preserve the existing run-ID convention — `str(uuid.uuid4())`, from
+  `storage.new_run_id()`, validated by `storage.parse_run_id()`.
 
-The Phase 5 pieces Phase 6 will build on: `src/lib/api.js` is where the preview
-and download calls belong (nothing else may hold a backend URL);
-`ActionRunner` already holds the returned `RunManifest` in state, which carries
-`outputs`, `metrics`, `validation`, `duration_ms` and `run_id`; and `RunStatus`
-is where the success branch currently renders. `src/lib/formatters.js` is the
-place for the number and duration formatting 6.1 needs.
+**What Phase 6A established for it** (full detail in
+`docs/phase-6a-compatibility-audit.md`, especially §7):
 
-Do not begin Phase 7.
+- The Run Store replaces `services/storage.py`'s `RunPaths`, `create_run`,
+  `run_paths`, `runs_directory`, `run_exists`, `write_manifest` and
+  `read_manifest`. Keep `new_run_id`, `parse_run_id`, `extension_of`,
+  `display_filename` and `_human_size` — they are pure and still correct.
+- `services/runner.py`'s stage ordering, validation logic and failure contract
+  are sound and path-independent; only the plumbing (`storage.create_run()` at
+  L100, `storage.write_manifest` at L109/L141/L349) moves onto the Run Store.
+- Both registered Actions are DataFrame-compatible and need **no change**.
+  `actions/base.py`, `actions/registry.py`, `api/actions.py` and `errors.py`
+  need no change either.
+- `models/schemas.py` needs one decision, not a rewrite: what becomes of
+  `InputMetadata.stored_filename` (Known Issue 20).
+- `backend/tests/test_contract_freeze.py` is the regression signal. It must
+  keep passing **unchanged** through 6B. If it fails, a public contract broke.
+- `tests/conftest.py`'s `runs_dir` / `run_paths` fixtures disappear with the
+  on-disk model; `tests/helpers.py`'s `csv_bytes` / `xlsx_bytes` already build
+  fixtures in memory and need no change.
+
+Do not begin Phase 6C.
