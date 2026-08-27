@@ -1,4 +1,4 @@
-```md
+````md
 # Local Data Workbench — Proof of Concept Build Plan
 
 ## Document Purpose
@@ -2977,196 +2977,1355 @@ Do not begin Phase 6.
 
 ---
 
-# ============================================================
-
-# PHASE 6
-
-# Results, Preview, Audit Summary, and Export UX
-
-# ============================================================
+# Phase 6 — Filesystem-Independent Runtime, Results, Export, and Testing
 
 ## Purpose
 
-Make successful Runs useful to a normal user.
+Phase 6 changes ForgeXL's runtime architecture so that normal spreadsheet processing does **not depend on the development machine's persistent filesystem**.
 
-## Difficulty
+This architectural change must be integrated without unnecessarily rebuilding or rewriting work completed in Phases 0/1–5.
 
-Moderate.
+The existing ForgeXL architecture remains conceptually:
 
-## Estimated Effort
+```text
+Next.js frontend
+        ↓
+FastAPI backend
+        ↓
+Action Registry
+        ↓
+Polars-based deterministic Actions
+```
+````
 
-2–4 hours.
+Phase 6 changes how files and run state move through that system.
 
----
+The new canonical V1 architecture is:
 
-## 6.1 Result Summary
+```text
+Browser
+    ↓
+same-origin /forge-api request
+    ↓
+Next.js proxy/rewrite
+    ↓
+FastAPI
+    ↓
+uploaded bytes in memory
+    ↓
+CSV/XLSX parser
+    ↓
+Polars DataFrame(s)
+    ↓
+existing Action Registry
+    ↓
+existing deterministic Action
+    ↓
+result DataFrame(s)
+    ↓
+preview / metrics / audit data
+    ↓
+in-memory CSV/XLSX export
+    ↓
+HTTP download
+```
 
-After successful Run show:
-
-    Action
-    Action Version
-    Run ID
-    Input Rows
-    Output Rows
-    Execution Time
-
-Where Action metrics exist, display them.
-
-Example:
-
-    Duplicate Rows Removed: 238
-
-Do not invent metrics the backend did not provide.
-
----
-
-## 6.2 Validation Summary
-
-Clearly distinguish:
-
-    Passed
-
-    Warning
-
-    Failed
-
-The absence of an error should not be rendered as a warning.
-
----
-
-## 6.3 Output Selection
-
-The architecture must support multiple outputs.
-
-Even though current Actions produce one output each, frontend data structures should not assume there can only ever be one.
-
-If exactly one exists:
-
-select it automatically.
-
-If several exist later:
-
-allow output selection.
-
-Do not build unnecessary elaborate tabs yet.
+Persistent server-side copies of uploaded spreadsheets, intermediate spreadsheets, and generated exports are **not required for V1**.
 
 ---
 
-## 6.4 Preview
+# Architectural Rules Introduced by Phase 6
+
+These rules override any earlier build-plan instruction that directly conflicts with them.
+
+1. Do not require uploaded spreadsheets to be permanently written to disk.
+
+2. Do not require intermediate Action results to be written to disk.
+
+3. Do not require exported CSV/XLSX files to be written to disk before download.
+
+4. The core Action Engine must operate on parsed tabular data rather than filesystem paths.
+
+5. Existing Action definitions, Action IDs, Action versions, schemas, named input slots, validation rules, and deterministic transformation behavior must be preserved wherever possible.
+
+6. Do not rewrite functioning Phase 0/1–5 functionality solely to conform to a new naming convention.
+
+7. The browser must never need to know the FastAPI address or port.
+
+8. Frontend code must not hard-code:
+
+```text
+http://localhost:8000
+```
+
+or:
+
+```text
+http://127.0.0.1:8000
+```
+
+9. Browser requests to ForgeXL's backend must use a same-origin namespace:
+
+```text
+/forge-api/*
+```
+
+10. Next.js will proxy/rewrite those requests internally to FastAPI.
+
+11. FastAPI should remain bound to the development machine rather than being directly exposed to other LAN devices.
+
+12. The Next.js development server may be exposed to the local network so ForgeXL can be tested from a second laptop using only a web browser.
+
+13. The second laptop must require no development environment.
+
+14. Run state may be stored in memory for V1.
+
+15. Restarting the FastAPI development server may clear V1 run history.
+
+16. No database should be introduced solely to solve this problem.
+
+17. Do not introduce Redis, PostgreSQL, SQLite, Supabase, S3, or other persistent infrastructure during this phase.
+
+18. Architecture should leave room for persistent storage later without requiring the Action Engine to be redesigned.
+
+19. Automated tests must be capable of testing spreadsheet processing without an OS file picker.
+
+20. Existing Phase 6 requirements involving results, preview, metrics, audit information, and export must still be implemented.
+
+---
+
+# Phase 6A — Compatibility Audit and Contract Freeze
+
+## Goal
+
+Determine exactly where the existing Phase 0/1–5 implementation depends on filesystem paths before changing runtime behavior.
+
+This phase exists specifically to prevent the architectural update from damaging already-completed work.
+
+## Required Work
+
+### 1. Audit the existing repository
+
+Search for filesystem-dependent behavior involving:
+
+```text
+data/
+runs/
+uploads/
+inputs/
+working/
+exports/
+manifest.json
+tmp/
+temp/
+```
+
+Also search for code using concepts such as:
+
+```text
+file_path
+filepath
+input_path
+output_path
+run_path
+export_path
+Path(...)
+open(...)
+write(...)
+```
+
+Do not assume every occurrence is wrong.
+
+Classify each relevant occurrence.
+
+### 2. Identify filesystem dependencies in these categories
+
+Determine whether filesystem paths are currently used by:
+
+- FastAPI upload endpoints
+- run creation
+- run metadata
+- Action execution
+- Action validation
+- CSV parsing
+- XLSX parsing
+- preview generation
+- result generation
+- manifest generation
+- export generation
+- API responses
+- frontend state
+- frontend API calls
+- automated tests
+
+### 3. Identify existing public contracts
+
+Before modifying implementation details, identify what existing Phase 0/1–5 code expects.
+
+Examples include:
+
+```text
+Action IDs
+Action Registry APIs
+input-slot names
+Action configuration schemas
+validation response shapes
+run IDs
+backend endpoint shapes
+frontend response objects
+Action result structures
+```
+
+These contracts should be preserved unless changing one is genuinely necessary.
+
+### 4. Explicitly identify path-coupled Actions
+
+Inspect every currently registered Action.
+
+Classify each Action as either:
+
+```text
+DataFrame-compatible
+```
+
+or:
+
+```text
+filesystem-coupled
+```
+
+A filesystem-coupled Action is one that directly opens or saves a file rather than receiving and returning tabular data.
+
+### 5. Protect existing behavior with tests
+
+Before refactoring a functioning subsystem, add or preserve enough automated tests to establish its current expected behavior.
+
+Focus especially on:
+
+- Action registration
+- Action input validation
+- Action execution
+- deterministic output
+- error handling
+
+### 6. Do not perform the full architecture migration yet
+
+Phase 6A is primarily defensive.
+
+Small enabling refactors are allowed, but do not implement the complete in-memory upload system during this phase.
+
+## Deliverable
+
+At the end of Phase 6A, the codebase should have:
+
+- documented filesystem dependency points
+- identified public contracts
+- identified filesystem-coupled Actions
+- tests protecting important existing behavior
+- a clear list of components requiring migration
+
+## Completion Criteria
+
+Phase 6A is complete only when the code bot can state exactly which existing components need modification and which completed Phase 0/1–5 components can remain untouched.
+
+Stop after Phase 6A.
+
+---
+
+# Phase 6B — Introduce Runtime and Storage Abstractions
+
+## Goal
+
+Separate the concept of a ForgeXL run from the place where its runtime state happens to be stored.
+
+The Action Engine must not care whether runtime state eventually lives:
+
+- in memory
+- on disk
+- in a database
+- in object storage
+
+V1 will use memory.
+
+## Required Work
+
+### 1. Create a logical Run model
+
+Represent a ForgeXL run independently from filesystem directories.
+
+Include applicable metadata such as:
+
+```text
+run ID
+Action ID
+Action version
+status
+created timestamp
+updated timestamp
+input metadata
+validation results
+Action metrics
+result metadata
+preview metadata
+audit information
+errors
+```
+
+Do not include meaningless filesystem paths.
+
+### 2. Create a Run Store abstraction
+
+Create a narrow runtime-state interface conceptually equivalent to:
+
+```text
+create_run()
+get_run()
+update_run()
+delete_run()
+list_runs()
+```
+
+Exact naming may follow established project conventions.
+
+### 3. Implement InMemoryRunStore
 
 Create:
 
-    DataPreview.js
+```text
+InMemoryRunStore
+```
 
-Fetch:
+or the project's equivalent.
 
-    offset=0
-    limit=100
+Use process memory for V1.
 
-Render standard HTML table.
+### 4. Do not introduce persistent infrastructure
+
+Do not add:
+
+```text
+PostgreSQL
+SQLite
+Redis
+Supabase
+S3
+database migrations
+```
+
+### 5. Make future replacement possible
+
+Business logic should depend on the Run Store interface rather than directly manipulating the in-memory dictionary.
+
+This allows a future implementation such as:
+
+```text
+PersistentRunStore
+```
+
+without rewriting the Action Engine.
+
+### 6. Add explicit run deletion
+
+Support removing a run and releasing its associated runtime state.
+
+Conceptually:
+
+```text
+delete_run(run_id)
+```
+
+### 7. Preserve existing run IDs
+
+If ForgeXL already has a functioning run-ID convention, preserve it unless there is a concrete technical reason not to.
+
+## Completion Criteria
+
+Verify:
+
+- runs can be created
+- runs can be retrieved
+- runs can be updated
+- runs can be deleted
+- Action Registry still works
+- existing Actions still register
+- no database was added
+- no unrelated Phase 0/1–5 behavior broke
+
+Stop after Phase 6B.
+
+---
+
+# Phase 6C — In-Memory Upload and Spreadsheet Parsing
+
+## Goal
+
+Allow actual CSV/XLSX uploads to reach FastAPI and become DataFrames without creating permanent server-side upload files.
+
+## Required Work
+
+### 1. Preserve named Action input slots
+
+If an Action expects inputs such as:
+
+```text
+sales_data
+product_master
+customer_map
+```
+
+uploaded files must remain associated with those exact logical input slots.
+
+### 2. Receive uploads using FastAPI
+
+Accept uploaded files as multipart form data using the existing backend architecture.
+
+### 3. Read upload content into memory
+
+The desired flow is:
+
+```text
+browser upload
+    ↓
+FastAPI UploadFile
+    ↓
+bytes
+    ↓
+memory buffer
+```
+
+Do not use:
+
+```text
+browser upload
+    ↓
+save file permanently
+    ↓
+reopen saved file
+```
+
+### 4. Validate basic upload properties
+
+Validate:
+
+- required file exists
+- supported extension
+- file is not empty
+- file size does not exceed configured limit
+- required number of Action inputs were supplied
+
+### 5. Do not trust MIME type alone
+
+Browser-provided metadata may assist validation, but successful parsing determines whether a spreadsheet is actually usable.
+
+### 6. Parse CSV from memory
 
 Support:
 
-    Previous
-    Next
+```text
+CSV bytes
+    ↓
+parser
+    ↓
+Polars DataFrame
+```
 
-Display:
+without requiring a permanent local CSV file.
 
-    Showing 1–100 of 1,247
+### 7. Parse XLSX from memory
 
-Disable impossible navigation.
+Support:
+
+```text
+XLSX bytes
+    ↓
+file-like memory buffer
+    ↓
+XLSX parser
+    ↓
+tabular representation
+    ↓
+Polars DataFrame
+```
+
+Do not write the workbook to ForgeXL's filesystem simply to reopen it.
+
+### 8. Preserve useful input metadata
+
+Store metadata such as:
+
+```text
+original filename
+input slot
+extension
+byte size
+worksheet information
+row count
+column count
+column names
+parser information
+```
+
+### 9. Build understandable errors
+
+Distinguish between errors such as:
+
+```text
+Missing required input
+Unsupported format
+Empty file
+Unreadable CSV
+Unreadable XLSX
+Malformed workbook
+Expected worksheet missing
+File exceeds upload limit
+```
+
+Do not expose raw stack traces to users.
+
+## Completion Criteria
+
+Automated tests must successfully perform:
+
+```text
+generated CSV bytes
+→ upload
+→ parse
+→ DataFrame
+```
+
+and:
+
+```text
+generated XLSX bytes
+→ upload
+→ parse
+→ DataFrame
+```
+
+Also test invalid and empty files.
+
+No OS file picker should be required for these tests.
+
+Stop after Phase 6C.
+
+---
+
+# Phase 6D — Convert Action Execution to DataFrame-First Processing
+
+## Goal
+
+Make the deterministic Action Engine consume parsed DataFrames instead of server filesystem locations.
+
+This is the most important separation-of-concerns change in Phase 6.
+
+## Required Work
+
+### 1. Establish the processing boundary
+
+The core Action lifecycle should become:
+
+```text
+named uploaded inputs
+        ↓
+parser
+        ↓
+named DataFrame(s)
+        ↓
+Action Registry
+        ↓
+Action
+        ↓
+result DataFrame(s)
+```
+
+### 2. Refactor filesystem-coupled Actions
+
+Any Action identified in Phase 6A as filesystem-coupled must be converted.
+
+Avoid:
+
+```python
+action.run("/some/path/file.xlsx")
+```
+
+Prefer conceptually:
+
+```python
+action.run(inputs)
+```
+
+where `inputs` contains parsed named DataFrames.
+
+### 3. Keep transformation logic inside Actions
+
+Do not move Action-specific transformations into:
+
+- React
+- upload handlers
+- FastAPI routes
+- parser utilities
+- export utilities
+
+Those layers orchestrate data movement.
+
+Actions transform data.
+
+### 4. Preserve Action Registry behavior
+
+The architectural migration must not unnecessarily change:
+
+```text
+Action IDs
+Action versions
+Action discovery
+Action schemas
+Action configuration
+Action validation
+```
+
+### 5. Support one or more result tables
+
+Design the result contract so an Action may return:
+
+```text
+primary result
+```
+
+and optionally:
+
+```text
+secondary results
+```
+
+Do not require multiple results when an Action only needs one.
+
+### 6. Track run lifecycle status
+
+Use clear status states.
+
+For example:
+
+```text
+created
+validating
+ready
+running
+completed
+failed
+```
+
+Use existing equivalent status names if already established.
+
+### 7. Keep intermediate processing ephemeral
+
+Temporary transformation state should generally remain as:
+
+```text
+DataFrames
+Python objects
+metadata
+```
+
+rather than intermediary spreadsheet files.
+
+### 8. Clean up failed runs correctly
+
+A failed Action must:
+
+- mark the run failed
+- retain a usable error description
+- avoid leaving a partially valid result
+- allow memory associated with abandoned processing to be released
+
+## Completion Criteria
+
+At least one real registered ForgeXL Action must successfully execute through:
+
+```text
+upload bytes
+→ parse
+→ validate
+→ Action
+→ result DataFrame
+```
+
+with no required:
+
+```text
+inputs/
+working/
+exports/
+```
+
+directory.
+
+Its output must match the pre-refactor deterministic output.
+
+Stop after Phase 6D.
 
 ---
 
-## 6.5 Cell Display
+# Phase 6E — Results, Preview, Metrics, and Audit Data
 
-Handle:
+## Goal
 
-- null
-- text
-- numbers
-- dates
-- long strings
+Implement the originally planned Phase 6 results functionality using the new DataFrame-first architecture.
 
-Null should display clearly but unobtrusively, such as:
+## Required Work
 
-    —
+### 1. Build result metadata
 
-Do not turn actual text `"null"` into a blank.
+After successful execution, calculate and store applicable information such as:
+
+```text
+input row count
+output row count
+affected row count
+columns added
+columns removed
+validation warnings
+Action-specific metrics
+result schema
+available result tables
+```
+
+### 2. Build preview data directly from results
+
+Preview generation should use the result DataFrame.
+
+Do not generate a temporary spreadsheet merely to read it back for preview.
+
+Conceptually:
+
+```text
+Result DataFrame
+    ↓
+preview rows
+    ↓
+JSON
+    ↓
+frontend
+```
+
+### 3. Limit preview payload size
+
+Do not send an entire large spreadsheet to the browser merely to display a preview.
+
+Return a reasonable preview subset plus metadata describing the complete result.
+
+### 4. Preserve useful schema information
+
+Return appropriate column metadata so the frontend can accurately render values.
+
+### 5. Build the audit summary
+
+The run should explain what happened.
+
+Where supported by the Action, include information such as:
+
+```text
+Action executed
+inputs used
+rows received
+rows returned
+rows affected
+validation warnings
+Action metrics
+execution status
+```
+
+### 6. Keep audit data separate from transformation data
+
+Audit metadata should not be mixed into the user's result table unless an Action explicitly creates those columns.
+
+### 7. Connect the existing frontend
+
+Use the frontend architecture already built in earlier phases.
+
+Do not rebuild functioning components unnecessarily.
+
+Adapt API integration only where the runtime contract changed.
+
+## Completion Criteria
+
+A completed run must display:
+
+- successful/failed status
+- result metrics
+- preview
+- applicable validation warnings
+- audit summary
+
+The UI must not depend on a local server-side result file.
+
+Stop after Phase 6E.
 
 ---
 
-## 6.6 Horizontal Data
+# Phase 6F — In-Memory CSV and XLSX Export
 
-Allow horizontal scrolling.
+## Goal
 
-Do not force dozens of columns into microscopic widths.
+Allow users to download ForgeXL results without the backend first writing those exports to persistent local storage.
+
+## Required Work
+
+### 1. Generate CSV from the result DataFrame
+
+Conceptually:
+
+```text
+Result DataFrame
+    ↓
+CSV serialization
+    ↓
+bytes
+    ↓
+HTTP response
+```
+
+### 2. Generate XLSX in memory
+
+Conceptually:
+
+```text
+Result DataFrame
+    ↓
+XLSX writer
+    ↓
+in-memory binary buffer
+    ↓
+HTTP response
+```
+
+### 3. Maintain Excel compatibility
+
+Generated XLSX files must open normally in Microsoft Excel.
+
+Preserve:
+
+- headers
+- column ordering
+- sensible cell values
+- worksheet structure
+- valid workbook format
+
+### 4. Support multiple result tables
+
+If an Action returns multiple tables, XLSX export should support writing them to separate worksheets when appropriate.
+
+### 5. Use sensible worksheet names
+
+Worksheet names must be:
+
+- understandable
+- valid for Excel
+- collision-safe
+
+### 6. Return correct download information
+
+Send appropriate:
+
+```text
+Content-Type
+Content-Disposition
+filename
+```
+
+metadata.
+
+Use a predictable ForgeXL filename convention.
+
+For example:
+
+```text
+forgexl-<action>-<timestamp>.xlsx
+```
+
+### 7. Do not retain exports unnecessarily
+
+Prefer:
+
+```text
+result DataFrame
+    ↓
+generate requested export
+    ↓
+send export
+    ↓
+release export buffer
+```
+
+rather than permanently retaining large duplicate export buffers.
+
+### 8. Never expose server filesystem information
+
+API responses must not contain local paths such as:
+
+```text
+/Users/...
+data/runs/...
+/tmp/...
+```
+
+## Completion Criteria
+
+Automated tests must:
+
+1. execute an Action
+2. request CSV
+3. read returned CSV bytes
+4. verify expected content
+5. request XLSX
+6. reopen returned XLSX from memory
+7. verify worksheet names
+8. verify headers
+9. verify representative values
+
+Stop after Phase 6F.
 
 ---
 
-## 6.7 Export Buttons
+# Phase 6G — Same-Origin Next.js Proxy and LAN Testing
 
-Create:
+## Goal
 
-    Download CSV
-    Download Excel
+Allow ForgeXL running on the development machine to be fully tested from another laptop using only a browser.
 
-Use backend download endpoints.
+The second laptop must handle:
 
-Do not reconstruct the files client-side.
+- actual file selection
+- drag-and-drop
+- browser uploads
+- browser downloads
+- opening exported workbooks in Excel
+
+without becoming a development machine.
+
+## Target Architecture
+
+```text
+SECOND LAPTOP
+
+Browser
+    │
+    │ http://<development-machine>:3000
+    │
+    ▼
+
+DEVELOPMENT MACHINE
+
+Next.js
+:3000
+    │
+    │ /forge-api/*
+    ▼
+FastAPI
+127.0.0.1:8000
+    │
+    ▼
+ForgeXL Action Engine
+```
+
+## Required Work
+
+### 1. Remove browser-side FastAPI URLs
+
+Search frontend code for:
+
+```text
+localhost:8000
+127.0.0.1:8000
+```
+
+Browser-facing requests must not use them.
+
+### 2. Create the same-origin namespace
+
+Frontend requests should use paths such as:
+
+```text
+/forge-api/...
+```
+
+### 3. Configure a Next.js rewrite/proxy
+
+Configure Next.js so:
+
+```text
+/forge-api/<path>
+```
+
+is proxied internally to the FastAPI service on the development machine.
+
+Conceptually:
+
+```text
+/forge-api/:path*
+        ↓
+http://127.0.0.1:8000/:path*
+```
+
+Use environment configuration where appropriate rather than scattering backend addresses throughout the codebase.
+
+### 4. Avoid unnecessary body transformation
+
+The Next.js layer should act as a transport proxy.
+
+Do not create a second spreadsheet-processing implementation in Next.js.
+
+Do not intentionally parse XLSX/CSV bodies in Next.js before sending them to FastAPI.
+
+### 5. Keep FastAPI private to the development machine
+
+FastAPI should normally remain on:
+
+```text
+127.0.0.1:8000
+```
+
+The second laptop should not need direct access to port 8000.
+
+### 6. Expose Next.js to the LAN
+
+Configure the development server so another device on the same trusted local network can open ForgeXL.
+
+The development machine remains the machine running:
+
+```text
+Node
+Next.js
+Python
+FastAPI
+Polars
+ForgeXL source code
+```
+
+The second laptop only needs:
+
+```text
+browser
+Excel or equivalent spreadsheet application
+test spreadsheets
+```
+
+### 7. Test the actual file picker
+
+From the second laptop:
+
+1. open ForgeXL
+2. select an Action
+3. click the upload control
+4. select an actual XLSX file located on the second laptop
+5. upload it
+6. execute the Action
+7. inspect the preview
+8. request XLSX export
+9. download the resulting workbook
+10. open the workbook in Excel
+11. verify the result
+
+### 8. Test drag-and-drop
+
+If ForgeXL supports drag-and-drop, test it from the second laptop using a real spreadsheet.
+
+### 9. Test errors from the second laptop
+
+Verify at minimum:
+
+- missing file
+- unsupported file
+- malformed workbook
+- failed Action
+- disconnected backend
+
+### 10. Do not introduce public deployment
+
+LAN testing is the default development workflow.
+
+Do not deploy ForgeXL publicly merely to test file upload behavior.
+
+## Completion Criteria
+
+ForgeXL must be usable from the second laptop without installing:
+
+```text
+Node
+Python
+Git
+VS Code
+ForgeXL dependencies
+```
+
+A real XLSX file located on that laptop must successfully travel through:
+
+```text
+second-laptop filesystem
+→ browser
+→ Next.js
+→ FastAPI
+→ ForgeXL Action
+→ XLSX export
+→ second-laptop download
+```
+
+Stop after Phase 6G.
 
 ---
 
-## 6.8 New Run
+# Phase 6H — Synthetic Spreadsheet Fixtures and End-to-End Regression Tests
 
-Provide a simple:
+## Goal
 
-    Start New Run
+Make ForgeXL's correctness testable without manually uploading real spreadsheets for every development change.
 
-behavior.
+Manual browser testing should validate UX.
 
-It should clear current:
+Automated fixtures should validate processing correctness.
 
-- Run result
-- selected files
+## Required Work
 
-It may preserve selected Action if convenient, but behavior must be predictable.
+### 1. Create a spreadsheet fixture system
+
+Programmatically generate deterministic test workbooks.
+
+Do not depend exclusively on manually created files.
+
+### 2. Create representative fixtures
+
+Include small datasets covering cases such as:
+
+```text
+simple table
+blank rows
+blank cells
+duplicate rows
+duplicate keys
+mixed numeric/text values
+dates
+malformed dates
+Unicode characters
+accented characters
+unusual column names
+multiple worksheets
+missing required columns
+extra columns
+empty workbook
+larger dataset
+```
+
+Only add fixture scenarios relevant to supported ForgeXL functionality.
+
+### 3. Test known Action outcomes
+
+Each deterministic Action should eventually have fixtures where:
+
+```text
+known input
+    ↓
+known Action configuration
+    ↓
+known expected output
+```
+
+### 4. Test complete backend execution
+
+Tests should be capable of performing:
+
+```text
+create fixture in memory
+        ↓
+submit upload
+        ↓
+execute Action
+        ↓
+retrieve preview
+        ↓
+request export
+        ↓
+read export
+        ↓
+assert expected result
+```
+
+### 5. Test named input slots
+
+For multi-file Actions, verify that swapping input files or omitting a required input produces correct validation behavior.
+
+### 6. Test XLSX round-trip compatibility
+
+Generate an XLSX export, reopen it programmatically, and verify:
+
+- workbook is readable
+- required worksheets exist
+- headers are correct
+- representative values are correct
+
+### 7. Test failures
+
+Add regression coverage for:
+
+```text
+invalid upload
+missing required columns
+invalid configuration
+Action failure
+unknown Action ID
+unknown run ID
+export before completion
+```
+
+### 8. Keep test data synthetic
+
+Do not require proprietary company sales spreadsheets in the automated repository test suite.
+
+Real company spreadsheets may still be used manually for final validation.
+
+## Completion Criteria
+
+A developer must be able to verify the majority of ForgeXL's spreadsheet engine by running automated tests without:
+
+- opening a file picker
+- manually saving a workbook
+- accessing the second laptop
+- deploying ForgeXL
+
+Stop after Phase 6H.
 
 ---
 
-## 6.9 Run ID Visibility
+# Phase 6I — Cleanup, Regression Review, and Architecture Documentation
 
-Show Run ID somewhere unobtrusive.
+## Goal
 
-Purpose:
+Finish the architectural migration cleanly before beginning the next master-plan phase.
 
-allow troubleshooting and filesystem correlation.
+## Required Work
 
-Do not make Run ID the dominant UI element.
+### 1. Remove obsolete runtime filesystem code
 
----
+After confirming that the new pipeline works, identify code that existed solely for the old model.
 
-## Phase 6 Exit Criteria
+Examples may include:
 
-Full user workflow works:
+```text
+run-directory creation
+input-directory creation
+working-directory creation
+export-directory creation
+manifest file writers
+path-building helpers
+temporary persistent upload helpers
+```
 
-    choose Action
-    upload
-    run
-    review metrics
-    preview output
-    paginate
-    download CSV
-    download Excel
-    start another Run
+Only remove code confirmed to be obsolete.
 
-Update implementation-status.md.
+Do not delete utilities still used elsewhere.
 
-Stop.
+### 2. Search for remaining path coupling
 
-Do not begin Phase 7.
+Re-run the Phase 6A audit.
 
----
+Confirm that Actions do not require server-local input or output paths.
+
+### 3. Search frontend networking code
+
+Confirm there are no browser requests hard-coded to:
+
+```text
+localhost:8000
+127.0.0.1:8000
+```
+
+### 4. Verify cleanup behavior
+
+Create a run, execute it, delete it, and confirm its large in-memory objects are no longer referenced by the Run Store.
+
+### 5. Verify backend restart behavior
+
+Restart FastAPI.
+
+Confirm the application handles missing previous in-memory runs gracefully.
+
+Do not treat lost V1 run history as corruption.
+
+### 6. Update architecture documentation
+
+Document the final architecture:
+
+```text
+Browser
+    ↓
+Next.js
+    ↓
+same-origin proxy
+    ↓
+FastAPI
+    ↓
+parser
+    ↓
+DataFrames
+    ↓
+Action Registry
+    ↓
+Action Engine
+    ↓
+result DataFrames
+    ↓
+preview / metrics / audit / export
+```
+
+### 7. Document V1 persistence behavior
+
+Explicitly state:
+
+> ForgeXL V1 processes uploaded spreadsheet data ephemerally. Uploaded files and generated exports are not required to persist on the ForgeXL server after processing. Run history stored only in process memory may be lost when the backend restarts.
+
+### 8. Document the extension point for future persistence
+
+Record that future versions may introduce implementations such as:
+
+```text
+PersistentRunStore
+ObjectStorage
+Database-backed run history
+```
+
+without changing the DataFrame-first Action contract.
+
+Do not implement them now.
+
+### 9. Run the complete regression suite
+
+Run all automated tests from Phases 0/1–6.
+
+Fix regressions caused by Phase 6 before continuing the master build plan.
+
+Do not use this phase as an opportunity for unrelated cleanup.
+
+## Completion Criteria
+
+Phase 6 is complete when:
+
+- uploads can be processed without persistent server-side files
+- Actions operate on DataFrames rather than paths
+- results remain in runtime state
+- previews work
+- metrics work
+- audit summaries work
+- CSV export works
+- XLSX export works
+- browser requests use `/forge-api/*`
+- FastAPI can remain on `127.0.0.1`
+- Next.js can be accessed from the second laptop
+- the second laptop can upload real files
+- the second laptop can download real XLSX results
+- synthetic integration tests pass
+- prior Phase 0/1–5 functionality still passes regression tests
+- obsolete filesystem assumptions have been removed
+- the architecture is documented
+
+Only after all Phase 6 completion criteria pass should implementation proceed to the next phase of the master ForgeXL build plan.
 
 # ============================================================
 
@@ -3818,4 +4977,7 @@ Favor:
     simple over abstract
 
 The POC succeeds if the user can drop in raw data, choose a trusted Action, run it, understand what happened, and confidently use the result.
+
+```
+
 ```
