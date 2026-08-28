@@ -1,0 +1,21 @@
+// {
+//   // Point the editor's Python extension at the backend virtual environment.
+//   //
+//   // pyrightconfig.json already tells the *pyright CLI* where the venv is via
+//   // "venvPath"/"venv", but Pylance ignores those and uses the interpreter
+//   // VS Code has selected. Without this, every third-party import (fastapi,
+//   // polars, pydantic, ...) shows "Import could not be resolved", and Pylance's
+//   // autoSearchPaths treats ./src as a Python source root so the Next.js
+//   // src/app/ directory shadows the real backend/app package.
+//   //
+//   // Create the venv first if it does not exist — it is git-ignored, so a fresh
+//   // clone has none:
+//   //   python3 -m venv backend/.venv
+//   //   backend/.venv/bin/python -m pip install -r backend/requirements.txt
+//   "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python",
+
+//   // Run the backend suite from backend/, matching backend/pytest.ini.
+//   "python.testing.pytestEnabled": true,
+//   "python.testing.unittestEnabled": false,
+//   "python.testing.cwd": "${workspaceFolder}/backend"
+// }

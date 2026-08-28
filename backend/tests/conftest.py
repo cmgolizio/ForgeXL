@@ -1,7 +1,8 @@
-"""Fixtures shared by the Phase 3 pipeline tests.
+"""Fixtures shared by the backend pipeline tests.
 
 Every test that touches storage runs against its own temporary runs directory,
-so the suite never reads or writes the real ``data/runs``.
+so the suite never reads or writes the real ``data/runs``. Every test also gets
+its own Run Store, so run state never leaks from one test into the next.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from app.actions import registry as registry_module
 from app.actions.base import Action
 from app.actions.registry import ActionRegistry
 from app.main import app
+from app.services import run_store as run_store_module
 from app.services import storage
+from app.services.run_store import InMemoryRunStore
 
 
 @pytest.fixture
@@ -32,6 +35,20 @@ def runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def run_paths(runs_dir: Path) -> storage.RunPaths:
     """A created, empty Run directory."""
     return storage.create_run()
+
+
+@pytest.fixture(autouse=True)
+def run_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunStore:
+    """Give each test its own Run Store.
+
+    Autouse because the application store is process-global: without this a
+    Run recorded by one test would still be there for the next one. Swapping
+    the single :data:`app.services.run_store.RUN_STORE` instance is also the
+    mechanism a persistent implementation would use (build plan 6B.5).
+    """
+    store = InMemoryRunStore()
+    monkeypatch.setattr(run_store_module, "RUN_STORE", store)
+    return store
 
 
 @pytest.fixture

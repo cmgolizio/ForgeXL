@@ -24,7 +24,7 @@ from app.actions.product_master_builder import (
 )
 from app.errors import RunValidationError
 from app.models.schemas import RunStatus
-from app.services import storage
+from app.services import run_store, storage
 from app.services.runner import execute_run
 
 from tests.fixtures import product_rows as fixture
@@ -302,7 +302,7 @@ def _assert_failed_cleanly(runs_dir: Path, expected_code: str) -> None:
     """Assert exactly one Run exists, that it failed for `expected_code`, and
     that it produced no output artifact of any kind."""
     (run_directory,) = list(runs_dir.iterdir())
-    manifest = storage.read_manifest(run_directory.name)
+    manifest = run_store.get_run(run_directory.name).to_manifest()
 
     assert manifest.status is RunStatus.FAILED
     assert manifest.error is not None

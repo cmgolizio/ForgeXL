@@ -1,37 +1,23 @@
-"""Storage service tests (build plan 3.1-3.3, 3.11).
+"""Storage service tests (build plan 3.1-3.3).
 
-Covers Run directory creation, generated filenames, the upload limit and
-atomic manifest writing, plus the path-safety rules of build plan section 16.
+Covers Run directory creation and removal, generated filenames and the upload
+limit, plus the path-safety rules of build plan section 16.
+
+Run *state* is no longer stored here — since Phase 6B it lives in the Run
+Store, and the tests that covered manifest writing and reading now live in
+`tests/test_run_store.py` against `create_run` / `get_run` / `update_run`.
 """
 
 from __future__ import annotations
 
 import io
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from app import config
 from app.errors import UnknownRunError, UploadTooLargeError
-from app.models.schemas import (
-    ActionReference,
-    RunManifest,
-    RunStatus,
-    ValidationSummary,
-)
 from app.services import storage
-
-
-def _manifest(run_id: str, status: RunStatus = RunStatus.RUNNING) -> RunManifest:
-    return RunManifest(
-        run_id=run_id,
-        status=status,
-        action=ActionReference(id="a", version="1.0.0", name="A"),
-        created_at=datetime.now(timezone.utc),
-        validation=ValidationSummary(passed=True),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -63,14 +49,6 @@ def test_new_run_id_is_a_uuid() -> None:
     assert storage.parse_run_id(run_id) == run_id
 
 
-def test_run_exists_is_false_until_a_manifest_is_written(runs_dir: Path) -> None:
-    paths = storage.create_run()
-    assert storage.run_exists(paths.run_id) is False
-
-    storage.write_manifest(paths, _manifest(paths.run_id))
-    assert storage.run_exists(paths.run_id) is True
-
-
 # ---------------------------------------------------------------------------
 # 3.1 / section 16 — no client value ever becomes a path
 # ---------------------------------------------------------------------------
@@ -92,10 +70,6 @@ def test_run_exists_is_false_until_a_manifest_is_written(runs_dir: Path) -> None
 def test_parse_run_id_rejects_anything_that_is_not_a_uuid(candidate: str) -> None:
     with pytest.raises(UnknownRunError):
         storage.parse_run_id(candidate)
-
-
-def test_run_exists_reports_false_for_a_malformed_id(runs_dir: Path) -> None:
-    assert storage.run_exists("../../etc") is False
 
 
 @pytest.mark.parametrize("unsafe", ["../escape", "a/b", "a.b", "", "-leading"])
@@ -285,68 +259,48 @@ def test_the_limit_defaults_to_the_configured_maximum(
 
 
 # ---------------------------------------------------------------------------
-# 3.11 Manifest writing
+# 6B.6 Releasing a Run's files
 # ---------------------------------------------------------------------------
 
 
-def test_write_manifest_produces_readable_json(run_paths: storage.RunPaths) -> None:
-    storage.write_manifest(run_paths, _manifest(run_paths.run_id))
-
-    payload = json.loads(run_paths.manifest_path.read_text(encoding="utf-8"))
-    assert payload["run_id"] == run_paths.run_id
-    assert payload["schema_version"] == 1
-    assert payload["status"] == "running"
-
-
-def test_write_manifest_leaves_no_temporary_file_behind(
-    run_paths: storage.RunPaths,
-) -> None:
-    storage.write_manifest(run_paths, _manifest(run_paths.run_id))
-
-    leftovers = [p.name for p in run_paths.root.iterdir() if p.name.endswith(".tmp")]
-    assert leftovers == []
-
-
-def test_rewriting_a_manifest_replaces_it_atomically(
-    run_paths: storage.RunPaths,
-) -> None:
-    storage.write_manifest(run_paths, _manifest(run_paths.run_id))
-    storage.write_manifest(
-        run_paths, _manifest(run_paths.run_id, RunStatus.SUCCEEDED)
+def test_delete_run_directory_removes_the_whole_run(runs_dir: Path) -> None:
+    paths = storage.create_run()
+    storage.store_upload(
+        paths, "source_file", "sales.csv", io.BytesIO(b"a,b\n1,2\n")
     )
 
-    reloaded = storage.read_manifest(run_paths.run_id)
-    assert reloaded.status is RunStatus.SUCCEEDED
-    assert json.loads(run_paths.manifest_path.read_text(encoding="utf-8"))
+    assert storage.delete_run_directory(paths.run_id) is True
+    assert not paths.root.exists()
+    assert list(runs_dir.iterdir()) == []
 
 
-def test_read_manifest_round_trips_what_was_written(
-    run_paths: storage.RunPaths,
+def test_delete_run_directory_reports_false_for_an_unknown_run(
+    runs_dir: Path,
 ) -> None:
-    original = _manifest(run_paths.run_id, RunStatus.SUCCEEDED)
-    storage.write_manifest(run_paths, original)
-
-    reloaded = storage.read_manifest(run_paths.run_id)
-
-    assert reloaded.run_id == original.run_id
-    assert reloaded.action.id == original.action.id
-    assert reloaded.status is RunStatus.SUCCEEDED
+    assert storage.delete_run_directory(storage.new_run_id()) is False
 
 
-def test_read_manifest_raises_for_an_unknown_run(runs_dir: Path) -> None:
-    with pytest.raises(UnknownRunError):
-        storage.read_manifest(storage.new_run_id())
-
-
-def test_read_manifest_raises_for_a_malformed_run_id(runs_dir: Path) -> None:
-    with pytest.raises(UnknownRunError):
-        storage.read_manifest("../../etc/passwd")
-
-
-def test_read_manifest_raises_when_the_manifest_is_corrupt(
-    run_paths: storage.RunPaths,
+def test_delete_run_directory_reports_false_for_a_malformed_id(
+    runs_dir: Path,
 ) -> None:
-    run_paths.manifest_path.write_text("{ not json", encoding="utf-8")
+    assert storage.delete_run_directory("../../etc") is False
 
-    with pytest.raises(UnknownRunError):
-        storage.read_manifest(run_paths.run_id)
+
+def test_delete_run_directory_cannot_reach_outside_the_runs_directory(
+    runs_dir: Path,
+) -> None:
+    """A traversal-shaped ID is refused before anything is removed."""
+    sibling = runs_dir.parent / "keep_me"
+    sibling.mkdir()
+
+    assert storage.delete_run_directory(f"..%2F{sibling.name}") is False
+    assert storage.delete_run_directory(f"../{sibling.name}") is False
+    assert sibling.is_dir()
+
+
+def test_deleting_one_run_leaves_the_others_alone(runs_dir: Path) -> None:
+    kept = storage.create_run()
+    removed = storage.create_run()
+
+    assert storage.delete_run_directory(removed.run_id) is True
+    assert kept.root.is_dir()

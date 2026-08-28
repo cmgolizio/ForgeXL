@@ -2,7 +2,7 @@
 
 Last Updated: 2026-08-27
 Current Phase: None
-Last Completed Phase: Phase 6A — Compatibility Audit and Contract Freeze
+Last Completed Phase: Phase 6B — Introduce Runtime and Storage Abstractions
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -544,6 +544,121 @@ the contract freeze, the Action classification, and §7's explicit two-column
 migration list: which components need modification (with the subphase that
 touches each) and which completed Phase 0/1–5 components must remain untouched.
 
+### Phase 6B — Introduce Runtime and Storage Abstractions
+
+All seven items of build plan "Phase 6B" were implemented and verified. Phase
+6B separates **what a Run is** from **where its state is kept**. Run state now
+lives in a Run Store; `data/runs/<run-id>/manifest.json` is no longer written
+or read. Uploads, Parquet and exports are still on disk — those are 6C, 6D and
+6F. No frontend file was touched.
+
+**6B.1 Logical Run model.** `backend/app/models/run.py` defines `Run`, a frozen
+dataclass carrying the run ID, the `ActionReference` (Action ID, version and
+name), `status`, `created_at`, `updated_at`, `started_at`, `completed_at`,
+`duration_ms`, input metadata, the validation summary, output (result)
+metadata, Action metrics and the error. **No field holds a filesystem path**,
+and a test asserts that structurally rather than by inspection.
+
+It is a dataclass rather than a Pydantic model for the reason Phase 2 gave for
+`ActionResult`: this is runtime state, not API-facing data, and from 6D/6E it
+will carry Polars frames that Pydantic cannot validate. Pydantic keeps its
+place at the boundary — `Run.to_manifest()` renders the **unchanged**
+`RunManifest`, so the API shape frozen in Phase 6A is now _derived from_
+runtime state instead of _being_ it. `updated_at` is deliberately not in the
+manifest: it is runtime bookkeeping, and adding a field would change a frozen
+contract for no caller's benefit.
+
+A Run is never edited in place. A stage derives the next state with
+`with_changes(...)` — which stamps `updated_at` unless given one — and hands
+that to the store, so a stored Run cannot be modified behind the store's back.
+
+**6B.7 Run IDs preserved.** `new_run_id()` and `parse_run_id()` moved from
+`services/storage.py` to `models/run.py` unchanged: the convention is still
+`str(uuid.uuid4())`, still validated as the canonical string form of a UUID,
+still raising `UnknownRunError` for a malformed, truncated or traversal-shaped
+ID. They moved because run identity belongs to the Run, not to the filesystem
+module that 6C-6I dismantles. `storage.py` imports both from there and still
+uses them, so `storage.new_run_id` / `storage.parse_run_id` resolve exactly as
+before and no existing call site changed.
+
+**6B.2 Run Store abstraction.** `backend/app/services/run_store.py` defines
+`RunStore`, an `abc.ABC` with exactly the five methods the build plan names:
+`create_run(run)`, `get_run(run_id)`, `update_run(run)`, `delete_run(run_id)`
+and `list_runs()`. Anything wider would leak the storage medium into the
+callers the abstraction exists to protect, so a test asserts that those five —
+and only those five — are abstract.
+
+Semantics: `get_run` and `update_run` raise `UnknownRunError` (404, unchanged
+contract) for an unknown or malformed ID; `create_run` raises
+`DuplicateRunIdError` (a `ValueError`, mirroring `DuplicateActionIdError`)
+rather than overwriting; `delete_run` returns a bool and treats an unknown or
+malformed ID as "already gone" rather than an error; `list_runs` returns runs
+oldest first.
+
+**6B.3 `InMemoryRunStore`.** One dictionary in the backend process, guarded by
+a `threading.Lock` because Uvicorn runs synchronous endpoints in a thread pool,
+so two Runs really can touch the store at once. The lock protects the
+check-then-write pairs; the Runs themselves are frozen values.
+
+**6B.4 No persistent infrastructure.** Nothing was added — no PostgreSQL,
+SQLite, Redis, Supabase, S3, DuckDB, ORM or migration tool. `package.json` and
+`backend/requirements.txt` are byte-identical to their committed state. A test
+parses the module's own imports and fails if any of eleven database, cache or
+object-store packages appears.
+
+**6B.5 Business logic depends on the interface.** `ACTION_REGISTRY` set the
+convention and the store follows it: a single application instance,
+`RUN_STORE`, plus module-level `create_run` / `get_run` / `update_run` /
+`delete_run` / `list_runs` that read it at call time. The runner and the API
+call those functions; neither ever touches a dictionary. A test proves
+replaceability by implementing a second `RunStore`, assigning it, and asserting
+the five calls land on it — which is exactly what a future `PersistentRunStore`
+would do.
+
+**6B.6 Run deletion.** Two levels, because a Run's state is not all in one
+place yet. `run_store.delete_run(run_id)` forgets the record.
+`runner.delete_run(run_id)` is the lifecycle-level call: it forgets the record
+**and** removes the Run's directory through the new
+`storage.delete_run_directory()`, so deleting a Run really releases the state
+it holds rather than orphaning the user's uploaded file on disk. The directory
+half disappears with the last of the Run's on-disk files in 6C/6F.
+`delete_run_directory` refuses anything that is not a direct child of the runs
+directory, so a traversal-shaped ID deletes nothing; four tests cover that.
+
+**The runner orchestrates through the store.** `services/runner.py` keeps its
+stage ordering, its validation logic and its failure contract exactly as
+Phase 3 wrote them. What changed is the plumbing: it records the Run when it
+starts, then hands the store a new state after inputs are recorded and again at
+success or failure. `storage.write_manifest()` is gone from all three places.
+`RunOutcome` now carries the `Run`, with `.manifest` as a property rendering
+it, so every existing caller and test that reads `outcome.manifest` is
+unaffected. `execute_run` also gained one small robustness improvement:
+`storage.create_run()` (the directory tree) moved inside the failure boundary,
+so a directory that cannot be created now fails the Run cleanly instead of
+escaping as an unstructured 500.
+
+**The API serves run state from the store.** `api/runs.py` replaced its three
+`storage.read_manifest(run_id)` calls with `run_store.get_run(run_id)`.
+`GET /api/runs/{run_id}`, the preview endpoint and both downloads behave
+identically — same responses, same status codes, same 404 for malformed,
+unknown and traversal-shaped IDs. **No route was added**: build plan 6B does
+not ask for one, and the frozen route inventory would have caught it.
+
+**What this changes for a user.** Run state is process memory in V1, so
+restarting the backend clears run history — build plan Phase 6 rules 14 and 15
+explicitly allow this, and it was verified by execution (below). Nothing in the
+current UI regressed: the frontend never calls `GET /api/runs/{id}`, and a full
+browser run still works.
+
+**Known Issue 20 (`InputMetadata.stored_filename`) is not yet due.** 6B does
+not change upload handling: every upload is still written to
+`inputs/<slot-id>/source<ext>`, so the field still records a real generated
+filename and the manifest shape is still correct. The decision belongs to 6C,
+where the upload stops reaching disk. Deciding it early would have meant
+changing a frozen schema for a reason that does not exist yet.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -609,7 +724,8 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           __init__.py
           base.py             Action contract + ActionResult
           registry.py         ActionRegistry, ACTION_REGISTRY, lookups
-          example_passthrough.py   placeholder Action (delete in Phase 4)
+          exact_duplicate_remover.py
+          product_master_builder.py
         api/
           __init__.py
           actions.py          GET /api/actions
@@ -617,26 +733,34 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         models/
           __init__.py
           schemas.py          every Pydantic schema
+          run.py              the logical Run + run-ID convention  (6B)
         services/
           __init__.py
-          storage.py          Run dirs, safe filenames, upload limit, manifest
+          run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
+          storage.py          Run dirs, safe filenames, upload limit
           parser.py           parse_tabular_file: CSV + XLSX
           runner.py           the generic Run pipeline
           export.py           Parquet + CSV + XLSX artifacts
           preview.py          paginated reads of the internal Parquet
       tests/
         __init__.py
-        conftest.py           isolated runs dir, registry and client fixtures
+        conftest.py           isolated runs dir + Run Store, registry, client
         helpers.py            make_action(), CSV/XLSX builders, upload helpers
+        fixtures/             hand-written Action fixtures (Phase 4)
         test_actions.py       Action contract + registry
         test_api.py           /health and /api/actions
         test_schemas.py       manifest / preview serialisation
-        test_storage.py       Run dirs, path safety, upload limit, manifest
+        test_run_model.py     the logical Run and run IDs                 (6B)
+        test_run_store.py     the five store operations, replaceability   (6B)
+        test_storage.py       Run dirs, path safety, upload limit, deletion
         test_parser.py        CSV, XLSX, worksheet ambiguity, engine fallback
-        test_runner.py        the pipeline, validation, failed Runs
+        test_runner.py        the pipeline, validation, failed Runs, deletion
         test_export.py        Parquet/CSV/XLSX round trips
         test_preview.py       paging limits and Parquet-sourced previews
         test_runs_api.py      the Run endpoints and their status codes
+        test_contract_freeze.py  the Phase 6A freeze (unchanged since 6A)
+        test_exact_duplicate_remover.py / test_product_master_builder.py /
+        test_action_round_trip.py                                (Phase 4)
 
 Installed backend packages (resolved 2026-08-22):
 
@@ -687,6 +811,10 @@ variable names.
 
     GET  /api/runs/{run_id}
                         ->  200 RunManifest | 404
+                            Served from the Run Store (in-process memory in
+                            V1), not from a file. Restarting the backend
+                            clears run history — build plan Phase 6 rules
+                            14/15.
 
     GET  /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=
                         ->  200 PreviewResponse (default 100, max 500)
@@ -743,27 +871,33 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 
 ### Directory status vs build plan §10
 
-| Path                    | Status                                                      |
-| ----------------------- | ----------------------------------------------------------- |
-| `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1) |
-| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)    |
-| `src/lib/`              | Exists (`api.js`, `formatters.js`) — added in Phase 5       |
-| `backend/app/`          | Exists (`main.py`, `config.py`)                             |
-| `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                            |
-| `backend/app/actions/`  | Exists (`base.py`, `registry.py`, placeholder Action)       |
-| `backend/app/models/`   | Exists (`schemas.py`)                                       |
-| `backend/app/services/` | Exists (storage, parser, runner, export, preview)           |
-| `backend/tests/`        | Exists (12 test modules and `fixtures/`)                    |
-| `data/runs/`            | Exists (`.gitkeep`; run artifacts git-ignored)              |
-| `scripts/`              | Exists (`dev-backend.sh`)                                   |
-| `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)              |
-| `.env.example`          | Exists                                                      |
-| `.env.local`            | Not present — not required (frontend default fallback)      |
+| Path                    | Status                                                       |
+| ----------------------- | ------------------------------------------------------------ |
+| `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1)  |
+| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)     |
+| `src/lib/`              | Exists (`api.js`, `formatters.js`) — added in Phase 5        |
+| `backend/app/`          | Exists (`main.py`, `config.py`)                              |
+| `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                             |
+| `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)     |
+| `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                              |
+| `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview) |
+| `backend/tests/`        | Exists (15 test modules and `fixtures/`)                     |
+| `data/runs/`            | Exists (`.gitkeep`; run artifacts git-ignored)               |
+| `scripts/`              | Exists (`dev-backend.sh`)                                    |
+| `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)               |
+| `.env.example`          | Exists                                                       |
+| `.env.local`            | Not present — not required (frontend default fallback)       |
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/phase-3-pipeline-b7o3qw
+    Current branch: claude/forgexl-phase-6b-i87zu7
+    Last commit:    f481552  "did audit to check compatability between new
+                              plan and current code. phase 6A complete"
+
+Phase 6B's changes are uncommitted; the user has not authorised a commit.
+`git status` shows exactly the nine modified and four new files listed in the
+Phase 6B entry, and nothing else. `data/runs/` still holds only `.gitkeep`.
 
 Commit history at start of Phase 2 (4 commits):
 
@@ -809,6 +943,155 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6B)
+
+Environment note: this session also started in a **fresh ephemeral container**
+— `backend/.venv/` and `node_modules/` did not exist. Both were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`), with no undocumented
+step required and no dependency added.
+
+    cd backend && .venv/bin/python -m pytest   ->  455 passed, 1 warning
+
+    Before Phase 6B                                395 passed
+    tests/test_run_store.py   (new)                 34
+    tests/test_run_model.py   (new)                 26
+    tests/test_runner.py      28 -> 32              +4
+    tests/test_storage.py     57 -> 53              -4
+
+    tests/test_contract_freeze.py    84  unchanged, and the file itself was
+                                         not modified — the Phase 6A freeze
+                                         passes untouched through 6B, which is
+                                         the whole point of it
+    tests/test_runs_api.py           46  (unchanged)
+    tests/test_product_master_builder.py 34  (one line: reads the Run Store
+                                         instead of the manifest file)
+    tests/test_actions.py            30  (unchanged)
+    tests/test_parser.py             26  (unchanged)
+    tests/test_exact_duplicate_remover.py 21  (unchanged)
+    tests/test_action_round_trip.py  17  (unchanged)
+    tests/test_preview.py            15  (unchanged)
+    tests/test_api.py                14  (unchanged)
+    tests/test_schemas.py            12  (unchanged)
+    tests/test_export.py             11  (unchanged)
+
+The single warning is the third-party `StarletteDeprecationWarning` already
+recorded as Known Issue 7.
+
+**No test was weakened, skipped or deleted to make the suite green.** Nine
+tests in `test_storage.py` asserted behaviour that no longer exists, because
+the file they asserted against no longer exists. Each was rewritten against
+the store that replaced it, not dropped:
+
+| Removed from `test_storage.py`                           | Where its intent now lives                                                                          |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `test_run_exists_is_false_until_a_manifest_is_written`   | `test_a_run_is_unknown_until_it_is_created`                                                         |
+| `test_run_exists_reports_false_for_a_malformed_id`       | `test_a_malformed_id_is_never_recorded`                                                             |
+| `test_write_manifest_produces_readable_json`             | `test_to_manifest_carries_every_recorded_field`, `test_the_manifest_serialises`                     |
+| `test_rewriting_a_manifest_replaces_it_atomically`       | `test_update_replaces_the_recorded_state`                                                           |
+| `test_read_manifest_round_trips_what_was_written`        | `test_update_round_trips_everything_it_was_given`                                                   |
+| `test_read_manifest_raises_for_an_unknown_run`           | `test_get_run_raises_for_an_unknown_run`                                                            |
+| `test_read_manifest_raises_for_a_malformed_run_id`       | `test_get_run_raises_for_a_malformed_id` (4 cases)                                                  |
+| `test_write_manifest_leaves_no_temporary_file_behind`    | `test_a_rejected_update_leaves_the_store_unchanged` — the in-memory form of "no half-written state" |
+| `test_read_manifest_raises_when_the_manifest_is_corrupt` | `test_a_run_cannot_be_mutated` — state cannot be corrupted behind the store's back                  |
+
+Five new tests replaced them in `test_storage.py` itself, covering
+`delete_run_directory` including the two traversal-shaped refusals.
+
+`test_runner.py` kept every test it had; three that read `manifest.json` from
+disk now read the Run Store, and three new ones cover run recording and
+lifecycle deletion.
+
+**Control tests — the new tests were proved to catch regressions.** Four
+deliberate breakages were introduced one at a time and reverted immediately
+afterwards; `git status` confirmed the tree was byte-identical after each:
+
+| Deliberate break                                  | Result                                                                                                            |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `InMemoryRunStore.create_run` silently overwrites | 1 failure (`test_a_duplicate_run_id_is_rejected_not_silently_overwritten`)                                        |
+| A failed Run is not written back to the store     | 4 failures (`..._keeps_its_directory_and_its_record`, `..._records_every_validation_error`, and both crash cases) |
+| `new_run_id` returns `"run-<uuid>"`               | 8+ failures across `test_run_model.py` and `test_run_store.py`                                                    |
+| A `run_path` field is added to the `Run` model    | 1 failure (`test_no_run_field_holds_a_filesystem_path`)                                                           |
+
+### Type checking (Phase 6B)
+
+    npx pyright   ->  43 files analyzed, 0 errors, 0 warnings, 0 informations
+
+Four more files than Phase 6A's 39: `app/models/run.py`,
+`app/services/run_store.py`, `tests/test_run_model.py`, `tests/test_run_store.py`.
+
+### Frontend static checks (Phase 6B)
+
+    npm run lint   ->  exit 0, no errors, no warnings
+    npm run build  ->  exit 0
+                       ✓ Compiled successfully in 6.7s
+                       Routes: ○ /   ○ /_not-found  (both static)
+
+Unchanged from Phase 6A, as expected: Phase 6B wrote no frontend code.
+
+### Phase 6B end-to-end verification over real HTTP
+
+The backend was started with `FORGEXL_DATA_DIRECTORY` pointed at a scratch
+directory, so the repository's `data/runs/` was never written to.
+
+    GET  /health                       ->  {"status":"ok"}
+    GET  /api/actions                  ->  200, both Actions
+    POST /api/runs (product_master)    ->  200, "succeeded", duration_ms 33,
+                                           parser_engine "polars-csv",
+                                           3 input rows -> 2 output rows,
+                                           metrics duplicate_product_rows_removed 1
+    GET  /api/runs/{id}                ->  200, byte-identical to the POST body
+                                           (served from the Run Store)
+    GET  .../preview?limit=5           ->  200, 2 rows, "Château Réal" intact
+    GET  .../download/csv              ->  200, accented values intact
+    GET  .../download/xlsx             ->  200, `file` reports "Microsoft Excel 2007+"
+    POST /api/runs (missing columns)   ->  422 MISSING_COLUMNS naming all four
+    GET  /api/runs/{failed id}         ->  200, status "failed", the full
+                                           validation error list, and the
+                                           uploaded filename still recorded
+    GET  /api/runs/{unknown uuid}      ->  404 UNKNOWN_RUN
+    GET  /api/runs/not-a-uuid          ->  404
+    GET  /api/runs/..%2Fsecret         ->  404
+    GET  .../outputs/nope/preview      ->  404
+
+    manifest.json written anywhere      ->  0 files
+
+On-disk layout in the scratch directory was `inputs/sales_file/source.csv`,
+`working/product_master.parquet` and `exports/product_master.{csv,xlsx}` —
+**and no `manifest.json`**. That is the expected interim state: run state moved
+to memory in 6B, and the remaining files leave in 6C, 6D and 6F.
+
+**Restart behaviour (build plan Phase 6 rules 14/15), verified:**
+
+    backend stopped and restarted
+      GET /api/runs/{earlier id}  ->  404 UNKNOWN_RUN
+      GET /api/actions            ->  200, both Actions still registered
+      POST /api/runs              ->  200, a new Run succeeds normally
+
+    CORS   Origin http://127.0.0.1:3000    ->  echoed
+           Origin http://evil.example.com  ->  no access-control headers
+    Bind   LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
+
+### Phase 6B browser verification (real headless Chromium)
+
+Phase 6B changed no frontend file, so this exists to prove the Phase 5 UI still
+works end to end against the new runtime. Playwright was installed **outside**
+the repository, in the session scratchpad, against the pre-installed Chromium.
+Both servers were the real ones.
+
+**13/13 checks passed:** page title; "Backend Connected"; the selector
+populated from `GET /api/actions` with both Actions; `Version 1.0.0` and the
+`Sales File` slot rendered from metadata; state `ready` after choosing a file;
+a real Run through the UI reaching state `success` and showing "Run Successful";
+a second Run with a bad file classified `validation_error` with `Supplier` and
+`Volume` named; no `[object Object]`; the browser talking to
+`127.0.0.1:8000/api/runs` directly; no uncaught page errors.
+
+Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and
+`data/runs/` still holds only `.gitkeep`.
+
+---
 
 ### Backend test suite (Phase 6A)
 
@@ -1540,7 +1823,64 @@ them. The file was restored and re-verified clean.
     is recorded because it is a real, deliberate reversal of an earlier
     requirement, not an oversight.
 
-None of the above blocks Phase 6B.
+**Added in Phase 6B:**
+
+25. **Run history no longer survives a backend restart.** Run state is process
+    memory in V1, so `GET /api/runs/{id}` returns 404 for a Run created before
+    the last restart, and `data/runs/<run-id>/manifest.json` is no longer
+    written or read. This is deliberate and is what build plan Phase 6 rules 14
+    and 15 authorise ("Run state may be stored in memory for V1", "Restarting
+    the FastAPI development server may clear V1 run history"). It supersedes the
+    manifest-as-file half of build plan §9.5, §11 and §23 — the manifest itself
+    is unchanged and is still what the API returns, it is simply derived from
+    the Run rather than read from disk. Recorded here because it is a real,
+    deliberate reversal of an earlier requirement, not an oversight. The
+    replacement, when persistence is wanted, is a `PersistentRunStore`
+    (Known Issue 28).
+
+26. **A backend restart orphans the run directories left on disk.** Uploads,
+    Parquet and exports are still written under `data/runs/<run-id>/` until
+    6C/6D/6F, but the run record that made them reachable is gone after a
+    restart, so nothing can serve or delete them. `runner.delete_run()` cleans
+    up a Run it still knows about; it cannot clean up one the process has
+    forgotten. This disappears entirely once 6F removes on-disk exports — the
+    files it orphans are the files that stop being written. No action is needed
+    in 6C-6E beyond not making it worse.
+
+27. **Two functions are called `create_run`.** `run_store.create_run(run)`
+    records run state; `storage.create_run(run_id)` makes the directory tree
+    the upload and the exports still need. They are always called through their
+    module prefix, and the second disappears with the on-disk model, so
+    renaming a working Phase 3 function purely for the duration of the
+    migration was judged worse than the ambiguity — build plan Phase 6 rule 6
+    ("do not rewrite functioning Phase 0/1-5 functionality solely to conform to
+    a new naming convention"). The one place they appear together carries a
+    comment.
+
+28. **`InMemoryRunStore` grows without bound within one process.** Nothing
+    evicts a Run, and V1 has no reason to: the process is a local development
+    server, a Run's record is metadata measured in kilobytes, and
+    `delete_run()` exists for a caller that wants one gone. It becomes a real
+    question only when 6D/6E start retaining result DataFrames in the run —
+    that is where a retention policy belongs, alongside 6D.8's "allow memory
+    associated with abandoned processing to be released".
+
+29. **Known Issue 20 is deferred to 6C, not resolved.**
+    `InputMetadata.stored_filename` still records a real generated on-disk name
+    because 6B did not change upload handling. 6C is where the upload stops
+    reaching disk and the field must either be dropped (bumping
+    `MANIFEST_SCHEMA_VERSION`) or redefined as the logical name of the
+    in-memory input.
+
+30. **Known Issue 22 is partly worked off.** Of the roughly half of the suite
+    coupled to the on-disk model, 6B rewrote the run-state part:
+    `test_storage.py` (57 -> 53) and `test_runner.py` (28 -> 32). The parts
+    coupled to stored uploads, Parquet and exports — `test_parser.py`,
+    `test_preview.py`, `test_export.py` and the on-disk parts of
+    `test_runs_api.py`, `test_action_round_trip.py` and the two Action test
+    modules — are still ahead, in 6C, 6D, 6E and 6F.
+
+None of the above blocks Phase 6C.
 
 ---
 
@@ -1763,6 +2103,45 @@ None of the above blocks Phase 6B.
     only holds if the tests are kept together and away from the fixtures
     (`runs_dir`, `run_paths`) that disappear with the on-disk model.
 
+**Added in Phase 6B:**
+
+26. **Two modules §10 does not sketch: `app/models/run.py` and
+    `app/services/run_store.py`.** Build plan §10 lists `models/schemas.py` and
+    five services. Build plan 6B explicitly requires "a logical Run model" and
+    "a Run Store abstraction" as separate concepts — the model is a value, the
+    store is a service — so folding either into `schemas.py` or `storage.py`
+    would have contradicted the phase that asked for them. §10 predates
+    Phase 6 by several revisions; Phase 6's rules override it where they
+    conflict.
+
+27. **The logical Run is a frozen dataclass, not a Pydantic model.**
+    `models/` otherwise holds Pydantic schemas. The Run is runtime state that
+    is never serialised directly, and from 6D/6E it will carry Polars frames
+    that Pydantic cannot validate — the same reasoning Phase 2 applied to
+    `ActionResult` (build plan 2.2 permits it explicitly). Pydantic keeps the
+    boundary: `Run.to_manifest()` returns the unchanged `RunManifest`.
+
+28. **`new_run_id` and `parse_run_id` moved from `services/storage.py` to
+    `models/run.py`.** The Phase 6A audit's §7.1 said to keep them; it did not
+    say where. Run identity belongs to the Run, and `storage.py` is dismantled
+    across 6C-6I, so leaving the ID convention inside it would have meant
+    moving it later anyway. Neither function's behaviour changed by a
+    character, and `storage.py` imports both — so `storage.new_run_id` and
+    `storage.parse_run_id` still resolve and no existing call site changed.
+
+29. **Two more test modules, `test_run_model.py` and `test_run_store.py`.**
+    The same reasoning as Deviations 14 and 25: one module per unit under test.
+    Both are deliberately filesystem-free, like `test_contract_freeze.py`, so
+    they survive 6C-6I unchanged.
+
+30. **`storage.delete_run_directory()` is a new function that deletes files.**
+    Build plan 6B.6 asks for deletion that releases a Run's "associated runtime
+    state". While uploads and exports are still on disk, forgetting only the
+    record would leave the user's uploaded file orphaned, so
+    `runner.delete_run()` removes both. The function refuses anything that is
+    not a direct child of the runs directory, is called from exactly one place,
+    and is not reachable over HTTP. It disappears with the on-disk model.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -1780,47 +2159,51 @@ is unchanged.
 
 ## Next Phase
 
-**Phase 6B — Introduce Runtime and Storage Abstractions**
+**Phase 6C — In-Memory Upload and Spreadsheet Parsing**
 
 Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6A.
+Phase 6B: uploads are still copied to disk in chunks by
+`storage.store_upload()` and still parsed from a `Path` by
+`parser.parse_tabular_file()`, exactly as Phase 3 wrote them.
 
-Scope, per build plan "Phase 6B":
+Scope, per build plan "Phase 6C":
 
-- **6B.1 Logical Run model** — represent a run independently of any directory:
-  run ID, Action ID, Action version, status, created/updated timestamps, input
-  metadata, validation results, metrics, result metadata, preview metadata,
-  audit information, errors. No filesystem paths.
-- **6B.2 Run Store abstraction** — a narrow interface equivalent to
-  `create_run()` / `get_run()` / `update_run()` / `delete_run()` /
-  `list_runs()`.
-- **6B.3 `InMemoryRunStore`** — process memory for V1.
-- **6B.4** No PostgreSQL, SQLite, Redis, Supabase, S3 or migrations.
-- **6B.5** Business logic depends on the interface, not on the dictionary, so a
-  `PersistentRunStore` can arrive later without redesigning the Action Engine.
-- **6B.6** Explicit `delete_run(run_id)` releasing the run's runtime state.
-- **6B.7** Preserve the existing run-ID convention — `str(uuid.uuid4())`, from
-  `storage.new_run_id()`, validated by `storage.parse_run_id()`.
+- **6C.1** Preserve the named Action input slots — the multipart contract
+  (`action_id` plus one file field per slot ID) does not change.
+- **6C.2/6C.3** Receive uploads through FastAPI and read their content into
+  memory instead of writing them to `inputs/<slot-id>/source<ext>`.
+- **6C.4/6C.5** Validate basic upload properties; do not trust the MIME type
+  alone — the extension and the parse result decide.
+- **6C.6** Parse CSV from memory.
+- **6C.7** Parse XLSX from memory. Phase 6A already proved by execution that
+  `fastexcel.read_excel` accepts `bytes` but **rejects** `BytesIO`, while
+  `openpyxl.load_workbook` accepts `BytesIO`: hold the upload as `bytes`, pass
+  `bytes` to fastexcel, and wrap in `io.BytesIO` only for the openpyxl
+  fallback. No dependency change is needed.
+- **6C.8** Preserve the useful input metadata the manifest already records.
+- **6C.9** Keep the error messages understandable — the §17 worksheet-ambiguity
+  wording is public contract and must survive verbatim.
 
-**What Phase 6A established for it** (full detail in
-`docs/phase-6a-compatibility-audit.md`, especially §7):
+**What Phase 6B leaves for it:**
 
-- The Run Store replaces `services/storage.py`'s `RunPaths`, `create_run`,
-  `run_paths`, `runs_directory`, `run_exists`, `write_manifest` and
-  `read_manifest`. Keep `new_run_id`, `parse_run_id`, `extension_of`,
-  `display_filename` and `_human_size` — they are pure and still correct.
-- `services/runner.py`'s stage ordering, validation logic and failure contract
-  are sound and path-independent; only the plumbing (`storage.create_run()` at
-  L100, `storage.write_manifest` at L109/L141/L349) moves onto the Run Store.
-- Both registered Actions are DataFrame-compatible and need **no change**.
-  `actions/base.py`, `actions/registry.py`, `api/actions.py` and `errors.py`
-  need no change either.
-- `models/schemas.py` needs one decision, not a rewrite: what becomes of
-  `InputMetadata.stored_filename` (Known Issue 20).
-- `backend/tests/test_contract_freeze.py` is the regression signal. It must
-  keep passing **unchanged** through 6B. If it fails, a public contract broke.
-- `tests/conftest.py`'s `runs_dir` / `run_paths` fixtures disappear with the
-  on-disk model; `tests/helpers.py`'s `csv_bytes` / `xlsx_bytes` already build
-  fixtures in memory and need no change.
+- `storage.store_upload()`, `StoredUpload`, `RunPaths.input_directory` and
+  `stored_filename_for()` are the pieces 6C replaces. `extension_of()`,
+  `display_filename()` and `_human_size()` are pure and still correct.
+- `parser.parse_tabular_file(path, extension)` becomes byte-based. Its
+  worksheet-selection logic, its engine-fallback recording and its refusal
+  wording must not change (Phase 6A §7.2).
+- `runner._store_and_check_slots` and `runner._parse_inputs` are the two
+  stages that change; the stage ordering, the validation rules and the failure
+  contract stay as they are.
+- `InputMetadata.stored_filename` must be decided here — dropped, which bumps
+  `MANIFEST_SCHEMA_VERSION` and will correctly fail
+  `test_schema_field_names_are_frozen[RunManifest]`, or redefined as the
+  logical name of the in-memory input (Known Issues 20 and 29).
+- The upload limit is still enforced during the copy (build plan 3.3 and
+  Known Issue 11); reading into memory changes where that check lives, and
+  6C must not let an oversized upload become a memory error.
+- `tests/test_parser.py` (26) and the upload half of `tests/test_storage.py`
+  are the test modules 6C rewrites. `tests/test_contract_freeze.py` must keep
+  passing **unchanged**, as it did through 6B.
 
-Do not begin Phase 6C.
+Do not begin Phase 6D.
