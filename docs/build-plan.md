@@ -694,8 +694,6 @@ Do not delete unrelated files.
 
 Do not force push.
 
-Do not commit or push unless the user specifically instructs the agent to do so.
-
 At the end of every Phase, report:
 
 - files created
