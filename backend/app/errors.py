@@ -144,6 +144,18 @@ class UnsupportedExtensionError(InputValidationError):
     code = "UNSUPPORTED_EXTENSION"
 
 
+class EmptyUploadError(InputValidationError):
+    """The uploaded file contains no bytes at all (build plan 6C.4).
+
+    Distinguished from :class:`FileParseError`, which means bytes arrived but
+    could not be read, and from :class:`EmptyDatasetError`, which means the
+    file parsed but holds no rows. Reporting all three as "parse error" would
+    tell the user nothing about which one they have.
+    """
+
+    code = "EMPTY_FILE"
+
+
 class FileParseError(InputValidationError):
     """The file could not be read as tabular data.
 

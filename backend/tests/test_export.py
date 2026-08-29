@@ -75,7 +75,7 @@ def test_the_xlsx_export_is_a_real_workbook_that_round_trips(
 
     # Read back through the application's own reader: the export must be
     # usable by the same parser that ingests uploads.
-    reloaded = parser.parse_tabular_file(path, ".xlsx").frame
+    reloaded = parser.parse_tabular_bytes(path.read_bytes(), ".xlsx").frame
     assert reloaded.columns == FRAME.columns
     assert reloaded.height == 3
     assert reloaded["SKU"].to_list() == ["A1", "A2", "A3"]
@@ -87,8 +87,8 @@ def test_accented_values_survive_the_excel_round_trip(
 ) -> None:
     export.write_output(run_paths, "product_master", FRAME)
 
-    reloaded = parser.parse_tabular_file(
-        run_paths.export_artifact("product_master", "xlsx"), ".xlsx"
+    reloaded = parser.parse_tabular_bytes(
+        run_paths.export_artifact("product_master", "xlsx").read_bytes(), ".xlsx"
     ).frame
 
     assert reloaded["Producer"].to_list()[:2] == ["Château Margaux", "Bodegas Muñoz"]

@@ -22,7 +22,7 @@ from app.errors import (
     UnknownOutputError,
 )
 from app.models.schemas import OutputMetadata, PreviewResponse, RunManifest
-from app.services import export, preview, storage
+from app.services import export, preview, run_store, storage
 from app.services.runner import PendingUpload, execute_run
 
 router = APIRouter(prefix="/api", tags=["runs"])
@@ -70,7 +70,8 @@ async def create_run(request: Request) -> RunManifest:
         }
 
         # Runs inside the form context: the uploaded streams stay open until
-        # the runner has copied them into the Run directory.
+        # the runner has read them into memory (build plan 6C.3). Nothing the
+        # user uploads is written to the server's filesystem.
         return execute_run(action, uploads).manifest
 
 
@@ -78,10 +79,11 @@ async def create_run(request: Request) -> RunManifest:
 def get_run(run_id: str) -> RunManifest:
     """Return the manifest for one Run (build plan 3.13).
 
-    A malformed or unknown Run ID produces 404. The manifest never contains
-    filesystem paths, only logical IDs (build plan section 11).
+    Read from the Run Store, which owns run state (build plan 6B). A malformed
+    or unknown Run ID produces 404. The manifest never contains filesystem
+    paths, only logical IDs (build plan section 11).
     """
-    return storage.read_manifest(run_id)
+    return run_store.get_run(run_id).to_manifest()
 
 
 @router.get(
@@ -101,7 +103,7 @@ def get_output_preview(
     Only the requested rows are read from the internal Parquet file; the
     complete dataset is never serialised into a response.
     """
-    manifest = storage.read_manifest(run_id)
+    manifest = run_store.get_run(run_id).to_manifest()
     _require_output(manifest, output_id)
 
     page = preview.read_preview(
@@ -162,7 +164,7 @@ def _download(run_id: str, output_id: str, export_format: str) -> FileResponse:
     as a UUID and the output ID must appear in that Run's manifest. Nothing the
     client sends is used as a path directly (build plan 3.16).
     """
-    manifest = storage.read_manifest(run_id)
+    manifest = run_store.get_run(run_id).to_manifest()
     output = _require_output(manifest, output_id)
 
     if export_format not in output.formats:

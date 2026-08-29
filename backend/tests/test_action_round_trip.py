@@ -14,7 +14,6 @@ from __future__ import annotations
 import io
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -106,14 +105,16 @@ def _download(client, run_id: str, case: Case, export_format: str):
     return response
 
 
-def _read_downloaded_xlsx(content: bytes, tmp_path: Path) -> pl.DataFrame:
-    """Read a downloaded workbook back with the application's own parser."""
+def _read_downloaded_xlsx(content: bytes) -> pl.DataFrame:
+    """Read a downloaded workbook back with the application's own parser.
+
+    Straight from the response bytes: since Phase 6C the parser reads memory,
+    so the download never has to be written out in order to be checked.
+    """
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         assert "xl/workbook.xml" in archive.namelist(), "not a real workbook"
 
-    path = tmp_path / "downloaded.xlsx"
-    path.write_bytes(content)
-    return parser.parse_tabular_file(path, ".xlsx").frame
+    return parser.parse_tabular_bytes(content, ".xlsx").frame
 
 
 # ---------------------------------------------------------------------------
@@ -160,12 +161,12 @@ def test_the_downloaded_csv_preserves_the_dtypes_of_the_run(
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 def test_the_downloaded_xlsx_matches_the_expected_output(
-    client, case: Case, tmp_path: Path
+    client, case: Case
 ) -> None:
     run = _start_run(client, case, "fixture.csv", case.csv_payload())
 
     response = _download(client, run["run_id"], case, "xlsx")
-    frame = _read_downloaded_xlsx(response.content, tmp_path)
+    frame = _read_downloaded_xlsx(response.content)
 
     assert f"{case.output_id}.xlsx" in response.headers["content-disposition"]
     assert tuple(frame.columns) == case.expected_columns
@@ -177,13 +178,13 @@ def test_the_downloaded_xlsx_matches_the_expected_output(
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 def test_text_in_the_downloaded_xlsx_is_byte_identical(
-    client, case: Case, tmp_path: Path
+    client, case: Case
 ) -> None:
     """Accents, casing and blanks must survive the workbook unchanged."""
     run = _start_run(client, case, "fixture.csv", case.csv_payload())
     response = _download(client, run["run_id"], case, "xlsx")
 
-    frame = _read_downloaded_xlsx(response.content, tmp_path)
+    frame = _read_downloaded_xlsx(response.content)
     expected = pl.DataFrame(
         list(case.expected_rows),
         schema=list(case.expected_columns),
@@ -198,14 +199,12 @@ def test_text_in_the_downloaded_xlsx_is_byte_identical(
         assert frame[name].to_list() == expected[name].to_list(), name
 
 
-def test_an_accented_producer_survives_the_excel_download(
-    client, tmp_path: Path
-) -> None:
+def test_an_accented_producer_survives_the_excel_download(client) -> None:
     case = CASES[1]
     run = _start_run(client, case, "fixture.csv", case.csv_payload())
 
     frame = _read_downloaded_xlsx(
-        _download(client, run["run_id"], case, "xlsx").content, tmp_path
+        _download(client, run["run_id"], case, "xlsx").content
     )
 
     assert frame["Producer"].to_list() == [
@@ -247,12 +246,12 @@ def test_an_xlsx_upload_produces_the_expected_csv_download(
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 def test_an_xlsx_upload_round_trips_back_through_xlsx(
-    client, case: Case, tmp_path: Path
+    client, case: Case
 ) -> None:
     run = _start_run(client, case, "fixture.xlsx", case.xlsx_payload())
 
     frame = _read_downloaded_xlsx(
-        _download(client, run["run_id"], case, "xlsx").content, tmp_path
+        _download(client, run["run_id"], case, "xlsx").content
     )
 
     assert tuple(frame.columns) == case.expected_columns

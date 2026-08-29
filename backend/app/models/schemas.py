@@ -16,8 +16,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-#: Version of the on-disk manifest format. Bump when the shape changes
-#: incompatibly so older Run directories remain identifiable.
+#: Version of the manifest format. Bump when the shape changes incompatibly,
+#: so a manifest produced by an older build remains identifiable.
 MANIFEST_SCHEMA_VERSION = 1
 
 
@@ -161,7 +161,10 @@ class InputMetadata(BaseModel):
     """What was uploaded into one input slot, and how it parsed.
 
     The original filename is metadata only; `stored_filename` is the generated
-    name actually used on disk (build plan sections 16 and 3.2).
+    name the input is known by, derived from its extension alone (build plan
+    sections 16 and 3.2). Since Phase 6C uploads are held in memory and no file
+    is written under that name — it records that the client's filename never
+    became a name the application used, which is the rule section 16 states.
     """
 
     slot_id: str
@@ -208,7 +211,7 @@ class RunError(BaseModel):
 
 
 class RunManifest(BaseModel):
-    """The audit record written to `data/runs/<run-id>/manifest.json`.
+    """The audit record for one Run, rendered from the Run Store (6B).
 
     Must be sufficient on its own to determine what ran, against what input, at
     which Action version, whether validation passed, what came out and how long

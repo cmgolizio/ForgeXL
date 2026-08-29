@@ -1,50 +1,58 @@
-"""Run directories, safe file storage and manifest persistence.
+"""Upload intake, run directories and safe filenames.
 
 Covers build plan 3.1 (storage service), 3.2 (safe filenames), 3.3 (upload
-limit) and 3.11 (atomic manifest writing).
+limit) and 6C.3-6C.4 (uploads read into memory).
 
-Two rules shape this module:
+Two things have left this module as Phase 6 has progressed:
+
+* A Run's *state* moved to :mod:`app.services.run_store` in Phase 6B.
+* An uploaded spreadsheet stopped reaching the disk in Phase 6C. An upload is
+  now read into memory and handed on as bytes; nothing is written and nothing
+  is reopened. What remains on disk is only the generated artifacts, until
+  Phase 6D/6F produce those in memory too.
+
+Two rules still shape this module:
 
 * **The API never supplies a filesystem path.** Callers pass logical IDs — a
-  Run ID, a slot ID, an output ID — and this module derives every path from
-  the configured runs directory. A Run ID is accepted only after it parses as
-  a UUID, and slot/output IDs only after they match a strict token pattern, so
-  no client-supplied value can escape the runs directory.
-* **An uploaded filename is metadata, never a path.** The bytes are written to
+  Run ID, an output ID — and this module derives every path from the
+  configured runs directory. A Run ID is accepted only after it parses as a
+  UUID, and output IDs only after they match a strict token pattern, so no
+  client-supplied value can escape the runs directory. Since 6C a slot ID
+  contributes to no path at all.
+* **An uploaded filename is metadata, never a path.** The bytes are held under
   a generated name; the name the browser sent is recorded in the manifest and
   used nowhere else (build plan section 16).
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import uuid
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from app import config
 from app.errors import UnknownRunError, UploadTooLargeError
-from app.models.schemas import RunManifest
+
+# Run identity belongs to the Run itself, not to the filesystem. Imported
+# rather than redefined so there is exactly one Run ID convention.
+from app.models.run import new_run_id, parse_run_id
 
 #: Slot and output IDs are declared by trusted Action code, but they are still
 #: checked before they contribute to a path: no dots, separators or spaces, so
 #: no ID can traverse out of its Run directory.
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
-#: Every stored upload gets this base name; only the extension varies.
+#: Every upload is known by this base name; only the extension varies.
 STORED_UPLOAD_STEM = "source"
 
-MANIFEST_FILENAME = "manifest.json"
-
-_INPUTS_DIRNAME = "inputs"
 _WORKING_DIRNAME = "working"
 _EXPORTS_DIRNAME = "exports"
 
-#: Copy uploads in 1 MiB chunks so a large file is never held in memory.
-_COPY_CHUNK_BYTES = 1024 * 1024
+#: Read uploads in 1 MiB chunks so the limit is enforced during the read
+#: rather than after the whole file has been accumulated.
+_READ_CHUNK_BYTES = 1024 * 1024
 
 
 class BinarySource(Protocol):
@@ -59,15 +67,27 @@ class BinarySource(Protocol):
 
 
 @dataclass(frozen=True)
-class StoredUpload:
-    """One preserved upload, described for the manifest."""
+class LoadedUpload:
+    """One upload held in memory, with the metadata the manifest records.
+
+    ``stored_filename`` is the generated name this input is known by, derived
+    from its extension alone (build plan 3.2). Since Phase 6C nothing is
+    written to disk under it, but it is still the evidence that the client's
+    filename never became a name the application used: that is the rule
+    build plan section 16 states, and the manifest field that records it is
+    part of the API contract frozen in Phase 6A.
+    """
 
     slot_id: str
     original_filename: str
     stored_filename: str
-    path: Path
-    size_bytes: int
+    payload: bytes
     extension: str
+
+    @property
+    def size_bytes(self) -> int:
+        """Bytes actually received, counted rather than trusted from a header."""
+        return len(self.payload)
 
 
 @dataclass(frozen=True)
@@ -82,24 +102,12 @@ class RunPaths:
     root: Path
 
     @property
-    def inputs(self) -> Path:
-        return self.root / _INPUTS_DIRNAME
-
-    @property
     def working(self) -> Path:
         return self.root / _WORKING_DIRNAME
 
     @property
     def exports(self) -> Path:
         return self.root / _EXPORTS_DIRNAME
-
-    @property
-    def manifest_path(self) -> Path:
-        return self.root / MANIFEST_FILENAME
-
-    def input_directory(self, slot_id: str) -> Path:
-        """Directory holding the upload for one input slot."""
-        return self.inputs / _safe_id(slot_id, "input slot")
 
     def working_artifact(self, output_id: str) -> Path:
         """Internal Parquet representation of one output (build plan 28)."""
@@ -117,29 +125,6 @@ def _safe_id(value: str, label: str) -> str:
     if not SAFE_ID_PATTERN.fullmatch(value):
         raise ValueError(f"Unsafe {label} id: {value!r}")
     return value
-
-
-def new_run_id() -> str:
-    """Generate the UUID identifying one Run (build plan section 9.3)."""
-    return str(uuid.uuid4())
-
-
-def parse_run_id(raw: str) -> str:
-    """Validate a client-supplied Run ID before it is used as a path.
-
-    Accepts only the canonical string form of a UUID. Anything else — a
-    traversal attempt, a truncated ID, a name with separators — raises
-    :class:`~app.errors.UnknownRunError` rather than reaching the filesystem.
-    """
-    try:
-        parsed = uuid.UUID(raw)
-    except (ValueError, AttributeError, TypeError):
-        raise UnknownRunError(
-            "That is not a valid Run ID.", details={"run_id": raw}
-        ) from None
-    if str(parsed) != raw.lower():
-        raise UnknownRunError("That is not a valid Run ID.", details={"run_id": raw})
-    return str(parsed)
 
 
 def runs_directory() -> Path:
@@ -160,21 +145,36 @@ def run_paths(run_id: str) -> RunPaths:
 def create_run(run_id: str | None = None) -> RunPaths:
     """Create the directory tree for a new Run and return its paths.
 
-    Builds ``inputs/``, ``working/`` and ``exports/`` up front so later stages
-    never have to decide whether a directory exists.
+    Builds ``working/`` and ``exports/`` up front so later stages never have to
+    decide whether a directory exists. There is no ``inputs/`` directory since
+    Phase 6C: uploads are read into memory and never written.
     """
     paths = run_paths(run_id or new_run_id())
-    for directory in (paths.root, paths.inputs, paths.working, paths.exports):
+    for directory in (paths.root, paths.working, paths.exports):
         directory.mkdir(parents=True, exist_ok=True)
     return paths
 
 
-def run_exists(run_id: str) -> bool:
-    """Whether a Run directory with a manifest exists for `run_id`."""
+def delete_run_directory(run_id: str) -> bool:
+    """Remove a Run's directory and everything in it, if it exists.
+
+    Called when a Run is deleted, so releasing a Run's runtime state also
+    releases the files it still keeps on disk (build plan 6B.6). Returns True
+    if a directory was removed.
+
+    Only a validated Run ID reaches this, and the directory is confirmed to be
+    a direct child of the runs directory before anything is removed: nothing
+    outside ``data/runs/<run-id>/`` can ever be deleted here. This function
+    disappears once Phase 6C/6F stop writing Run files at all.
+    """
     try:
-        return run_paths(run_id).manifest_path.is_file()
+        root = run_paths(run_id).root
     except UnknownRunError:
         return False
+    if not root.is_dir() or root.parent != runs_directory():
+        return False
+    shutil.rmtree(root)
+    return True
 
 
 def extension_of(filename: str) -> str:
@@ -189,30 +189,33 @@ def extension_of(filename: str) -> str:
 
 
 def stored_filename_for(extension: str) -> str:
-    """Return the generated on-disk name for an upload with `extension`.
+    """Return the generated name for an upload with `extension`.
 
-    The client's filename is never reused: every upload is stored as
-    ``source<ext>`` inside its own slot directory (build plan 3.2).
+    The client's filename is never reused: every upload is known as
+    ``source<ext>`` (build plan 3.2).
     """
     if extension and not SAFE_ID_PATTERN.fullmatch(extension.lstrip(".")):
         raise ValueError(f"Unsafe upload extension: {extension!r}")
     return f"{STORED_UPLOAD_STEM}{extension}"
 
 
-def store_upload(
-    paths: RunPaths,
+def read_upload(
     slot_id: str,
     original_filename: str,
     source: BinarySource,
     *,
     max_bytes: int | None = None,
-) -> StoredUpload:
-    """Copy an upload into its Run directory under a generated name.
+) -> LoadedUpload:
+    """Read an upload into memory, bounded by the configured limit.
 
-    The stream is copied in chunks and the running total is checked against the
-    limit, so an oversized upload is rejected during the copy rather than after
-    it has been read into memory (build plan 3.3). A partial file left by a
-    rejected upload is removed before the error propagates.
+    Build plan 6C.3: the bytes go from the request straight into a memory
+    buffer. Nothing is written to the filesystem and nothing is reopened.
+
+    The stream is read in chunks and each chunk is measured before it is kept,
+    so the buffer never grows past the limit: an oversized upload is refused
+    during the read rather than after it has been accumulated, and can never
+    become a memory error (build plan 3.3). The partial read is dropped before
+    the error propagates.
 
     Raises:
         UploadTooLargeError: the upload exceeds `max_bytes`.
@@ -221,39 +224,29 @@ def store_upload(
     extension = extension_of(original_filename)
     stored_name = stored_filename_for(extension)
 
-    destination_directory = paths.input_directory(slot_id)
-    destination_directory.mkdir(parents=True, exist_ok=True)
-    destination = destination_directory / stored_name
+    buffer = bytearray()
+    while True:
+        chunk = source.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        if len(buffer) + len(chunk) > limit:
+            buffer.clear()
+            raise UploadTooLargeError(
+                f"{display_filename(original_filename)} is larger than the "
+                f"{_human_size(limit)} upload limit.",
+                details={
+                    "slot_id": slot_id,
+                    "limit_bytes": limit,
+                    "original_filename": original_filename,
+                },
+            )
+        buffer.extend(chunk)
 
-    written = 0
-    try:
-        with destination.open("wb") as target:
-            while True:
-                chunk = source.read(_COPY_CHUNK_BYTES)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > limit:
-                    raise UploadTooLargeError(
-                        f"{display_filename(original_filename)} is larger than the "
-                        f"{_human_size(limit)} upload limit.",
-                        details={
-                            "slot_id": slot_id,
-                            "limit_bytes": limit,
-                            "original_filename": original_filename,
-                        },
-                    )
-                target.write(chunk)
-    except UploadTooLargeError:
-        destination.unlink(missing_ok=True)
-        raise
-
-    return StoredUpload(
+    return LoadedUpload(
         slot_id=slot_id,
         original_filename=original_filename,
         stored_filename=stored_name,
-        path=destination,
-        size_bytes=written,
+        payload=bytes(buffer),
         extension=extension,
     )
 
@@ -278,51 +271,3 @@ def _human_size(value: int) -> str:
     if value >= megabyte:
         return f"{value // megabyte} MB"
     return f"{value} byte{'' if value == 1 else 's'}"
-
-
-def write_manifest(paths: RunPaths, manifest: RunManifest) -> Path:
-    """Write a Run's manifest atomically (build plan 3.11).
-
-    The JSON is written to a temporary file in the same directory and then
-    renamed over the destination, so an interrupted process can never leave a
-    half-written ``manifest.json`` behind. ``os.replace`` is atomic within a
-    filesystem.
-    """
-    paths.root.mkdir(parents=True, exist_ok=True)
-    destination = paths.manifest_path
-    temporary = destination.with_name(f"{MANIFEST_FILENAME}.{os.getpid()}.tmp")
-
-    payload = manifest.model_dump(mode="json")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
-
-
-def read_manifest(run_id: str) -> RunManifest:
-    """Load the manifest for `run_id`.
-
-    Raises:
-        UnknownRunError: the ID is malformed, or no such Run was recorded.
-    """
-    paths = run_paths(run_id)
-    manifest_path = paths.manifest_path
-    if not manifest_path.is_file():
-        raise UnknownRunError(
-            "No Run exists with that ID.", details={"run_id": paths.run_id}
-        )
-    try:
-        return RunManifest.model_validate_json(
-            manifest_path.read_text(encoding="utf-8")
-        )
-    except ValueError as exc:
-        raise UnknownRunError(
-            "That Run's manifest could not be read.",
-            details={"run_id": paths.run_id},
-        ) from exc

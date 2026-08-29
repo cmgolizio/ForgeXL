@@ -1,8 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-08-27
+Last Updated: 2026-08-28
 Current Phase: None
-Last Completed Phase: Phase 6B — Introduce Runtime and Storage Abstractions
+Last Completed Phase: Phase 6C — In-Memory Upload and Spreadsheet Parsing
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -659,6 +659,149 @@ changing a frozen schema for a reason that does not exist yet.
 
 ---
 
+### Phase 6C — In-Memory Upload and Spreadsheet Parsing
+
+All nine items of build plan "Phase 6C" were implemented and verified. Uploaded
+spreadsheets no longer reach the filesystem at any point: the bytes go from the
+multipart request into a memory buffer, from there into a Polars DataFrame, and
+the buffer is released as soon as the frame exists. No frontend file was
+touched.
+
+**Two repository defects were repaired first.** Neither was caused by this
+phase; both had to be fixed before Phase 6C could begin, and both are recorded
+under **Known Issues** (31 and 32).
+
+1. **Phase 6B's backend code had been committed into `src/app/`** — the Next.js
+   App Router directory — instead of `backend/app/`, exactly as Phase 2 had been
+   (Known Issue 10). `backend/app/` therefore had no `models/run.py` and no
+   `services/run_store.py`, and `api/runs.py`, `services/runner.py` and
+   `services/storage.py` were still their Phase 3/6A versions. The whole suite
+   failed at collection — **0 of 457 tests ran**
+   (`ImportError: cannot import name 'run_store' from 'app.services'`). Repaired
+   with `git mv` (history preserved, no file content edited); the suite then
+   reported **457 passed**.
+2. **`backend/tests/test_runner.py` had been overwritten with a byte-identical
+   copy of `tests/test_run_store.py`**, destroying the entire runner pipeline
+   test module. The 457 count was inflated by 34 duplicated Run Store tests, so
+   real unique coverage was **423**, with Phase 3's runner tests gone. The
+   Phase 6A version (28 tests) was recovered from commit `f481552` and carried
+   forward through 6B (read the Run Store, not `manifest.json`) and 6C.
+
+**6C.1 Named input slots preserved.** The multipart contract is unchanged:
+`action_id` plus one file field per slot ID. `PendingUpload` still keys on the
+slot ID and `_read_and_check_slots` still walks `action.inputs`, so an upload
+stays bound to its logical slot from the request to the Action. A test drives a
+two-slot Action with a CSV in `first` and an XLSX in `second` and asserts each
+frame arrived where it belongs.
+
+**6C.2/6C.3 Uploads read into memory.** `storage.store_upload()` is replaced by
+`storage.read_upload()`, and `StoredUpload` by `LoadedUpload`, which carries
+`payload: bytes` instead of `path: Path` and derives `size_bytes` by counting
+the bytes received rather than trusting a header. Nothing is written and
+nothing is reopened. The consequences were followed through rather than left
+half-done: `RunPaths.inputs` and `RunPaths.input_directory()` are gone, the
+`inputs/` directory is no longer created, and `_INPUTS_DIRNAME` is gone with
+them. Verified over real HTTP across twelve Runs: **0 `inputs/` directories, 0
+`source.*` files, 0 `manifest.json` files** written.
+
+Because a slot ID no longer contributes to any path, the `_safe_id` check that
+guarded `input_directory` disappeared with it. That is a reduction in attack
+surface, not a loss of one: the test that asserted the guard now asserts the
+stronger fact — a hostile slot ID (`../escape`, `a/b`) is carried as a
+dictionary key and writes nothing anywhere.
+
+**6C.4 Basic upload properties validated.** Per slot: required slot present,
+extension accepted, **file not empty**, and size within `MAX_UPLOAD_BYTES`.
+The required _number_ of inputs is what the per-slot required check already
+enforces. All slot problems are still collected and reported together — a test
+posts an unsupported extension in one slot and an empty file in the other and
+asserts both come back in one response.
+
+**The limit is enforced during the read, not after it.** `read_upload` measures
+each chunk _before_ keeping it, so the buffer never grows past the limit and an
+oversized upload cannot become a memory error. This is the point where build
+plan 3.3's guarantee could quietly have been lost by moving to memory, so it is
+pinned by a test that feeds a 64 MB stream against a 2 MB limit and asserts the
+stream was read at most one chunk past the limit. Verified over HTTP: a
+168-byte file against a 64-byte limit returns **413 FILE_TOO_LARGE**.
+
+**6C.5 The MIME type is not trusted.** It never was and still is not read:
+`PendingUpload` carries only a filename and a stream. The extension chooses the
+reader; parsing decides the outcome. Verified over HTTP both ways — a valid CSV
+declared `application/octet-stream` succeeds, and workbook bytes named
+`.csv` and declared `text/csv` are refused with `PARSE_ERROR`.
+
+**6C.6 CSV parsed from memory.** `pl.read_csv(payload)` reads the bytes
+directly. `try_parse_dates` is still off, so date-shaped text is still text.
+
+**6C.7 XLSX parsed from memory.** `fastexcel.read_excel(payload)` takes the
+bytes unwrapped; `openpyxl.load_workbook(io.BytesIO(payload), ...)` takes a
+buffer. This asymmetry is not arbitrary — Phase 6A proved by execution that
+fastexcel accepts `bytes` but **rejects** `BytesIO`, and this session
+re-verified it against the pinned versions before writing any code. **No
+workbook is written out to be reopened**, which a test pins by running the
+fallback engine with the process CWD redirected to an empty directory and
+asserting the directory stays empty.
+
+The worksheet-selection logic, the engine-fallback recording and the section 17
+refusal wording are **unchanged**. The refusal message is now asserted verbatim
+by its own test, because it is public contract.
+
+**6C.8 Input metadata preserved.** Every field build plan 6C.8 lists is still
+recorded: original filename, input slot, extension, byte size, worksheet,
+row count, column count, column names and parser engine. `InputMetadata` is
+byte-for-byte the same shape — see the `stored_filename` decision below.
+
+**6C.9 Understandable errors.** All eight categories the build plan names are
+distinguishable, verified over real HTTP:
+
+| Build plan 6C.9 case       | Code                    | Verified message                                       |
+| -------------------------- | ----------------------- | ------------------------------------------------------ |
+| Missing required input     | `MISSING_INPUT`         | "Sales File is required."                              |
+| Unsupported format         | `UNSUPPORTED_EXTENSION` | "Sales File must be .csv or .xlsx. sales.json is not…" |
+| Empty file                 | `EMPTY_FILE` **(new)**  | "empty.csv is empty."                                  |
+| Unreadable CSV             | `PARSE_ERROR`           | "The uploaded CSV file could not be read…"             |
+| Unreadable XLSX            | `PARSE_ERROR`           | "The uploaded Excel workbook could not be read…"       |
+| Malformed workbook         | `PARSE_ERROR`           | both engines named in `details`                        |
+| Expected worksheet missing | `AMBIGUOUS_WORKBOOK`    | the section 17 wording, verbatim                       |
+| File exceeds upload limit  | `FILE_TOO_LARGE`        | "sales.csv is larger than the 64 bytes upload limit."  |
+
+`EmptyUploadError` / `EMPTY_FILE` (422) is the one addition to the error
+taxonomy. Before it, a zero-byte upload, an unreadable file and a header-only
+file all reported `PARSE_ERROR` or `EMPTY_DATASET` in ways that told the user
+little; the three are now distinct, and a test asserts that zero bytes and a
+header-only file produce different codes. Adding a class does not disturb the
+Phase 6A freeze, which pins the codes and statuses of the errors it lists
+rather than asserting the set is closed. **No traceback reaches the browser** —
+grepped for in every error body.
+
+**The `stored_filename` decision (Known Issues 20 and 29), resolved: kept and
+redefined.** The field records the generated name an input is known by, derived
+from its extension alone. Nothing is written under it any more, but it is still
+the evidence for the rule build plan section 16 actually states — that the
+client's filename never became a name the application used. Dropping it was the
+alternative, and it would have changed a manifest shape frozen in Phase 6A,
+forced `MANIFEST_SCHEMA_VERSION` to 2, and required editing
+`test_contract_freeze.py` — the one module whose value depends on passing
+unchanged through the whole migration — for a field no caller reads. Build plan
+Phase 6 rule 5 ("schemas must be preserved wherever possible") decides it.
+`MANIFEST_SCHEMA_VERSION` stays **1**, and the docstrings in
+`models/schemas.py` and `services/storage.py` now say precisely what the field
+means.
+
+**`storage.create_run()` still creates the run directory.** `working/` and
+`exports/` are still needed until 6D/6F generate those in memory, so the call
+stays exactly where Phase 6B put it — inside the failure boundary. A Run that
+fails validation therefore leaves two empty directories behind. That is interim
+state which disappears with 6F, and moving the call is not something 6C asks
+for. Recorded as Known Issue 33.
+
+**`test_contract_freeze.py` passed unchanged, again.** 84 tests, file not
+modified — the Phase 6A freeze has now survived both 6B and 6C untouched, which
+is the whole reason it exists.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -737,8 +880,9 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         services/
           __init__.py
           run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
-          storage.py          Run dirs, safe filenames, upload limit
-          parser.py           parse_tabular_file: CSV + XLSX
+          storage.py          Run dirs, in-memory upload intake, safe
+                              filenames, upload limit                     (6C)
+          parser.py           parse_tabular_bytes: CSV + XLSX from memory (6C)
           runner.py           the generic Run pipeline
           export.py           Parquet + CSV + XLSX artifacts
           preview.py          paginated reads of the internal Parquet
@@ -753,8 +897,10 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_run_model.py     the logical Run and run IDs                 (6B)
         test_run_store.py     the five store operations, replaceability   (6B)
         test_storage.py       Run dirs, path safety, upload limit, deletion
-        test_parser.py        CSV, XLSX, worksheet ambiguity, engine fallback
+        test_parser.py        CSV, XLSX from bytes, worksheet ambiguity,
+                              engine fallback                             (6C)
         test_runner.py        the pipeline, validation, failed Runs, deletion
+                              (rebuilt in 6C; see Known Issue 32)
         test_export.py        Parquet/CSV/XLSX round trips
         test_preview.py       paging limits and Parquet-sourced previews
         test_runs_api.py      the Run endpoints and their status codes
@@ -803,10 +949,13 @@ variable names.
 
     POST /api/runs      ->  200 RunManifest
                             multipart: action_id + one file field per slot ID
+                            Uploads are read into memory and parsed from
+                            there; nothing is written to disk (6C).
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
-                            422 validation failure
+                            422 validation failure — including the new
+                                EMPTY_FILE for a zero-byte upload (6C)
                             500 Action raised
 
     GET  /api/runs/{run_id}
@@ -882,7 +1031,7 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                              |
 | `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview) |
 | `backend/tests/`        | Exists (15 test modules and `fixtures/`)                     |
-| `data/runs/`            | Exists (`.gitkeep`; run artifacts git-ignored)               |
+| `data/runs/`            | Exists (`.gitkeep`; only `working/`+`exports/` written — 6C) |
 | `scripts/`              | Exists (`dev-backend.sh`)                                    |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)               |
 | `.env.example`          | Exists                                                       |
@@ -891,13 +1040,17 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-6b-i87zu7
-    Last commit:    f481552  "did audit to check compatability between new
-                              plan and current code. phase 6A complete"
+    Current branch: claude/forgexl-phase-6c-odmpg2
+    Last commit:    679fff4  "phase 6B complete"
 
-Phase 6B's changes are uncommitted; the user has not authorised a commit.
-`git status` shows exactly the nine modified and four new files listed in the
-Phase 6B entry, and nothing else. `data/runs/` still holds only `.gitkeep`.
+Phase 6C's changes are uncommitted; the user has not authorised a commit.
+`git status` shows the relocation of the five misplaced Phase 6B modules from
+`src/app/` to `backend/app/` (Known Issue 31), the seven backend modules and
+seven test modules Phase 6C changed, and this file. `data/runs/` holds only
+`.gitkeep`. `test_contract_freeze.py` is deliberately **not** in that list.
+
+(The Phase 6B entry below recorded the branch and last commit as of that
+session. Phase 6B was committed as `679fff4` after it was written.)
 
 Commit history at start of Phase 2 (4 commits):
 
@@ -943,6 +1096,170 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6C)
+
+Environment note: this session also started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist. The venv was recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`); `node_modules/` was already present.
+No undocumented step was required and no dependency was added.
+
+    cd backend && .venv/bin/python -m pytest   ->  488 passed, 1 warning
+
+**Baseline.** The committed state could not run at all: 0 of 457 tests were
+collected (Known Issue 31). After the relocation repair, 457 passed — but 34 of
+those were the duplicated Run Store module (Known Issue 32), so real unique
+coverage before this phase was **423**.
+
+| Module                            | Before | After | Change                       |
+| --------------------------------- | -----: | ----: | ---------------------------- |
+| `test_runner.py`                  |    0\* |    45 | rebuilt (see Known Issue 32) |
+| `test_storage.py`                 |     53 |    60 | upload half rewritten        |
+| `test_parser.py`                  |     26 |    36 | rewritten against bytes      |
+| `test_runs_api.py`                |     46 |    49 | upload assertions inverted   |
+| `test_contract_freeze.py`         |     84 |    84 | **file not modified**        |
+| `test_run_store.py`               |     34 |    34 | unchanged                    |
+| `test_product_master_builder.py`  |     34 |    34 | one expectation updated      |
+| `test_actions.py`                 |     30 |    30 | unchanged                    |
+| `test_run_model.py`               |     26 |    26 | unchanged                    |
+| `test_exact_duplicate_remover.py` |     21 |    21 | unchanged                    |
+| `test_action_round_trip.py`       |     17 |    17 | reads downloads from bytes   |
+| `test_preview.py`                 |     15 |    15 | unchanged                    |
+| `test_api.py`                     |     14 |    14 | unchanged                    |
+| `test_schemas.py`                 |     12 |    12 | unchanged                    |
+| `test_export.py`                  |     11 |    11 | reads exports from bytes     |
+| **Total (unique)**                |    423 |   488 | **+65**                      |
+
+\* `test_runner.py` was on disk but held a copy of `test_run_store.py`; its 34
+collected tests were the Run Store's, counted twice.
+
+The single warning is the third-party `StarletteDeprecationWarning` already
+recorded as Known Issue 7.
+
+**No test was weakened, skipped or deleted to make the suite green.** Every
+test that asserted behaviour 6C removes was rewritten against the behaviour
+that replaced it:
+
+| Assertion that could no longer hold                                  | What it asserts now                                                                                 |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `test_a_hostile_filename_never_escapes_its_slot_directory`           | `..._becomes_a_generated_name_and_writes_nothing` — the generated name, and nothing on disk         |
+| `test_the_stored_bytes_match_the_upload_exactly`                     | `test_the_upload_is_held_in_memory_byte_for_byte`                                                   |
+| `test_two_slots_are_stored_side_by_side`                             | `test_two_slots_are_read_independently`                                                             |
+| `test_a_rejected_upload_leaves_no_partial_file`                      | `test_a_rejected_upload_is_not_retained_in_memory`                                                  |
+| `test_input_directory_rejects_an_unsafe_slot_id`                     | `test_an_unsafe_slot_id_reaches_no_path_at_all` — the stronger fact                                 |
+| `test_the_uploaded_source_is_preserved_under_a_generated_name` (API) | split into `..._is_never_written_to_the_run_directory` and `..._is_recorded_under_a_generated_name` |
+| `test_a_hostile_upload_filename_cannot_write_outside_the_run` (API)  | `..._writes_nothing_anywhere`                                                                       |
+| `test_a_completely_empty_file_fails_the_run` expecting `PARSE_ERROR` | expects `EMPTY_FILE` — the more specific code, not a looser one                                     |
+| every `parse_tabular_file(path, ext)` call                           | `parse_tabular_bytes(payload, ext)`                                                                 |
+
+**Control tests — the new tests were proved to catch regressions.** Five
+deliberate breakages were introduced one at a time and reverted immediately
+afterwards; the suite was re-run to 488 passed after the last revert and
+`git status` confirmed the tree was byte-identical, with the one stray file the
+first breakage wrote (`data/runs/leaked.bin`) removed.
+
+| Deliberate break                                             | Result                                                                           |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `read_upload` writes the payload to disk after reading it    | 19 failures across `test_runner.py`, `test_runs_api.py`, the Action modules      |
+| the limit is checked only after the whole stream is read     | 1 failure (`test_the_limit_stops_the_read_before_the_whole_file_is_accumulated`) |
+| an empty upload is accepted instead of refused               | 5 failures across runner, API and `test_product_master_builder.py`               |
+| the openpyxl fallback writes a temp file instead of a buffer | 1 failure (`test_the_fallback_reads_the_same_bytes_without_a_temporary_file`)    |
+| an upload is attached to the wrong slot                      | 1 failure (`test_each_slot_keeps_its_own_data`)                                  |
+
+### Type checking (Phase 6C)
+
+    npx pyright   ->  43 files analyzed, 0 errors, 0 warnings, 0 informations
+
+### Frontend static checks (Phase 6C)
+
+    npm run lint   ->  exit 0, no errors, no warnings
+    npm run build  ->  exit 0, compiled successfully
+                       Routes: ○ /   ○ /_not-found  (both static)
+
+Unchanged from Phase 6B, as expected: Phase 6C wrote no frontend code.
+
+### Phase 6C end-to-end verification over real HTTP
+
+The backend was started with `FORGEXL_DATA_DIRECTORY` pointed at a scratch
+directory, so the repository's `data/runs/` was never written to.
+
+    GET  /health                        ->  {"status":"ok"}
+    GET  /api/actions                   ->  200, both Actions
+    POST /api/runs  (CSV, 6C.6)         ->  200 "succeeded", duration_ms 34,
+                                            engine "polars-csv", worksheet null,
+                                            size 168 = the file's real length,
+                                            3 rows in -> 2 out,
+                                            duplicate_product_rows_removed 1
+    POST /api/runs  (XLSX, 6C.7)        ->  200 "succeeded", engine
+                                            "fastexcel-calamine", worksheet
+                                            "Sales", 3 rows in -> 2 out
+    GET  .../preview?limit=5            ->  200, "Château Réal" and
+                                            "Bodegas Muñoz" intact
+    GET  .../download/csv               ->  200, accented values intact
+    GET  .../download/xlsx              ->  200, `file` reports "Microsoft Excel 2007+"
+
+**Error cases (6C.9), each over real HTTP:**
+
+    empty.csv (0 bytes)          ->  422 EMPTY_FILE "empty.csv is empty."
+    a,b\n1,2,3,4\n (ragged)       ->  422 PARSE_ERROR "…CSV file could not be read…"
+    "not a workbook".xlsx        ->  422 PARSE_ERROR "…Excel workbook could not be read…"
+    two-data-sheet workbook      ->  422 AMBIGUOUS_WORKBOOK, section 17 wording
+    sales.json                   ->  422 UNSUPPORTED_EXTENSION
+    no file field at all         ->  422 MISSING_INPUT "Sales File is required."
+    SKU,Vintage only             ->  422 MISSING_COLUMNS ["Supplier","Producer",
+                                                          "Selection","Volume"]
+    168 bytes vs a 64-byte limit ->  413 FILE_TOO_LARGE
+    grep for a traceback in any error body  ->  none
+
+**MIME type is not trusted (6C.5):**
+
+    valid CSV declared application/octet-stream  ->  succeeded, polars-csv
+    XLSX bytes named .csv declared text/csv      ->  422 PARSE_ERROR
+
+**On-disk result after twelve Runs (the decisive 6C check):**
+
+    inputs/ directories created  ->  0
+    source.csv / source.xlsx     ->  0
+    manifest.json                ->  0
+    files actually written       ->  only working/<id>.parquet and
+                                     exports/<id>.{csv,xlsx}, and only for
+                                     the Runs that succeeded
+
+    CORS   Origin http://127.0.0.1:3000    ->  echoed
+           Origin http://evil.example.com  ->  no access-control headers
+    Bind   LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
+
+**Restart behaviour (build plan Phase 6 rules 14/15) still holds:**
+
+    backend stopped and restarted
+      GET /api/runs/{earlier id}  ->  404 UNKNOWN_RUN
+      GET /api/actions            ->  200, both Actions still registered
+      POST /api/runs              ->  200, a new Run succeeds normally
+
+### Phase 6C browser verification (real headless Chromium)
+
+Phase 6C changed no frontend file, so this exists to prove the Phase 5 UI still
+works end to end against the in-memory pipeline. Playwright was installed
+**outside** the repository, in the session scratchpad, against the pre-installed
+Chromium at `/opt/pw-browsers/chromium-1194`. Both servers were the real ones.
+
+**16/16 checks passed:** page title; "Backend Connected"; the selector populated
+from `GET /api/actions` with both Actions; `Version 1.0.0` and the `Sales File`
+slot rendered from metadata; state `ready` after choosing a file; **a real CSV
+Run through the UI reaching `success`**; **a real XLSX Run through the UI
+reaching `success`**; an empty file classified `validation_error` with "is
+empty" shown to the user; no `[object Object]`; no traceback on the page; the
+browser posting directly to `127.0.0.1:8000/api/runs`; no uncaught page errors.
+
+The browser session wrote **0 `inputs/` directories, 0 `source.*` files and 0
+manifests** — only the three exports and Parquet files its three successful Runs
+produced.
+
+Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and
+`data/runs/` holds only `.gitkeep`.
+
+---
 
 ### Backend test suite (Phase 6B)
 
@@ -1780,7 +2097,18 @@ them. The file was restored and re-verified clean.
 
 **Added in Phase 6A:**
 
-20. **`InputMetadata.stored_filename` and `MANIFEST_SCHEMA_VERSION` need an
+20. ~~**`InputMetadata.stored_filename` and `MANIFEST_SCHEMA_VERSION` need an
+    explicit decision in Phase 6B/6D.**~~ **Resolved in Phase 6C: the field is
+    kept and redefined** as the generated name an input is known by, derived
+    from its extension alone. It is still the evidence for build plan section
+    16's actual rule — that the client's filename never became a name the
+    application used. `MANIFEST_SCHEMA_VERSION` stays `1`,
+    `test_contract_freeze.py` passes unmodified, and the docstrings in
+    `models/schemas.py` and `services/storage.py` state the new meaning. See
+    the Phase 6C entry for why dropping it was rejected. The original text
+    follows.
+
+    **`InputMetadata.stored_filename` and `MANIFEST_SCHEMA_VERSION` need an
     explicit decision in Phase 6B/6D.** `stored_filename` records the generated
     on-disk name (`source.csv`) and nothing is stored on disk in V1. The
     options are to drop the field — a manifest shape change, so
@@ -1865,7 +2193,10 @@ them. The file was restored and re-verified clean.
     that is where a retention policy belongs, alongside 6D.8's "allow memory
     associated with abandoned processing to be released".
 
-29. **Known Issue 20 is deferred to 6C, not resolved.**
+29. ~~**Known Issue 20 is deferred to 6C, not resolved.**~~ Resolved in
+    Phase 6C — see Known Issue 20. Original text:
+
+    **Known Issue 20 is deferred to 6C, not resolved.**
     `InputMetadata.stored_filename` still records a real generated on-disk name
     because 6B did not change upload handling. 6C is where the upload stops
     reaching disk and the field must either be dropped (bumping
@@ -1880,7 +2211,76 @@ them. The file was restored and re-verified clean.
     `test_runs_api.py`, `test_action_round_trip.py` and the two Action test
     modules — are still ahead, in 6C, 6D, 6E and 6F.
 
-None of the above blocks Phase 6C.
+**Added in Phase 6C:**
+
+31. **Phase 6B was committed into the wrong directory; repaired here.**
+    Commit `679fff4` ("phase 6B complete") wrote `models/run.py`,
+    `models/__init__.py`, `services/run_store.py`, `services/__init__.py`,
+    `services/runner.py`, `services/storage.py` and `api/runs.py` under
+    **`src/app/`** — the Next.js App Router directory — instead of
+    `backend/app/`. This is Known Issue 10 recurring identically for Phase 6B.
+    `backend/app/` had no Run model and no Run Store, and the whole suite failed
+    at collection with
+    `ImportError: cannot import name 'run_store' from 'app.services'` — **0 of
+    457 tests ran**. Repaired at the start of this session with `git mv`, so
+    history is preserved and no file content was edited; the suite then reported
+    457 passed. Nothing is outstanding, but the Phase 6B entry above describes a
+    state that did not exist under `backend/` until this repair, and **any
+    future session must check that new backend modules landed under
+    `backend/app/` before reporting a phase complete** — this has now happened
+    twice.
+
+32. **`backend/tests/test_runner.py` was destroyed by the Phase 6B commit and
+    has been rebuilt.** The file was overwritten with a byte-identical copy of
+    `tests/test_run_store.py` (verified: identical md5), so Phase 3's entire
+    runner pipeline module was gone and the 457-test count was inflated by 34
+    Run Store tests collected twice. The Phase 6B entry's claim of
+    "`test_runner.py` 28 -> 32" describes work that is not in the repository.
+    The Phase 6A version (28 tests, commit `f481552`) was recovered and carried
+    forward: through 6B (outcomes read from the Run Store rather than
+    `manifest.json`, plus run-recording and lifecycle-deletion coverage) and
+    through 6C (uploads in memory), reaching **45 tests**. The rebuild is a
+    reconstruction from the 6A source plus the documented 6B intent, **not** a
+    recovery of the 6B session's actual edits, which were never committed.
+
+33. **A failed Run still creates two empty directories.**
+    `storage.create_run()` builds `working/` and `exports/` before the inputs
+    are read, so a Run that fails validation leaves both behind empty — and,
+    since 6C, with nothing else in the Run directory at all. Moving the call
+    later would be a behaviour change 6C does not ask for, and both directories
+    disappear when 6F generates exports in memory. Harmless interim state; no
+    action needed in 6D or 6E beyond not making it worse.
+
+34. **An upload is held in memory at up to `MAX_UPLOAD_BYTES`.** That is the
+    architecture Phase 6 mandates, and the read is bounded so the buffer never
+    exceeds the limit — but with the 250 MB default, a single upload can hold
+    250 MB of process memory, and `bytes(buffer)` briefly doubles that at the
+    moment the payload is finalised. The runner releases the payloads as soon as
+    they have become dataframes, which keeps the peak to the parse itself rather
+    than the Run's whole lifetime. Phase 7G-7I is where the real figure should
+    be measured on the target machine; if it matters, the lever is
+    `FORGEXL_MAX_UPLOAD_BYTES`, which is already configurable.
+
+35. **Known Issue 11 has changed shape.** The upload limit is still enforced
+    after the request body has reached the machine (Starlette's `max_part_size`
+    still bounds only non-file fields), but it is now enforced while the runner
+    reads the part into memory rather than while copying it to disk. Starlette
+    still spools file parts, so an oversized upload still cannot become a memory
+    error, and the response is still a clean 413. The underlying trade-off is
+    unchanged; only the location of the check moved.
+
+36. **Known Issue 22 is further worked off.** Of the roughly half of the suite
+    coupled to the on-disk model, 6C rewrote the upload and parsing part:
+    `test_parser.py` (26 -> 36, now entirely byte-based), the upload half of
+    `test_storage.py` (53 -> 60) and the upload assertions in
+    `test_runs_api.py` (46 -> 49). `test_export.py` and `test_action_round_trip.py`
+    now read spreadsheets back from bytes rather than paths, though the
+    artifacts they read are still written to disk. What remains coupled is the
+    **output** side — `test_preview.py` (Parquet), `test_export.py` (the three
+    written artifacts) and the download half of `test_runs_api.py` — which is
+    6E's and 6F's work.
+
+None of the above blocks Phase 6D.
 
 ---
 
@@ -2159,51 +2559,47 @@ is unchanged.
 
 ## Next Phase
 
-**Phase 6C — In-Memory Upload and Spreadsheet Parsing**
+**Phase 6D — Convert Action Execution to DataFrame-First Processing**
 
 Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6B: uploads are still copied to disk in chunks by
-`storage.store_upload()` and still parsed from a `Path` by
-`parser.parse_tabular_file()`, exactly as Phase 3 wrote them.
+Phase 6C: `runner._persist_outputs()` still calls `export.write_output()`,
+which still writes `working/<id>.parquet` and `exports/<id>.{csv,xlsx}` to
+disk, and `preview.read_preview()` still reads the Parquet file back, exactly
+as Phase 3 wrote them.
 
-Scope, per build plan "Phase 6C":
+Scope, per build plan "Phase 6D":
 
-- **6C.1** Preserve the named Action input slots — the multipart contract
-  (`action_id` plus one file field per slot ID) does not change.
-- **6C.2/6C.3** Receive uploads through FastAPI and read their content into
-  memory instead of writing them to `inputs/<slot-id>/source<ext>`.
-- **6C.4/6C.5** Validate basic upload properties; do not trust the MIME type
-  alone — the extension and the parse result decide.
-- **6C.6** Parse CSV from memory.
-- **6C.7** Parse XLSX from memory. Phase 6A already proved by execution that
-  `fastexcel.read_excel` accepts `bytes` but **rejects** `BytesIO`, while
-  `openpyxl.load_workbook` accepts `BytesIO`: hold the upload as `bytes`, pass
-  `bytes` to fastexcel, and wrap in `io.BytesIO` only for the openpyxl
-  fallback. No dependency change is needed.
-- **6C.8** Preserve the useful input metadata the manifest already records.
-- **6C.9** Keep the error messages understandable — the §17 worksheet-ambiguity
-  wording is public contract and must survive verbatim.
+- Make the Action Engine consume parsed DataFrames rather than server
+  filesystem locations.
+- **6D.2 has no work to do on the Actions themselves.** Phase 6A classified
+  both registered Actions **DataFrame-compatible**, and 6C confirmed it by
+  execution: neither `exact_duplicate_remover` nor `product_master_builder`
+  touches a path, and both already receive
+  `Mapping[str, pl.DataFrame]` and return `ActionResult`. 6D is about the
+  runner and export plumbing around them.
+- **6D.8** Allow memory associated with abandoned processing to be released —
+  which is where a retention policy for result DataFrames belongs
+  (Known Issues 28 and 34).
 
-**What Phase 6B leaves for it:**
+**What Phase 6C leaves for it:**
 
-- `storage.store_upload()`, `StoredUpload`, `RunPaths.input_directory` and
-  `stored_filename_for()` are the pieces 6C replaces. `extension_of()`,
-  `display_filename()` and `_human_size()` are pure and still correct.
-- `parser.parse_tabular_file(path, extension)` becomes byte-based. Its
-  worksheet-selection logic, its engine-fallback recording and its refusal
-  wording must not change (Phase 6A §7.2).
-- `runner._store_and_check_slots` and `runner._parse_inputs` are the two
-  stages that change; the stage ordering, the validation rules and the failure
-  contract stay as they are.
-- `InputMetadata.stored_filename` must be decided here — dropped, which bumps
-  `MANIFEST_SCHEMA_VERSION` and will correctly fail
-  `test_schema_field_names_are_frozen[RunManifest]`, or redefined as the
-  logical name of the in-memory input (Known Issues 20 and 29).
-- The upload limit is still enforced during the copy (build plan 3.3 and
-  Known Issue 11); reading into memory changes where that check lives, and
-  6C must not let an oversized upload become a memory error.
-- `tests/test_parser.py` (26) and the upload half of `tests/test_storage.py`
-  are the test modules 6C rewrites. `tests/test_contract_freeze.py` must keep
-  passing **unchanged**, as it did through 6B.
+- `export.write_output()`, `RunPaths.working_artifact`, `RunPaths.export_artifact`
+  and `storage.create_run()`'s directory tree are the pieces 6D and 6F replace.
+  `storage.read_upload()`, `LoadedUpload`, `extension_of()`,
+  `stored_filename_for()`, `display_filename()` and `_human_size()` are all
+  Phase 6C-current and correct.
+- `parser.parse_tabular_bytes()` is byte-based and needs no further change.
+- Result DataFrames are currently discarded once written to Parquet. 6D/6E is
+  where the `Run` starts carrying them, which is what makes Known Issue 28
+  (`InMemoryRunStore` growth) a real question rather than a theoretical one.
+- Build plan **section 28 (internal Parquet) is superseded** by 6E.2 — see
+  Known Issue 24. Removing Parquet is 6E's call, not 6D's.
+- `tests/test_export.py` (11), `tests/test_preview.py` (15) and the download
+  half of `tests/test_runs_api.py` are the modules 6D-6F rewrite.
+  `tests/test_contract_freeze.py` must keep passing **unchanged**, as it has
+  through both 6B and 6C.
+- **Check first that Phase 6C's files are actually under `backend/app/`**, not
+  `src/app/`, and that no test module has been overwritten by another
+  (Known Issues 31 and 32 — this failure has now occurred twice).
 
-Do not begin Phase 6D.
+Do not begin Phase 6E.

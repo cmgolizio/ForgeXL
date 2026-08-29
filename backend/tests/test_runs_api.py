@@ -441,20 +441,45 @@ def test_a_download_whose_file_is_missing_returns_404(
 
 
 # ---------------------------------------------------------------------------
-# Uploads reach the backend directly, preserved on disk (sections 5 and 16)
+# Uploads reach the backend directly and are read into memory
+# (sections 5 and 16, build plan 6C.3)
 # ---------------------------------------------------------------------------
 
 
-def test_the_uploaded_source_is_preserved_under_a_generated_name(
+def test_the_uploaded_source_is_never_written_to_the_run_directory(
     run_client, runs_dir: Path
 ) -> None:
+    """Build plan 6C.3: no permanent server-side upload file is created."""
     run_id = _start_run(run_client).json()["run_id"]
 
-    stored = runs_dir / run_id / "inputs" / "source_file" / "source.csv"
-    assert stored.read_bytes() == _sales_csv()
+    run_directory = runs_dir / run_id
+    written = sorted(
+        path.relative_to(run_directory).as_posix()
+        for path in run_directory.rglob("*")
+        if path.is_file()
+    )
+    assert written == [
+        "exports/result.csv",
+        "exports/result.xlsx",
+        "working/result.parquet",
+    ]
+    assert not (run_directory / "inputs").exists()
 
 
-def test_a_hostile_upload_filename_cannot_write_outside_the_run(
+def test_the_uploaded_source_is_recorded_under_a_generated_name(
+    run_client,
+) -> None:
+    """The client's filename stays metadata; the generated name is what is used."""
+    manifest = _start_run(run_client).json()
+
+    (recorded,) = manifest["inputs"]
+    assert recorded["original_filename"] == "sales.csv"
+    assert recorded["stored_filename"] == "source.csv"
+    assert recorded["file_size_bytes"] == len(_sales_csv())
+    assert recorded["extension"] == ".csv"
+
+
+def test_a_hostile_upload_filename_writes_nothing_anywhere(
     run_client, runs_dir: Path
 ) -> None:
     response = run_client.post(
@@ -466,6 +491,40 @@ def test_a_hostile_upload_filename_cannot_write_outside_the_run(
 
     assert response.status_code == 200
     assert not (runs_dir.parent / "escaped.csv").exists()
-    assert (runs_dir / run_id / "inputs" / "source_file" / "source.csv").is_file()
-    # The name is still recorded as metadata.
+    # There is no longer any file written from the upload at all.
+    assert not (runs_dir / run_id / "inputs").exists()
+    # The generated name is what the application used...
+    assert response.json()["inputs"][0]["stored_filename"] == "source.csv"
+    # ...and the name is still recorded as metadata.
     assert response.json()["inputs"][0]["original_filename"] == "../../../escaped.csv"
+
+
+def test_an_empty_upload_is_refused_over_http(run_client) -> None:
+    """Build plan 6C.4 and 6C.9, through the HTTP boundary."""
+    response = run_client.post(
+        "/api/runs",
+        data={"action_id": "passthrough"},
+        files={"source_file": upload_file("empty.csv", b"")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "EMPTY_FILE"
+
+
+def test_an_xlsx_upload_becomes_a_dataframe_over_http(run_client) -> None:
+    """Build plan 6C completion criteria, end to end and with no file picker."""
+    payload = xlsx_bytes({"Sales": [SALES_HEADER, *SALES_ROWS]})
+
+    response = run_client.post(
+        "/api/runs",
+        data={"action_id": "passthrough"},
+        files={"source_file": upload_file("book.xlsx", payload)},
+    )
+
+    assert response.status_code == 200, response.text
+    (recorded,) = response.json()["inputs"]
+    assert recorded["extension"] == ".xlsx"
+    assert recorded["worksheet"] == "Sales"
+    assert recorded["parser_engine"] == "fastexcel-calamine"
+    assert recorded["row_count"] == len(SALES_ROWS)
+    assert response.json()["outputs"][0]["row_count"] == len(SALES_ROWS)

@@ -381,9 +381,11 @@ def test_a_completely_empty_file_fails_the_run(runs_dir: Path, action) -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(action, {INPUT_SLOT_ID: upload("sales.csv", b"")})
 
-    assert raised.value.code == "PARSE_ERROR"
+    # Since Phase 6C a file with no bytes is reported as an empty file rather
+    # than as a generic parse failure (build plan 6C.9).
+    assert raised.value.code == "EMPTY_FILE"
     assert raised.value.http_status == 422
-    _assert_failed_cleanly(runs_dir, "PARSE_ERROR")
+    _assert_failed_cleanly(runs_dir, "EMPTY_FILE")
 
 
 @pytest.mark.parametrize("filename", ["sales.xls", "sales.xlsm", "sales.json"])

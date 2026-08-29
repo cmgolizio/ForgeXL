@@ -1,7 +1,7 @@
-"""The generic Run pipeline (build plan 3.7-3.9, 3.11 and section 24).
+"""The generic Run pipeline (build plan 3.7-3.9, 3.11, 6C and section 24).
 
-    resolve Action -> create Run -> save input -> parse input -> validate input
-    -> execute Action -> persist Parquet -> create exports -> finalize manifest
+    resolve Action -> create Run -> read input -> parse input -> validate input
+    -> execute Action -> persist Parquet -> create exports -> finalize the Run
 
 Everything above belongs to the runner. An Action only transforms dataframes,
 so adding an Action never means reproducing any of this machinery.
@@ -10,9 +10,19 @@ The runner is deliberately independent of the web framework: it takes
 :class:`PendingUpload` objects carrying a filename and a readable stream, so
 the same pipeline is driven identically by the API and by tests.
 
-Failure handling follows build plan 3.9: once a Run directory exists, every
-outcome — including a failure — leaves a manifest behind. Evidence of a failed
-Run is never destroyed.
+Since Phase 6C an upload is read into memory and parsed from there. Nothing
+the user uploads is written to the filesystem, so the pipeline no longer has a
+"save it, then reopen it" step, and the bytes are released as soon as they have
+become a dataframe.
+
+Run state is owned by :mod:`app.services.run_store` (build plan 6B). The runner
+records a Run when it starts and hands the store a new state at every
+transition; it never writes run state anywhere itself, so where that state
+lives is not the runner's concern.
+
+Failure handling follows build plan 3.9: once a Run is recorded, every
+outcome — including a failure — leaves the Run recorded, with its error and its
+full validation results. Evidence of a failed Run is never destroyed.
 """
 
 from __future__ import annotations
@@ -20,7 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 import polars as pl
 
@@ -29,6 +39,7 @@ from app.actions.base import Action, ActionResult
 from app.errors import (
     ActionExecutionError,
     EmptyDatasetError,
+    EmptyUploadError,
     InputValidationError,
     MissingColumnsError,
     MissingInputError,
@@ -36,6 +47,7 @@ from app.errors import (
     UnsupportedExtensionError,
     WorkbenchError,
 )
+from app.models.run import Run, now
 from app.models.schemas import (
     ActionReference,
     InputMetadata,
@@ -45,8 +57,8 @@ from app.models.schemas import (
     ValidationIssue,
     ValidationSummary,
 )
-from app.services import export, parser, storage
-from app.services.storage import BinarySource, RunPaths, StoredUpload
+from app.services import export, parser, run_store, storage
+from app.services.storage import BinarySource, LoadedUpload, RunPaths
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +68,8 @@ class PendingUpload:
     """One file submitted for one input slot, before it is stored.
 
     `filename` is whatever the client sent. It is metadata: it never becomes a
-    path (build plan 3.2).
+    path, and since Phase 6C there is no path for it to become (build plan
+    3.2). The runner reads the stream into memory.
     """
 
     filename: str
@@ -67,14 +80,19 @@ class PendingUpload:
 class RunOutcome:
     """The result of :func:`execute_run`."""
 
-    manifest: RunManifest
+    run: Run
     paths: RunPaths
+
+    @property
+    def manifest(self) -> RunManifest:
+        """The Run rendered in the API's frozen manifest shape."""
+        return self.run.to_manifest()
 
 
 def execute_run(
     action: Action, uploads: Mapping[str, PendingUpload]
 ) -> RunOutcome:
-    """Execute `action` against `uploads` and return the finalized manifest.
+    """Execute `action` against `uploads` and return the finalized Run.
 
     Args:
         action: The Action to run, already resolved from the registry.
@@ -85,11 +103,10 @@ def execute_run(
         RunValidationError: the inputs failed validation.
         ActionExecutionError: the Action raised while transforming valid input.
 
-    Every one of those is raised only after a ``failed`` manifest has been
-    written for the Run.
+    Every one of those is raised only after the Run has been recorded as
+    ``failed`` in the Run Store.
     """
-    created_at = _now()
-    paths = storage.create_run()
+    created_at = now()
     action_reference = ActionReference(
         id=action.id, version=action.version, name=action.name
     )
@@ -98,28 +115,30 @@ def execute_run(
     # reports a submitted-but-unused slot.
     warnings = tuple(_unexpected_slot_warnings(action, uploads))
 
-    manifest = RunManifest(
-        run_id=paths.run_id,
-        status=RunStatus.RUNNING,
-        action=action_reference,
-        created_at=created_at,
-        started_at=created_at,
-        validation=ValidationSummary(passed=True, warnings=warnings),
+    run = run_store.create_run(
+        Run.create(action_reference, created_at=created_at, warnings=warnings)
     )
-    storage.write_manifest(paths, manifest)
-
     try:
-        stored, input_issues = _store_and_check_slots(action, uploads, paths)
-        parsed, parse_issues = _parse_inputs(action, stored)
+        # The Run's ID comes from the Run, not from the filesystem: `storage`
+        # only builds the directories the upload and the exports still need.
+        paths = storage.create_run(run.run_id)
+
+        loaded, input_issues = _read_and_check_slots(action, uploads)
+        parsed, parse_issues = _parse_inputs(action, loaded)
         issues = [*input_issues, *parse_issues]
+
+        input_records = tuple(_input_metadata(loaded, parsed))
+        # The uploaded bytes have served their purpose: everything downstream
+        # works from the dataframes and this metadata. Releasing them here
+        # keeps a Run from holding a second copy of every input for the rest
+        # of its life.
+        loaded.clear()
 
         if not issues:
             issues.extend(_validate_datasets(action, parsed))
             issues.extend(action.validate(_frames_by_slot(parsed)))
 
-        manifest = manifest.model_copy(
-            update={"inputs": tuple(_input_metadata(stored, parsed))}
-        )
+        run = run_store.update_run(run.with_changes(inputs=input_records))
 
         if issues:
             raise RunValidationError(issues)
@@ -127,30 +146,30 @@ def execute_run(
         result = _execute_action(action, _frames_by_slot(parsed))
         outputs = _persist_outputs(action, result, paths)
 
-        completed_at = _now()
-        manifest = manifest.model_copy(
-            update={
-                "status": RunStatus.SUCCEEDED,
-                "completed_at": completed_at,
-                "duration_ms": _elapsed_ms(created_at, completed_at),
-                "validation": ValidationSummary(passed=True, warnings=warnings),
-                "outputs": tuple(outputs),
-                "metrics": dict(result.metrics),
-            }
+        completed_at = now()
+        run = run_store.update_run(
+            run.with_changes(
+                status=RunStatus.SUCCEEDED,
+                completed_at=completed_at,
+                updated_at=completed_at,
+                duration_ms=_elapsed_ms(created_at, completed_at),
+                validation=ValidationSummary(passed=True, warnings=warnings),
+                outputs=tuple(outputs),
+                metrics=dict(result.metrics),
+            )
         )
-        storage.write_manifest(paths, manifest)
-        return RunOutcome(manifest=manifest, paths=paths)
+        return RunOutcome(run=run, paths=paths)
 
     except WorkbenchError as error:
-        _finalize_failed(paths, manifest, created_at, error, warnings)
+        _finalize_failed(run, created_at, error, warnings)
         raise
     except Exception as error:  # pragma: no cover - defensive
-        logger.exception("Run %s failed unexpectedly", paths.run_id)
+        logger.exception("Run %s failed unexpectedly", run.run_id)
         wrapped = ActionExecutionError(
             "The Run failed unexpectedly. See the local server log for details.",
-            details={"run_id": paths.run_id},
+            details={"run_id": run.run_id},
         )
-        _finalize_failed(paths, manifest, created_at, wrapped, warnings)
+        _finalize_failed(run, created_at, wrapped, warnings)
         raise wrapped from error
 
 
@@ -159,19 +178,23 @@ def execute_run(
 # ---------------------------------------------------------------------------
 
 
-def _store_and_check_slots(
+def _read_and_check_slots(
     action: Action,
     uploads: Mapping[str, PendingUpload],
-    paths: RunPaths,
-) -> tuple[dict[str, StoredUpload], list[ValidationIssue]]:
-    """Preserve each supplied upload and check slots and extensions.
+) -> tuple[dict[str, LoadedUpload], list[ValidationIssue]]:
+    """Read each supplied upload into memory and check the basic properties.
 
-    Build plan 3.7: a required input slot must be present and its file's
-    extension must be one the Action accepts. Both are checked for every slot
-    before any parsing happens, so one request reports every slot problem at
-    once rather than one per attempt.
+    Build plan 3.7 and 6C.4, per slot: a required slot must be present, its
+    file's extension must be one the Action accepts, the file must not be
+    empty, and it must fit inside the configured upload limit. Every slot is
+    checked before any parsing happens, so one request reports every slot
+    problem at once rather than one per attempt.
+
+    Reading the bytes is the first thing done with an accepted file, and the
+    only thing done with it here: the file is not written anywhere, so there
+    is nothing to clean up when a later slot turns out to be invalid.
     """
-    stored: dict[str, StoredUpload] = {}
+    loaded: dict[str, LoadedUpload] = {}
     issues: list[ValidationIssue] = []
 
     for slot in action.inputs:
@@ -204,32 +227,48 @@ def _store_and_check_slots(
             )
             continue
 
-        # Preserved before anything else touches it; the original bytes are
-        # never modified afterwards (build plan section 16).
-        stored[slot.id] = storage.store_upload(
-            paths,
+        # Read into memory, bounded by the limit. An oversized upload raises
+        # rather than becoming an issue: it is a refusal of the request
+        # (413), not a finding about the data (build plan 3.3).
+        received = storage.read_upload(
             slot.id,
             upload.filename,
             upload.stream,
             max_bytes=config.MAX_UPLOAD_BYTES,
         )
 
-    return stored, issues
+        if received.size_bytes == 0:
+            issues.append(
+                EmptyUploadError(
+                    f"{storage.display_filename(upload.filename)} is empty.",
+                    details={
+                        "slot_id": slot.id,
+                        "original_filename": upload.filename,
+                    },
+                ).as_validation_issue(slot.id)
+            )
+            continue
+
+        loaded[slot.id] = received
+
+    return loaded, issues
 
 
 def _parse_inputs(
-    action: Action, stored: Mapping[str, StoredUpload]
+    action: Action, loaded: Mapping[str, LoadedUpload]
 ) -> tuple[dict[str, parser.ParsedFile], list[ValidationIssue]]:
-    """Parse every stored upload, collecting parse failures as issues."""
+    """Parse every upload from memory, collecting parse failures as issues."""
     parsed: dict[str, parser.ParsedFile] = {}
     issues: list[ValidationIssue] = []
 
     for slot in action.inputs:
-        upload = stored.get(slot.id)
+        upload = loaded.get(slot.id)
         if upload is None:
             continue
         try:
-            parsed[slot.id] = parser.parse_tabular_file(upload.path, upload.extension)
+            parsed[slot.id] = parser.parse_tabular_bytes(
+                upload.payload, upload.extension
+            )
         except InputValidationError as error:
             issues.append(error.as_validation_issue(slot.id))
 
@@ -322,32 +361,42 @@ def _persist_outputs(
 
 
 def _finalize_failed(
-    paths: RunPaths,
-    manifest: RunManifest,
+    run: Run,
     created_at: datetime,
     error: WorkbenchError,
     warnings: tuple[ValidationIssue, ...] = (),
-) -> RunManifest:
-    """Record a failed Run, keeping its directory and evidence (build plan 3.9)."""
-    completed_at = _now()
+) -> Run:
+    """Record a failed Run, keeping its evidence (build plan 3.9)."""
+    completed_at = now()
     validation_errors: tuple[ValidationIssue, ...] = (
         error.issues if isinstance(error, RunValidationError) else ()
     )
-    failed = manifest.model_copy(
-        update={
-            "status": RunStatus.FAILED,
-            "completed_at": completed_at,
-            "duration_ms": _elapsed_ms(created_at, completed_at),
-            "validation": ValidationSummary(
+    return run_store.update_run(
+        run.with_changes(
+            status=RunStatus.FAILED,
+            completed_at=completed_at,
+            updated_at=completed_at,
+            duration_ms=_elapsed_ms(created_at, completed_at),
+            validation=ValidationSummary(
                 passed=not validation_errors,
                 errors=validation_errors,
                 warnings=warnings,
             ),
-            "error": error.as_run_error(),
-        }
+            error=error.as_run_error(),
+        )
     )
-    storage.write_manifest(paths, failed)
-    return failed
+
+
+def delete_run(run_id: str) -> bool:
+    """Forget a Run and release the state it holds (build plan 6B.6).
+
+    Returns True if a Run was forgotten. The Run Store owns the Run's state;
+    the directory removal is the interim half, and it disappears with the last
+    of the Run's on-disk files in Phase 6C/6F.
+    """
+    removed = run_store.delete_run(run_id)
+    storage.delete_run_directory(run_id)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -362,15 +411,20 @@ def _frames_by_slot(
 
 
 def _input_metadata(
-    stored: Mapping[str, StoredUpload], parsed: Mapping[str, parser.ParsedFile]
+    loaded: Mapping[str, LoadedUpload], parsed: Mapping[str, parser.ParsedFile]
 ) -> list[InputMetadata]:
-    """Describe each preserved upload for the manifest.
+    """Describe each received upload for the manifest (build plan 6C.8).
 
-    A file that was stored but failed to parse still appears, with zero counts:
-    a failed Run should show what was uploaded, not an empty inputs list.
+    Records everything the manifest reports about an input — its slot, the
+    filename the client sent, the generated name, the byte count, the
+    extension, the engine and worksheet it was read with, and its shape.
+
+    A file that was received but failed to parse still appears, with zero
+    counts: a failed Run should show what was uploaded, not an empty inputs
+    list.
     """
     records: list[InputMetadata] = []
-    for slot_id, upload in stored.items():
+    for slot_id, upload in loaded.items():
         parsed_file = parsed.get(slot_id)
         records.append(
             InputMetadata(
@@ -412,10 +466,6 @@ def _unexpected_slot_warnings(
             details={"unexpected_slot_ids": unexpected},
         )
     ]
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _elapsed_ms(start: datetime, end: datetime) -> int:
