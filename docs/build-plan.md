@@ -692,8 +692,6 @@ Do not run:
 
 Do not delete unrelated files.
 
-Do not force push.
-
 At the end of every Phase, report:
 
 - files created

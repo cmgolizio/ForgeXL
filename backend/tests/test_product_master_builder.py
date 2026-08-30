@@ -24,7 +24,7 @@ from app.actions.product_master_builder import (
 )
 from app.errors import RunValidationError
 from app.models.schemas import RunStatus
-from app.services import run_store, storage
+from app.services import run_store
 from app.services.runner import execute_run
 
 from tests.fixtures import product_rows as fixture
@@ -270,7 +270,11 @@ def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
     assert output.column_count == 6
     assert output.columns == fixture.EXPECTED_COLUMNS
 
-    written = pl.read_parquet(outcome.paths.working_artifact(OUTPUT_ID))
+    # Since Phase 6D the Run holds the result frame itself; there is no
+    # Parquet file to read it back from.
+    assert outcome.result is not None
+    written = outcome.result.table(OUTPUT_ID)
+    assert written is not None
     assert written.rows() == list(fixture.EXPECTED_ROWS)
 
 
@@ -281,7 +285,8 @@ def test_an_xlsx_upload_produces_the_same_product_master(
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.xlsx", payload)})
 
-    written = pl.read_parquet(outcome.paths.working_artifact(OUTPUT_ID))
+    assert outcome.result is not None
+    written = outcome.result.primary
     assert tuple(written.columns) == fixture.EXPECTED_COLUMNS
     # Excel stores every number as a float, so `Vintage` returns as 2019.0
     # rather than 2019. The values, the row count and the row order match.
@@ -300,9 +305,9 @@ def test_an_xlsx_upload_produces_the_same_product_master(
 
 def _assert_failed_cleanly(runs_dir: Path, expected_code: str) -> None:
     """Assert exactly one Run exists, that it failed for `expected_code`, and
-    that it produced no output artifact of any kind."""
-    (run_directory,) = list(runs_dir.iterdir())
-    manifest = run_store.get_run(run_directory.name).to_manifest()
+    that it left no result of any kind behind (build plan 6D.8)."""
+    (run,) = run_store.list_runs()
+    manifest = run.to_manifest()
 
     assert manifest.status is RunStatus.FAILED
     assert manifest.error is not None
@@ -310,9 +315,8 @@ def _assert_failed_cleanly(runs_dir: Path, expected_code: str) -> None:
     assert manifest.validation.passed is False
     assert manifest.outputs == ()
 
-    paths = storage.run_paths(run_directory.name)
-    assert list(paths.working.iterdir()) == [], "a failed Run wrote working data"
-    assert list(paths.exports.iterdir()) == [], "a failed Run wrote an export"
+    assert run.result is None, "a failed Run kept a partially valid result"
+    assert list(runs_dir.rglob("*")) == [], "a failed Run wrote to the filesystem"
 
 
 def test_a_missing_sku_column_fails_the_run(runs_dir: Path, action) -> None:

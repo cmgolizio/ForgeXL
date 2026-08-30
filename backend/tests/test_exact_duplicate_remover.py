@@ -225,7 +225,11 @@ def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
     assert output.row_count == fixture.EXPECTED_OUTPUT_ROWS
     assert output.columns == fixture.HEADER
 
-    written = pl.read_parquet(outcome.paths.working_artifact(OUTPUT_ID))
+    # Since Phase 6D the Run holds the result frame itself; there is no
+    # Parquet file to read it back from.
+    assert outcome.result is not None
+    written = outcome.result.table(OUTPUT_ID)
+    assert written is not None
     assert written.rows() == list(fixture.EXPECTED_ROWS)
 
 
@@ -236,7 +240,8 @@ def test_an_xlsx_upload_produces_the_same_rows_as_the_csv(
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.xlsx", payload)})
 
-    written = pl.read_parquet(outcome.paths.working_artifact(OUTPUT_ID))
+    assert outcome.result is not None
+    written = outcome.result.primary
     assert tuple(written.columns) == fixture.HEADER
     # Excel stores every number as a float, so `Units` returns as 10.0 rather
     # than 10. The values, the row count and the row order are identical.

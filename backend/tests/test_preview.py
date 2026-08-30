@@ -1,27 +1,31 @@
-"""Preview service tests (build plan 3.14 and section 31)."""
+"""Preview service tests (build plan 3.14, section 31 and 6D.7).
+
+Since Phase 6D the preview slices the result DataFrame the Run is holding
+rather than reading an internal Parquet file, so these drive it with a frame.
+The limit rules it enforces are unchanged public contract.
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import polars as pl
 import pytest
 
-from app.errors import InvalidRequestError, MissingArtifactError
-from app.services import export, preview, storage
+from app.errors import InvalidRequestError
+from app.services import preview
 
 
 @pytest.fixture
-def populated(run_paths: storage.RunPaths) -> storage.RunPaths:
-    """A Run whose ``result`` output holds 1,000 numbered rows."""
-    export.write_output(
-        run_paths,
-        "result",
-        pl.DataFrame({"i": range(1000), "label": [f"row-{n}" for n in range(1000)]}),
+def frame() -> pl.DataFrame:
+    """A result table of 1,000 numbered rows."""
+    return pl.DataFrame(
+        {"i": range(1000), "label": [f"row-{n}" for n in range(1000)]}
     )
-    return run_paths
 
 
-def test_the_default_page_is_one_hundred_rows(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result")
+def test_the_default_page_is_one_hundred_rows(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame)
 
     assert preview.DEFAULT_PREVIEW_LIMIT == 100
     assert page.limit == 100
@@ -29,15 +33,15 @@ def test_the_default_page_is_one_hundred_rows(populated: storage.RunPaths) -> No
     assert page.offset == 0
 
 
-def test_the_page_reports_the_full_row_count(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result")
+def test_the_page_reports_the_full_row_count(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame)
 
     assert page.total_rows == 1000
     assert len(page.rows) == 100
 
 
-def test_only_the_requested_rows_are_returned(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result", offset=500, limit=5)
+def test_only_the_requested_rows_are_returned(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, offset=500, limit=5)
 
     assert page.rows == [
         [500, "row-500"],
@@ -48,72 +52,89 @@ def test_only_the_requested_rows_are_returned(populated: storage.RunPaths) -> No
     ]
 
 
-def test_the_columns_are_reported_in_order(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result", limit=1)
+def test_the_columns_are_reported_in_order(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, limit=1)
 
     assert page.columns == ("i", "label")
 
 
-def test_a_page_past_the_end_is_empty(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result", offset=5000, limit=10)
+def test_the_columns_are_reported_even_for_an_empty_page(
+    frame: pl.DataFrame,
+) -> None:
+    """A page past the end still describes the table's schema."""
+    page = preview.read_preview(frame, offset=5000, limit=10)
+
+    assert page.columns == ("i", "label")
+
+
+def test_a_page_past_the_end_is_empty(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, offset=5000, limit=10)
 
     assert page.rows == []
     assert page.total_rows == 1000
 
 
-def test_the_maximum_limit_is_five_hundred(populated: storage.RunPaths) -> None:
-    page = preview.read_preview(populated, "result", limit=preview.MAX_PREVIEW_LIMIT)
+def test_the_maximum_limit_is_five_hundred(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, limit=preview.MAX_PREVIEW_LIMIT)
 
     assert preview.MAX_PREVIEW_LIMIT == 500
     assert len(page.rows) == 500
 
 
 @pytest.mark.parametrize("limit", [0, -1, 501, 1_000_000])
-def test_an_out_of_range_limit_is_refused(
-    populated: storage.RunPaths, limit: int
-) -> None:
+def test_an_out_of_range_limit_is_refused(frame: pl.DataFrame, limit: int) -> None:
     with pytest.raises(InvalidRequestError):
-        preview.read_preview(populated, "result", limit=limit)
+        preview.read_preview(frame, limit=limit)
 
 
-def test_a_negative_offset_is_refused(populated: storage.RunPaths) -> None:
+def test_a_negative_offset_is_refused(frame: pl.DataFrame) -> None:
     with pytest.raises(InvalidRequestError):
-        preview.read_preview(populated, "result", offset=-1)
+        preview.read_preview(frame, offset=-1)
 
 
 def test_an_over_large_limit_is_refused_rather_than_clamped(
-    populated: storage.RunPaths,
+    frame: pl.DataFrame,
 ) -> None:
     """A silently reduced page would misreport what the caller received."""
     with pytest.raises(InvalidRequestError) as raised:
-        preview.read_preview(populated, "result", limit=501)
+        preview.read_preview(frame, limit=501)
 
     assert raised.value.details["maximum"] == 500
 
 
-def test_a_missing_parquet_artifact_is_reported(
-    run_paths: storage.RunPaths,
-) -> None:
-    with pytest.raises(MissingArtifactError):
-        preview.read_preview(run_paths, "result")
-
-
-def test_the_preview_reads_parquet_not_the_csv_export(
-    populated: storage.RunPaths,
-) -> None:
-    """Build plan section 28: Parquet is the internal preview source."""
-    populated.export_artifact("result", "csv").unlink()
-
-    page = preview.read_preview(populated, "result", limit=1)
-
-    assert page.rows == [[0, "row-0"]]
-
-
-def test_null_values_are_preserved_as_null(run_paths: storage.RunPaths) -> None:
-    export.write_output(
-        run_paths, "result", pl.DataFrame({"a": [1, None], "b": ["x", None]})
-    )
-
-    page = preview.read_preview(run_paths, "result")
+def test_null_values_are_preserved_as_null() -> None:
+    page = preview.read_preview(pl.DataFrame({"a": [1, None], "b": ["x", None]}))
 
     assert page.rows == [[1, "x"], [None, None]]
+
+
+def test_an_empty_result_previews_as_no_rows() -> None:
+    page = preview.read_preview(pl.DataFrame({"a": [], "b": []}))
+
+    assert page.rows == []
+    assert page.total_rows == 0
+    assert page.columns == ("a", "b")
+
+
+def test_the_source_frame_is_not_modified(frame: pl.DataFrame) -> None:
+    """Slicing a page must never disturb the table the Run is holding."""
+    before = frame.rows()
+
+    preview.read_preview(frame, offset=10, limit=5)
+
+    assert frame.rows() == before
+
+
+def test_previewing_reads_nothing_from_disk(
+    tmp_path: Path, runs_dir: Path, frame: pl.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Build plan 6D.7: the retained frame is the source, not a written file."""
+    empty = tmp_path / "cwd"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+
+    page = preview.read_preview(frame, limit=1)
+
+    assert page.rows == [[0, "row-0"]]
+    assert list(empty.iterdir()) == []
+    assert list(runs_dir.rglob("*")) == []

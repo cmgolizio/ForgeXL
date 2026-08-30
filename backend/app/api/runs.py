@@ -6,12 +6,16 @@ back. All pipeline logic lives in :mod:`app.services.runner`.
 
 Uploads arrive here directly from the browser. They are never proxied through
 Next.js and never copied through an intermediate service (build plan section 5).
+
+Since Phase 6D nothing here touches the filesystem. A Run holds its result
+tables in memory, so the preview slices one of those frames and a download
+renders one into bytes on the way out; no path is built, opened or served.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse
+import polars as pl
+from fastapi import APIRouter, Query, Request, Response
 from starlette.datastructures import UploadFile
 
 from app.actions import registry
@@ -21,8 +25,9 @@ from app.errors import (
     UnknownActionError,
     UnknownOutputError,
 )
+from app.models.run import Run
 from app.models.schemas import OutputMetadata, PreviewResponse, RunManifest
-from app.services import export, preview, run_store, storage
+from app.services import export, preview, run_store
 from app.services.runner import PendingUpload, execute_run
 
 router = APIRouter(prefix="/api", tags=["runs"])
@@ -100,17 +105,17 @@ def get_output_preview(
 ) -> PreviewResponse:
     """Return one page of an output dataset (build plan 3.15).
 
-    Only the requested rows are read from the internal Parquet file; the
+    Only the requested rows are sliced out of the Run's result table; the
     complete dataset is never serialised into a response.
     """
-    manifest = run_store.get_run(run_id).to_manifest()
-    _require_output(manifest, output_id)
+    run = run_store.get_run(run_id)
+    _require_output(run.to_manifest(), output_id)
 
     page = preview.read_preview(
-        storage.run_paths(manifest.run_id), output_id, offset=offset, limit=limit
+        _result_table(run, output_id), offset=offset, limit=limit
     )
     return PreviewResponse(
-        run_id=manifest.run_id,
+        run_id=run.run_id,
         output_id=output_id,
         columns=page.columns,
         rows=page.rows,
@@ -121,13 +126,13 @@ def get_output_preview(
 
 
 @router.get("/runs/{run_id}/outputs/{output_id}/download/csv")
-def download_output_csv(run_id: str, output_id: str) -> FileResponse:
+def download_output_csv(run_id: str, output_id: str) -> Response:
     """Download one output as CSV (build plan 3.16)."""
     return _download(run_id, output_id, export.CSV_FORMAT)
 
 
 @router.get("/runs/{run_id}/outputs/{output_id}/download/xlsx")
-def download_output_xlsx(run_id: str, output_id: str) -> FileResponse:
+def download_output_xlsx(run_id: str, output_id: str) -> Response:
     """Download one output as XLSX (build plan 3.16)."""
     return _download(run_id, output_id, export.XLSX_FORMAT)
 
@@ -157,39 +162,55 @@ def _require_output(manifest: RunManifest, output_id: str) -> OutputMetadata:
     )
 
 
-def _download(run_id: str, output_id: str, export_format: str) -> FileResponse:
-    """Serve a generated export from its controlled server path.
+def _result_table(run: Run, output_id: str) -> pl.DataFrame:
+    """Return the Run's retained table for `output_id`.
 
-    Every path component is derived from validated IDs: the Run ID must parse
-    as a UUID and the output ID must appear in that Run's manifest. Nothing the
-    client sends is used as a path directly (build plan 3.16).
+    The output has already been confirmed against the Run's manifest, so a
+    table that is nevertheless absent means the Run no longer holds its
+    result — a failed Run, or one whose result has been released. That is a
+    missing artifact, not an unknown output.
     """
-    manifest = run_store.get_run(run_id).to_manifest()
-    output = _require_output(manifest, output_id)
+    table = run.result.table(output_id) if run.result is not None else None
+    if table is None:
+        raise MissingArtifactError(
+            "That output's data is no longer available.",
+            details={"run_id": run.run_id, "output_id": output_id},
+        )
+    return table
+
+
+def _download(run_id: str, output_id: str, export_format: str) -> Response:
+    """Generate one export from the Run's result table and send it.
+
+    Nothing is read from or written to the filesystem: the bytes are rendered
+    from the retained DataFrame for this request and released with the
+    response. The Run ID must parse as a UUID and the output ID must appear in
+    that Run's manifest, so nothing the client sends is used to reach data it
+    did not ask for (build plan 3.16).
+    """
+    run = run_store.get_run(run_id)
+    output = _require_output(run.to_manifest(), output_id)
 
     if export_format not in output.formats:
         raise UnknownOutputError(
             f"That output is not available as {export_format.upper()}.",
             details={
-                "run_id": manifest.run_id,
+                "run_id": run.run_id,
                 "output_id": output_id,
                 "available_formats": list(output.formats),
             },
         )
 
-    path = storage.run_paths(manifest.run_id).export_artifact(output_id, export_format)
-    if not path.is_file():
-        raise MissingArtifactError(
-            "That export is no longer available.",
-            details={
-                "run_id": manifest.run_id,
-                "output_id": output_id,
-                "format": export_format,
-            },
-        )
+    payload = export.to_bytes(
+        _result_table(run, output_id), export_format, name=output_id
+    )
 
-    return FileResponse(
-        path,
+    return Response(
+        content=payload,
         media_type=_DOWNLOAD_MEDIA_TYPES[export_format],
-        filename=f"{output_id}.{export_format}",
+        headers={
+            "content-disposition": (
+                f'attachment; filename="{output_id}.{export_format}"'
+            )
+        },
     )

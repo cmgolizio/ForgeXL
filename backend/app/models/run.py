@@ -19,6 +19,13 @@ API-facing data. Pydantic earns its place at the boundary, which is exactly
 where :meth:`Run.to_manifest` hands over. `RunManifest` remains the serialised
 shape and is unchanged by this phase.
 
+Since Phase 6D a Run also carries what it produced. :class:`RunResult` holds
+the Action's result tables as Polars DataFrames, in memory, for as long as the
+Run Store keeps the Run: nothing is written to the filesystem, and forgetting
+the Run releases the frames (build plan 6D.5, 6D.7 and 6D.8). This is why the
+model is a dataclass and not Pydantic — a DataFrame is runtime state, not
+API-facing data, and :meth:`Run.to_manifest` deliberately does not carry it.
+
 Run identity lives here too. :func:`new_run_id` and :func:`parse_run_id` keep
 the Phase 3 convention exactly — ``str(uuid.uuid4())``, validated as the
 canonical string form of a UUID (build plan 6B.7).
@@ -30,7 +37,10 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any
+
+import polars as pl
 
 from app.errors import UnknownRunError
 from app.models.schemas import (
@@ -75,6 +85,73 @@ def now() -> datetime:
 
 
 @dataclass(frozen=True)
+class RunResult:
+    """The tables one Action produced, held in memory (build plan 6D.5).
+
+    An Action declares one or more outputs and returns a frame for each. Most
+    Actions produce exactly one, so the common case must stay simple: `primary`
+    is the frame for the Action's first declared output, and `secondary` is
+    whatever else it produced, in declaration order. Nothing here requires an
+    Action to produce more than one table.
+
+    The frames are the Action's own result objects, unwritten and unconverted:
+    the run keeps them as DataFrames rather than as intermediary spreadsheet
+    files (build plan 6D.7). They are released when the Run is forgotten.
+
+    `tables` is exposed read-only so a caller cannot add or drop a result table
+    behind the Run's back — the same rule the frozen Run itself follows.
+    """
+
+    #: Result frames keyed by the Action's declared output ID, in declaration
+    #: order. Read-only.
+    tables: Mapping[str, pl.DataFrame]
+
+    #: The Action's first declared output — the table a caller means when it
+    #: does not name one.
+    primary_output_id: str
+
+    def __post_init__(self) -> None:
+        if self.primary_output_id not in self.tables:
+            raise ValueError(
+                f"Primary output {self.primary_output_id!r} is not among the "
+                f"result tables {sorted(self.tables)}."
+            )
+        object.__setattr__(self, "tables", MappingProxyType(dict(self.tables)))
+
+    @classmethod
+    def of(cls, tables: Mapping[str, pl.DataFrame]) -> RunResult:
+        """Build a result whose primary table is the first one given.
+
+        The runner builds `tables` by walking the Action's declared outputs, so
+        "first given" is "first declared" — the Action decides which table is
+        primary, by declaring it first.
+        """
+        if not tables:
+            raise ValueError("A result must contain at least one table.")
+        return cls(tables=tables, primary_output_id=next(iter(tables)))
+
+    @property
+    def primary(self) -> pl.DataFrame:
+        """The Action's primary result table."""
+        return self.tables[self.primary_output_id]
+
+    @property
+    def secondary(self) -> Mapping[str, pl.DataFrame]:
+        """Any further result tables, keyed by output ID. Usually empty."""
+        return MappingProxyType(
+            {
+                output_id: frame
+                for output_id, frame in self.tables.items()
+                if output_id != self.primary_output_id
+            }
+        )
+
+    def table(self, output_id: str) -> pl.DataFrame | None:
+        """Return one result table by output ID, or None if it has none."""
+        return self.tables.get(output_id)
+
+
+@dataclass(frozen=True)
 class Run:
     """One execution of one Action, as runtime state.
 
@@ -98,6 +175,13 @@ class Run:
     outputs: tuple[OutputMetadata, ...] = ()
     metrics: Mapping[str, Any] = field(default_factory=dict)
     error: RunError | None = None
+
+    #: The tables this Run produced, kept in memory (build plan 6D.5/6D.7).
+    #: None until the Action has succeeded, and None on every failed Run, so a
+    #: Run never carries a partially valid result (build plan 6D.8). It is
+    #: deliberately absent from `to_manifest`: the manifest describes results,
+    #: it never carries their rows (build plan section 23).
+    result: RunResult | None = None
 
     @classmethod
     def create(

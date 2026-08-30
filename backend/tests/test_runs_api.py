@@ -14,7 +14,8 @@ import polars as pl
 import pytest
 
 from app import config
-from app.services import storage
+from app.models.run import new_run_id
+from app.services import run_store
 
 from tests.helpers import csv_bytes, make_action, upload_file, xlsx_bytes
 
@@ -154,11 +155,11 @@ def test_the_error_body_has_the_documented_shape(run_client) -> None:
     assert isinstance(body["error"]["message"], str)
 
 
-def test_a_failed_run_is_retrievable_afterwards(run_client, runs_dir: Path) -> None:
+def test_a_failed_run_is_retrievable_afterwards(run_client) -> None:
     _start_run(run_client, action_id="strict")
 
-    (run_directory,) = list(runs_dir.iterdir())
-    response = run_client.get(f"/api/runs/{run_directory.name}")
+    (run,) = run_store.list_runs()
+    response = run_client.get(f"/api/runs/{run.run_id}")
 
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
@@ -179,7 +180,7 @@ def test_a_run_can_be_retrieved_by_id(run_client) -> None:
 
 
 def test_an_unknown_run_id_returns_404(run_client) -> None:
-    response = run_client.get(f"/api/runs/{storage.new_run_id()}")
+    response = run_client.get(f"/api/runs/{new_run_id()}")
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "UNKNOWN_RUN"
@@ -326,7 +327,7 @@ def test_a_traversal_shaped_output_id_returns_404(run_client, output_id: str) ->
 
 def test_the_preview_of_an_unknown_run_returns_404(run_client) -> None:
     response = run_client.get(
-        f"/api/runs/{storage.new_run_id()}/outputs/result/preview"
+        f"/api/runs/{new_run_id()}/outputs/result/preview"
     )
 
     assert response.status_code == 404
@@ -407,6 +408,91 @@ def test_the_download_filename_comes_from_the_output_not_the_upload(
     assert "evil" not in disposition
 
 
+def test_each_output_downloads_and_previews_its_own_table(
+    client, registered_actions
+) -> None:
+    """Build plan 6D.5, over HTTP: a secondary result is its own dataset."""
+    from collections.abc import Mapping
+
+    from app.actions.base import Action, ActionResult
+    from app.models.schemas import ActionInput, ActionOutput
+
+    class _TwoOutputs(Action):
+        id = "two_outputs"
+        version = "1.0.0"
+        name = "Two Outputs"
+        description = "Splits its input in two."
+        inputs = (
+            ActionInput(
+                id="source_file", label="Source File", accepted_extensions=(".csv",)
+            ),
+        )
+        outputs = (
+            ActionOutput(id="kept", label="Kept"),
+            ActionOutput(id="rejected", label="Rejected"),
+        )
+
+        def run(self, inputs: Mapping[str, pl.DataFrame]) -> ActionResult:
+            frame = inputs["source_file"]
+            return ActionResult(
+                outputs={"kept": frame.head(1), "rejected": frame.tail(1)}
+            )
+
+    registered_actions(_TwoOutputs())
+    run_id = _start_run(client, action_id="two_outputs").json()["run_id"]
+
+    kept = client.get(f"/api/runs/{run_id}/outputs/kept/preview").json()
+    rejected = client.get(f"/api/runs/{run_id}/outputs/rejected/preview").json()
+    assert kept["rows"] == [["A1", 2019, "Acme"]]
+    assert rejected["rows"] == [["A3", 2021, "Gamma"]]
+
+    kept_csv = client.get(f"/api/runs/{run_id}/outputs/kept/download/csv")
+    rejected_csv = client.get(f"/api/runs/{run_id}/outputs/rejected/download/csv")
+    assert kept_csv.text.splitlines()[1] == "A1,2019,Acme"
+    assert rejected_csv.text.splitlines()[1] == "A3,2021,Gamma"
+    assert "kept.csv" in kept_csv.headers["content-disposition"]
+    assert "rejected.csv" in rejected_csv.headers["content-disposition"]
+
+
+def test_each_output_downloads_its_own_worksheet(client, registered_actions) -> None:
+    """The XLSX of a secondary output names that output, not the primary one."""
+    from collections.abc import Mapping
+
+    from app.actions.base import Action, ActionResult
+    from app.models.schemas import ActionInput, ActionOutput
+    from app.services import parser
+
+    class _TwoOutputs(Action):
+        id = "two_outputs"
+        version = "1.0.0"
+        name = "Two Outputs"
+        description = "Splits its input in two."
+        inputs = (
+            ActionInput(
+                id="source_file", label="Source File", accepted_extensions=(".csv",)
+            ),
+        )
+        outputs = (
+            ActionOutput(id="kept", label="Kept"),
+            ActionOutput(id="rejected", label="Rejected"),
+        )
+
+        def run(self, inputs: Mapping[str, pl.DataFrame]) -> ActionResult:
+            frame = inputs["source_file"]
+            return ActionResult(
+                outputs={"kept": frame.head(1), "rejected": frame.tail(1)}
+            )
+
+    registered_actions(_TwoOutputs())
+    run_id = _start_run(client, action_id="two_outputs").json()["run_id"]
+
+    response = client.get(f"/api/runs/{run_id}/outputs/rejected/download/xlsx")
+    parsed = parser.parse_tabular_bytes(response.content, ".xlsx")
+
+    assert parsed.worksheet == "rejected"
+    assert parsed.frame.rows() == [("A3", 2021.0, "Gamma")]
+
+
 def test_downloading_an_unknown_output_returns_404(run_client) -> None:
     run_id = _start_run(run_client).json()["run_id"]
 
@@ -421,23 +507,57 @@ def test_downloading_an_unknown_output_returns_404(run_client) -> None:
 
 
 def test_downloading_from_an_unknown_run_returns_404(run_client) -> None:
-    run_id = storage.new_run_id()
+    run_id = new_run_id()
 
     response = run_client.get(f"/api/runs/{run_id}/outputs/result/download/csv")
 
     assert response.status_code == 404
 
 
-def test_a_download_whose_file_is_missing_returns_404(
-    run_client, runs_dir: Path
+def test_a_download_whose_result_has_been_released_returns_404(
+    run_client,
 ) -> None:
+    """A Run whose result is gone reports a missing artifact, not a crash.
+
+    Before Phase 6D this was an export file that had been removed from disk.
+    A result lives in the Run now, so the equivalent state is a Run whose
+    result has been released while its metadata is still recorded.
+    """
     run_id = _start_run(run_client).json()["run_id"]
-    storage.run_paths(run_id).export_artifact("result", "csv").unlink()
+    run = run_store.get_run(run_id)
+    run_store.update_run(run.with_changes(result=None))
 
     response = run_client.get(f"/api/runs/{run_id}/outputs/result/download/csv")
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "MISSING_ARTIFACT"
+
+
+def test_a_preview_whose_result_has_been_released_returns_404(
+    run_client,
+) -> None:
+    run_id = _start_run(run_client).json()["run_id"]
+    run = run_store.get_run(run_id)
+    run_store.update_run(run.with_changes(result=None))
+
+    response = run_client.get(f"/api/runs/{run_id}/outputs/result/preview")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "MISSING_ARTIFACT"
+
+
+def test_a_download_is_generated_from_the_result_not_a_file(
+    run_client, runs_dir: Path
+) -> None:
+    """Build plan 6D: no ``exports/`` directory is required to download."""
+    run_id = _start_run(run_client).json()["run_id"]
+
+    csv_response = run_client.get(f"/api/runs/{run_id}/outputs/result/download/csv")
+    xlsx_response = run_client.get(f"/api/runs/{run_id}/outputs/result/download/xlsx")
+
+    assert csv_response.status_code == 200
+    assert xlsx_response.status_code == 200
+    assert list(runs_dir.rglob("*")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -446,24 +566,19 @@ def test_a_download_whose_file_is_missing_returns_404(
 # ---------------------------------------------------------------------------
 
 
-def test_the_uploaded_source_is_never_written_to_the_run_directory(
+def test_a_run_writes_nothing_to_the_filesystem(
     run_client, runs_dir: Path
 ) -> None:
-    """Build plan 6C.3: no permanent server-side upload file is created."""
+    """Build plan 6C.3 and 6D: a Run needs no directory of any kind.
+
+    Until Phase 6D this asserted the three generated artifacts and no more.
+    Results are held in memory now, so the whole runs directory stays empty:
+    no ``inputs/``, no ``working/``, no ``exports/``, no run directory at all.
+    """
     run_id = _start_run(run_client).json()["run_id"]
 
-    run_directory = runs_dir / run_id
-    written = sorted(
-        path.relative_to(run_directory).as_posix()
-        for path in run_directory.rglob("*")
-        if path.is_file()
-    )
-    assert written == [
-        "exports/result.csv",
-        "exports/result.xlsx",
-        "working/result.parquet",
-    ]
-    assert not (run_directory / "inputs").exists()
+    assert list(runs_dir.rglob("*")) == []
+    assert not (runs_dir / run_id).exists()
 
 
 def test_the_uploaded_source_is_recorded_under_a_generated_name(
@@ -492,7 +607,7 @@ def test_a_hostile_upload_filename_writes_nothing_anywhere(
     assert response.status_code == 200
     assert not (runs_dir.parent / "escaped.csv").exists()
     # There is no longer any file written from the upload at all.
-    assert not (runs_dir / run_id / "inputs").exists()
+    assert list(runs_dir.rglob("*")) == []
     # The generated name is what the application used...
     assert response.json()["inputs"][0]["stored_filename"] == "source.csv"
     # ...and the name is still recorded as metadata.

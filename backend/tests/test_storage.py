@@ -1,11 +1,19 @@
-"""Storage service tests (build plan 3.1-3.3).
+"""Storage service tests (build plan 3.1-3.3 and 6C.3-6C.4).
 
-Covers Run directory creation and removal, generated filenames and the upload
-limit, plus the path-safety rules of build plan section 16.
+Covers Run directory creation and removal, generated filenames, reading an
+upload into memory and the upload limit, plus the path-safety rules of build
+plan section 16.
 
-Run *state* is no longer stored here — since Phase 6B it lives in the Run
-Store, and the tests that covered manifest writing and reading now live in
-`tests/test_run_store.py` against `create_run` / `get_run` / `update_run`.
+Two things have left this module as Phase 6 has progressed:
+
+* Run *state* moved to the Run Store in Phase 6B. The tests that covered
+  manifest writing and reading live in `tests/test_run_store.py`, against
+  `create_run` / `get_run` / `update_run`.
+* An uploaded spreadsheet stopped reaching the disk in Phase 6C. The tests
+  that asserted a stored file now assert the in-memory payload that replaced
+  it — and, where the old test proved a hostile name could not escape its
+  directory, the replacement proves the stronger fact that no path is built
+  at all.
 """
 
 from __future__ import annotations
@@ -29,10 +37,17 @@ def test_create_run_creates_the_full_directory_tree(runs_dir: Path) -> None:
     paths = storage.create_run()
 
     assert paths.root.is_dir()
-    assert paths.inputs.is_dir()
     assert paths.working.is_dir()
     assert paths.exports.is_dir()
     assert paths.root.parent == runs_dir
+
+
+def test_no_inputs_directory_is_created(runs_dir: Path) -> None:
+    """Build plan 6C.3: uploads are read into memory, so nothing stores them."""
+    paths = storage.create_run()
+
+    assert not (paths.root / "inputs").exists()
+    assert not hasattr(paths, "inputs")
 
 
 def test_each_run_gets_its_own_isolated_directory(runs_dir: Path) -> None:
@@ -73,11 +88,23 @@ def test_parse_run_id_rejects_anything_that_is_not_a_uuid(candidate: str) -> Non
 
 
 @pytest.mark.parametrize("unsafe", ["../escape", "a/b", "a.b", "", "-leading"])
-def test_input_directory_rejects_an_unsafe_slot_id(
-    run_paths: storage.RunPaths, unsafe: str
+def test_an_unsafe_slot_id_reaches_no_path_at_all(
+    runs_dir: Path, unsafe: str
 ) -> None:
-    with pytest.raises(ValueError):
-        run_paths.input_directory(unsafe)
+    """Since 6C a slot ID contributes to no path, so none can be traversed.
+
+    The Phase 3 version of this test asserted that `input_directory` refused an
+    unsafe slot ID. That guard is gone because the directory it guarded is
+    gone; this asserts the stronger fact that replaced it — a hostile slot ID
+    is carried as a dictionary key and writes nothing anywhere.
+    """
+    before = sorted(path.name for path in runs_dir.rglob("*"))
+
+    received = storage.read_upload(unsafe, "sales.csv", io.BytesIO(b"a\n1\n"))
+
+    assert received.slot_id == unsafe
+    assert received.payload == b"a\n1\n"
+    assert sorted(path.name for path in runs_dir.rglob("*")) == before
 
 
 @pytest.mark.parametrize("unsafe", ["../escape", "a/b", "a.b", ""])
@@ -115,6 +142,20 @@ def test_extension_of_reads_only_the_extension(filename: str, expected: str) -> 
 
 
 @pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("sales.csv", "sales.csv"),
+        ("../../evil.csv", "evil.csv"),
+        ("..\\..\\evil.csv", "evil.csv"),
+        ("/absolute/path/data.csv", "data.csv"),
+    ],
+)
+def test_display_filename_never_echoes_a_path(filename: str, expected: str) -> None:
+    """A user-facing message must not repeat a path-shaped name back."""
+    assert storage.display_filename(filename) == expected
+
+
+@pytest.mark.parametrize(
     "hostile",
     [
         "../../evil.csv",
@@ -126,56 +167,80 @@ def test_extension_of_reads_only_the_extension(filename: str, expected: str) -> 
         "strange name.csv",
     ],
 )
-def test_a_hostile_filename_never_escapes_its_slot_directory(
-    run_paths: storage.RunPaths, hostile: str
+def test_a_hostile_filename_becomes_a_generated_name_and_writes_nothing(
+    runs_dir: Path, hostile: str
 ) -> None:
-    stored = storage.store_upload(
-        run_paths, "source_file", hostile, io.BytesIO(b"a,b\n1,2\n")
+    received = storage.read_upload("source_file", hostile, io.BytesIO(b"a,b\n1,2\n"))
+
+    # The generated name is what the application uses, not the client's.
+    assert received.stored_filename == "source.csv"
+    assert received.original_filename == hostile
+    # Nothing was written under either name, anywhere.
+    assert list(runs_dir.rglob("*")) == []
+    assert not (runs_dir.parent / "evil.csv").exists()
+
+
+def test_the_original_filename_is_preserved_as_metadata(runs_dir: Path) -> None:
+    received = storage.read_upload(
+        "source_file", "Q3 Sales (final).csv", io.BytesIO(b"a\n1\n")
     )
 
-    # The generated name is used, not the client's.
-    assert stored.stored_filename == "source.csv"
-    assert stored.path.name == "source.csv"
-    assert stored.path.parent == run_paths.input_directory("source_file")
-    # The written file is inside the Run directory, whatever the name claimed.
-    assert run_paths.root.resolve() in stored.path.resolve().parents
+    assert received.original_filename == "Q3 Sales (final).csv"
+    assert received.stored_filename == "source.csv"
 
 
-def test_the_original_filename_is_preserved_as_metadata(
-    run_paths: storage.RunPaths,
-) -> None:
-    stored = storage.store_upload(
-        run_paths, "source_file", "Q3 Sales (final).csv", io.BytesIO(b"a\n1\n")
-    )
-
-    assert stored.original_filename == "Q3 Sales (final).csv"
-    assert stored.stored_filename == "source.csv"
+def test_stored_filename_is_derived_from_the_extension_alone() -> None:
+    assert storage.stored_filename_for(".csv") == "source.csv"
+    assert storage.stored_filename_for(".xlsx") == "source.xlsx"
+    assert storage.stored_filename_for("") == "source"
 
 
-def test_the_stored_bytes_match_the_upload_exactly(
-    run_paths: storage.RunPaths,
-) -> None:
+def test_the_upload_is_held_in_memory_byte_for_byte(runs_dir: Path) -> None:
     payload = "a,b\n1,café\n2,naïve\n".encode()
 
-    stored = storage.store_upload(
-        run_paths, "source_file", "data.csv", io.BytesIO(payload)
-    )
+    received = storage.read_upload("source_file", "data.csv", io.BytesIO(payload))
 
-    assert stored.path.read_bytes() == payload
-    assert stored.size_bytes == len(payload)
+    assert received.payload == payload
+    assert received.size_bytes == len(payload)
+    assert received.extension == ".csv"
+    # Reading an upload writes nothing (build plan 6C.3).
+    assert list(runs_dir.rglob("*")) == []
 
 
-def test_two_slots_are_stored_side_by_side(run_paths: storage.RunPaths) -> None:
-    first = storage.store_upload(
-        run_paths, "current_sales", "a.csv", io.BytesIO(b"a\n1\n")
-    )
-    second = storage.store_upload(
-        run_paths, "historical_sales", "b.csv", io.BytesIO(b"b\n2\n")
-    )
+def test_the_size_is_counted_rather_than_trusted(runs_dir: Path) -> None:
+    """A client-declared length is never used: the bytes received are counted."""
+    payload = b"x" * 4096
 
-    assert first.path != second.path
-    assert first.path.read_bytes() == b"a\n1\n"
-    assert second.path.read_bytes() == b"b\n2\n"
+    received = storage.read_upload("source_file", "d.csv", io.BytesIO(payload))
+
+    assert received.size_bytes == 4096
+
+
+def test_an_empty_upload_is_read_as_zero_bytes(runs_dir: Path) -> None:
+    """Emptiness is the runner's finding to report; reading it is not an error."""
+    received = storage.read_upload("source_file", "empty.csv", io.BytesIO(b""))
+
+    assert received.payload == b""
+    assert received.size_bytes == 0
+
+
+def test_two_slots_are_read_independently(runs_dir: Path) -> None:
+    first = storage.read_upload("current_sales", "a.csv", io.BytesIO(b"a\n1\n"))
+    second = storage.read_upload("historical_sales", "b.csv", io.BytesIO(b"b\n2\n"))
+
+    assert first.slot_id == "current_sales"
+    assert second.slot_id == "historical_sales"
+    assert first.payload == b"a\n1\n"
+    assert second.payload == b"b\n2\n"
+
+
+def test_an_upload_larger_than_one_chunk_is_read_whole(runs_dir: Path) -> None:
+    """The chunked read must reassemble the payload exactly."""
+    payload = bytes(range(256)) * 20_000  # ~5 MB, several 1 MiB chunks
+
+    received = storage.read_upload("source_file", "big.csv", io.BytesIO(payload))
+
+    assert received.payload == payload
 
 
 # ---------------------------------------------------------------------------
@@ -183,43 +248,70 @@ def test_two_slots_are_stored_side_by_side(run_paths: storage.RunPaths) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_upload_at_the_limit_is_accepted(run_paths: storage.RunPaths) -> None:
+def test_an_upload_at_the_limit_is_accepted(runs_dir: Path) -> None:
     payload = b"x" * 64
 
-    stored = storage.store_upload(
-        run_paths, "source_file", "d.csv", io.BytesIO(payload), max_bytes=64
+    received = storage.read_upload(
+        "source_file", "d.csv", io.BytesIO(payload), max_bytes=64
     )
 
-    assert stored.size_bytes == 64
+    assert received.size_bytes == 64
 
 
-def test_an_oversized_upload_is_rejected(run_paths: storage.RunPaths) -> None:
+def test_an_oversized_upload_is_rejected(runs_dir: Path) -> None:
     with pytest.raises(UploadTooLargeError) as raised:
-        storage.store_upload(
-            run_paths,
-            "source_file",
-            "big.csv",
-            io.BytesIO(b"x" * 65),
-            max_bytes=64,
+        storage.read_upload(
+            "source_file", "big.csv", io.BytesIO(b"x" * 65), max_bytes=64
         )
 
     assert raised.value.http_status == 413
     assert raised.value.code == "FILE_TOO_LARGE"
 
 
-def test_a_rejected_upload_leaves_no_partial_file(
-    run_paths: storage.RunPaths,
-) -> None:
-    with pytest.raises(UploadTooLargeError):
-        storage.store_upload(
-            run_paths,
+def test_a_rejected_upload_is_not_retained_in_memory(runs_dir: Path) -> None:
+    """The partial read is dropped before the error propagates."""
+    with pytest.raises(UploadTooLargeError) as raised:
+        storage.read_upload(
             "source_file",
             "big.csv",
             io.BytesIO(b"x" * (4 * 1024 * 1024)),
             max_bytes=1024,
         )
 
-    assert not (run_paths.input_directory("source_file") / "source.csv").exists()
+    assert "big.csv" in raised.value.message
+    assert list(runs_dir.rglob("*")) == []
+
+
+def test_the_limit_stops_the_read_before_the_whole_file_is_accumulated(
+    runs_dir: Path,
+) -> None:
+    """The buffer must never grow past the limit (build plan 3.3 under 6C).
+
+    A stream that counts what it served proves the read stopped early rather
+    than accumulating 64 MB and checking afterwards.
+    """
+
+    class _CountingStream:
+        def __init__(self, total: int) -> None:
+            self.remaining = total
+            self.served = 0
+
+        def read(self, size: int = -1, /) -> bytes:
+            if self.remaining <= 0:
+                return b""
+            count = self.remaining if size < 0 else min(size, self.remaining)
+            self.remaining -= count
+            self.served += count
+            return b"x" * count
+
+    limit = 2 * 1024 * 1024
+    stream = _CountingStream(64 * 1024 * 1024)
+
+    with pytest.raises(UploadTooLargeError):
+        storage.read_upload("source_file", "big.csv", stream, max_bytes=limit)
+
+    # At most one chunk beyond the limit was ever read.
+    assert stream.served <= limit + (1024 * 1024)
 
 
 @pytest.mark.parametrize(
@@ -231,13 +323,10 @@ def test_a_rejected_upload_leaves_no_partial_file(
         (1, "1 byte"),
     ],
 )
-def test_the_limit_is_stated_in_readable_units(
-    run_paths: storage.RunPaths, limit: int, expected: str
-) -> None:
+def test_the_limit_is_stated_in_readable_units(limit: int, expected: str) -> None:
     """A sub-megabyte limit must not round down to a meaningless '0 MB'."""
     with pytest.raises(UploadTooLargeError) as raised:
-        storage.store_upload(
-            run_paths,
+        storage.read_upload(
             "source_file",
             "big.csv",
             io.BytesIO(b"x" * (limit + 1)),
@@ -248,14 +337,25 @@ def test_the_limit_is_stated_in_readable_units(
 
 
 def test_the_limit_defaults_to_the_configured_maximum(
-    run_paths: storage.RunPaths, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 8)
 
     with pytest.raises(UploadTooLargeError):
-        storage.store_upload(
-            run_paths, "source_file", "d.csv", io.BytesIO(b"x" * 9)
+        storage.read_upload("source_file", "d.csv", io.BytesIO(b"x" * 9))
+
+
+def test_the_error_message_never_echoes_a_path_shaped_name() -> None:
+    with pytest.raises(UploadTooLargeError) as raised:
+        storage.read_upload(
+            "source_file",
+            "../../secret/big.csv",
+            io.BytesIO(b"x" * 9),
+            max_bytes=8,
         )
+
+    assert "big.csv is larger" in raised.value.message
+    assert "../.." not in raised.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +365,7 @@ def test_the_limit_defaults_to_the_configured_maximum(
 
 def test_delete_run_directory_removes_the_whole_run(runs_dir: Path) -> None:
     paths = storage.create_run()
-    storage.store_upload(
-        paths, "source_file", "sales.csv", io.BytesIO(b"a,b\n1,2\n")
-    )
+    (paths.exports / "result.csv").write_bytes(b"a\n1\n")
 
     assert storage.delete_run_directory(paths.run_id) is True
     assert not paths.root.exists()

@@ -1,8 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-08-28
+Last Updated: 2026-08-29
 Current Phase: None
-Last Completed Phase: Phase 6C — In-Memory Upload and Spreadsheet Parsing
+Last Completed Phase: Phase 6D — DataFrame-First Action Execution
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -802,6 +802,145 @@ is the whole reason it exists.
 
 ---
 
+### Phase 6D — Convert Action Execution to DataFrame-First Processing
+
+All eight items of build plan "Phase 6D" were implemented and verified. The
+Action Engine now consumes and produces **DataFrames end to end**: a Run reads
+its uploads into memory (6C), parses them into named frames, executes the
+Action, and keeps the result frames in the Run. **A Run touches the filesystem
+at no point** — verified by execution over real HTTP across nine Runs, after
+which the data directory held zero files and zero directories. No frontend file
+was touched.
+
+**Two repository defects were repaired first.** Neither was caused by this
+phase, and the committed state could not run without the repair. Both are
+recorded under **Known Issues** (37 and 38).
+
+1. **`backend/tests/test_runner.py` had again been overwritten** — this time
+   with a byte-identical copy of `tests/test_runs_api.py` (verified: identical
+   md5 in commit `70c41b1`). This is Known Issue 32 recurring, for the second
+   time and with a different donor file. The Phase 6C session's rebuilt runner
+   module is not in the repository.
+2. **`backend/tests/test_storage.py` was never updated by the Phase 6C
+   commit.** It is byte-identical to its Phase 6B version, so it still asserts
+   `storage.store_upload()` and `RunPaths.input_directory()` — both removed by
+   Phase 6C. **The committed suite failed: 25 failed, 460 passed.**
+
+Both modules were rewritten against the Phase 6C runtime and the suite was
+brought to green (**485 passed**, pyright clean) **before any 6D code was
+written**, so this phase started from a working, verified 6C baseline rather
+than from a broken tree.
+
+**The pre-refactor baseline was captured by execution, not assumed.** Before a
+line of 6D code was written, both real Actions were run through the Phase 6C
+pipeline against their committed fixtures, as CSV and as XLSX, and the
+manifests, result frames and generated CSV/XLSX were saved. Build plan 6D's
+"its output must match the pre-refactor deterministic output" is therefore
+checked against a recorded artifact. See **Tests**.
+
+**6D.1 The processing boundary.** `services/runner.py` implements exactly the
+lifecycle the build plan draws:
+
+    named uploaded inputs -> parser -> named DataFrame(s)
+        -> Action Registry -> Action -> result DataFrame(s)
+
+`storage.create_run()` is no longer called, so no run directory is created;
+`RunOutcome` no longer carries `paths`, because a Run has no location. The
+runner still imports `storage` — for `read_upload`, `extension_of` and
+`display_filename`, none of which build a path.
+
+**6D.2 Filesystem-coupled Actions: still none.** Phase 6A classified both
+registered Actions **DataFrame-compatible** and 6C confirmed it; 6D confirmed
+it a third time by execution. Neither `exact_duplicate_remover.py` nor
+`product_master_builder.py` was modified, and `test_contract_freeze.py` pins
+that both declare `run(self, inputs)` and import no filesystem module.
+
+**6D.3 Transformation logic stayed inside the Actions.** Nothing moved into
+React, the upload handler, a FastAPI route, the parser or the export utility.
+The freeze test's structural checks on the Action modules passed unchanged, and
+no Action file appears in this phase's diff.
+
+**6D.4 Registry behaviour preserved.** Action IDs, versions, discovery, schemas,
+configuration and validation are untouched. `GET /api/actions` returns exactly
+what it returned before.
+
+**6D.5 One or more result tables.** `models/run.py` gains `RunResult` — the
+tables an Action produced, keyed by output ID in the Action's **declaration
+order**, with `primary` (the first declared output), `secondary` (everything
+else, usually empty) and `table(output_id)`. A single-output Action needs no
+ceremony: `RunResult.of({"result": frame})` and `result.primary`. `tables` is
+wrapped in a `MappingProxyType`, so a caller cannot add or drop a result table
+behind the Run's back — the same rule the frozen `Run` already followed.
+
+The runner builds it by walking `action.outputs`, so **the Action decides which
+table is primary, by declaring it first**. An Action that declares an output and
+does not produce it still fails the Run.
+
+**6D.6 Run lifecycle status.** The build plan says "use existing equivalent
+status names if already established". `RunStatus` — `running`, `succeeded`,
+`failed` — is established, is public API, and is pinned by
+`test_contract_freeze.py`. It was **kept unchanged**. The build plan's example
+list maps onto it: `created`/`validating`/`ready` are all states inside a
+synchronous Run that no caller can observe (there is no job queue — build plan
+3.12), `running` is the recorded initial state, and `completed` is `succeeded`.
+Adding statuses no client could ever see would have changed a frozen contract
+for no caller's benefit.
+
+**6D.7 Intermediate processing is ephemeral.** The Run keeps DataFrames,
+Python objects and metadata — no intermediary spreadsheet is written anywhere:
+
+| Was, until 6D                                | Is now                                                     |
+| -------------------------------------------- | ---------------------------------------------------------- |
+| `working/<id>.parquet` written per output    | the Action's own frame, held by the Run                    |
+| `exports/<id>.csv` written per output        | CSV bytes rendered from that frame when a download asks    |
+| `exports/<id>.xlsx` written per output       | XLSX bytes built in a memory buffer, same as above         |
+| preview read the Parquet file back           | preview slices the retained frame                          |
+| download served the file with `FileResponse` | download returns a `Response` carrying the generated bytes |
+
+`services/export.py` is now byte-producing only (`to_csv_bytes`,
+`to_xlsx_bytes`, `to_bytes`, `worksheet_name`); its four path-writing functions
+are gone, and a test asserts they are gone rather than merely unused.
+`services/preview.py` takes a DataFrame instead of a `RunPaths` + output ID.
+
+**Removing Parquet was 6D's call, not 6E's, and here is why.** Phase 6C's notes
+predicted 6E would remove it. Build plan 6D's completion criteria requires a Run
+to execute "with no required `inputs/`, `working/`, `exports/` directory" —
+`working/` is exactly where Parquet lived, so it could not survive this phase.
+Build plan **section 28 (internal Parquet) is therefore superseded here** rather
+than in 6E; Known Issue 24 already recorded the reversal as deliberate, and the
+Phase 6 architectural rules state that they override conflicting earlier
+instructions.
+
+**The same reasoning, and its limit, for preview and download.** Once nothing is
+written, a preview that reads Parquet and a download that serves a file both
+break. Keeping them working meant re-pointing them at the retained frames. That
+is the _mechanism_ 6E.2 and 6F.1/6F.2 describe, and it was implemented **only as
+far as removing the filesystem requirement demanded** — the response contracts
+are byte-identical to their pre-6D form. **What 6E and 6F still own is listed
+under Next Phase and was deliberately not built.**
+
+**6D.8 Failed Runs are cleaned up correctly.** A failed Run is recorded failed,
+keeps its error and its full validation list, keeps the record of what was
+uploaded — and carries **no result at all**: `_finalize_failed` sets
+`outputs=()` and `result=None` explicitly. That is defensive rather than
+load-bearing today (a Run cannot currently fail after its result is recorded),
+which a control test proved, so the guarantee is pinned by a test that drives
+the finalizer with a Run that _does_ carry a result. Deleting a Run releases its
+frames: `runner.delete_run()` is now just `run_store.delete_run()`, because
+everything a Run holds travels with the Run. A `weakref` test asserts the result
+frame is genuinely unreachable after deletion, rather than assuming it.
+
+**Known Issues resolved by this phase.** 24 (Parquet superseded — now actioned),
+26 (a restart orphans run directories — none are created), 27 (two functions
+called `create_run` — only `run_store.create_run` is called now), 33 (a failed
+Run leaves two empty directories — no directory is created at all).
+
+**`test_contract_freeze.py` passed unchanged, again.** 84 tests, file not
+modified — the Phase 6A freeze has now survived 6B, 6C and 6D untouched, which
+is the whole reason it exists.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -876,16 +1015,17 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         models/
           __init__.py
           schemas.py          every Pydantic schema
-          run.py              the logical Run + run-ID convention  (6B)
+          run.py              the logical Run, RunResult, run IDs   (6B/6D)
         services/
           __init__.py
           run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
-          storage.py          Run dirs, in-memory upload intake, safe
-                              filenames, upload limit                     (6C)
+          storage.py          in-memory upload intake, safe filenames,
+                              upload limit — plus the run-directory
+                              helpers 6D left unused (6I removes)   (6C/6D)
           parser.py           parse_tabular_bytes: CSV + XLSX from memory (6C)
-          runner.py           the generic Run pipeline
-          export.py           Parquet + CSV + XLSX artifacts
-          preview.py          paginated reads of the internal Parquet
+          runner.py           the generic Run pipeline, DataFrame-first   (6D)
+          export.py           CSV/XLSX bytes from a result frame          (6D)
+          preview.py          paginated slices of a result frame          (6D)
       tests/
         __init__.py
         conftest.py           isolated runs dir + Run Store, registry, client
@@ -896,13 +1036,14 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_schemas.py       manifest / preview serialisation
         test_run_model.py     the logical Run and run IDs                 (6B)
         test_run_store.py     the five store operations, replaceability   (6B)
-        test_storage.py       Run dirs, path safety, upload limit, deletion
+        test_storage.py       in-memory upload intake, path safety, upload
+                              limit, deletion  (rewritten in 6D; see KI 38)
         test_parser.py        CSV, XLSX from bytes, worksheet ambiguity,
                               engine fallback                             (6C)
-        test_runner.py        the pipeline, validation, failed Runs, deletion
-                              (rebuilt in 6C; see Known Issue 32)
-        test_export.py        Parquet/CSV/XLSX round trips
-        test_preview.py       paging limits and Parquet-sourced previews
+        test_runner.py        the pipeline, validation, failed Runs, results,
+                              deletion   (rebuilt again in 6D; see KI 37)
+        test_export.py        CSV/XLSX bytes round trips                  (6D)
+        test_preview.py       paging limits over a result frame           (6D)
         test_runs_api.py      the Run endpoints and their status codes
         test_contract_freeze.py  the Phase 6A freeze (unchanged since 6A)
         test_exact_duplicate_remover.py / test_product_master_builder.py /
@@ -950,7 +1091,9 @@ variable names.
     POST /api/runs      ->  200 RunManifest
                             multipart: action_id + one file field per slot ID
                             Uploads are read into memory and parsed from
-                            there; nothing is written to disk (6C).
+                            there (6C); the Action's result frames are held
+                            by the Run. The whole pipeline writes nothing to
+                            disk and needs no run directory at all (6D).
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
@@ -967,12 +1110,18 @@ variable names.
 
     GET  /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=
                         ->  200 PreviewResponse (default 100, max 500)
+                            Sliced from the Run's retained result frame (6D).
                             400 offset/limit out of range
-                            404 unknown Run or output
+                            404 unknown Run or output, or the Run no longer
+                                holds its result (MISSING_ARTIFACT)
 
     GET  /api/runs/{run_id}/outputs/{output_id}/download/csv
     GET  /api/runs/{run_id}/outputs/{output_id}/download/xlsx
-                        ->  200 file attachment | 404
+                        ->  200 attachment | 404
+                            The bytes are generated from the retained result
+                            frame for that request; no file is read or
+                            written (6D). The filename convention is still
+                            `<output-id>.<format>` — 6F.6 changes it.
 
 Every error body has the shape build plan section 22 specifies:
 
@@ -1031,7 +1180,7 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                              |
 | `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview) |
 | `backend/tests/`        | Exists (15 test modules and `fixtures/`)                     |
-| `data/runs/`            | Exists (`.gitkeep`; only `working/`+`exports/` written — 6C) |
+| `data/runs/`            | Exists (`.gitkeep` only; nothing is written there — 6D)      |
 | `scripts/`              | Exists (`dev-backend.sh`)                                    |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)               |
 | `.env.example`          | Exists                                                       |
@@ -1040,8 +1189,18 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-6c-odmpg2
-    Last commit:    679fff4  "phase 6B complete"
+    Current branch: claude/forgexl-phase-6d-dataframe-0dfm70
+    Last commit:    70c41b1  "phase 6C fix"
+
+Phase 6D's changes were committed and pushed to
+`claude/forgexl-phase-6d-dataframe-0dfm70` at the end of the session. The commit
+covers five backend modules (`models/run.py`, `services/runner.py`,
+`services/export.py`, `services/preview.py`, `api/runs.py`), eight test modules
+and this file. `test_contract_freeze.py` is deliberately **not** among them, and
+neither are `package.json`, `package-lock.json`, `backend/requirements.txt` or
+any file under `src/`. `data/runs/` holds only `.gitkeep`.
+
+(The paragraph below records the Phase 6C session's own view of the tree.)
 
 Phase 6C's changes are uncommitted; the user has not authorised a commit.
 `git status` shows the relocation of the five misplaced Phase 6B modules from
@@ -1096,6 +1255,263 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6D)
+
+Environment note: this session also started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist. Both were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`); no undocumented step
+was required and no dependency was added.
+
+    cd backend && .venv/bin/python -m pytest   ->  519 passed, 1 warning
+
+**Three baselines, because the committed state was broken.**
+
+| State                                                  | Result                                |
+| ------------------------------------------------------ | ------------------------------------- |
+| As committed (`70c41b1`)                               | **25 failed, 460 passed**             |
+| After repairing `test_runner.py` and `test_storage.py` | **485 passed** (the real 6C baseline) |
+| After Phase 6D                                         | **519 passed**                        |
+
+The 485 figure is what Phase 6C would have reported had its work been committed
+intact. The Phase 6C entry claims 488; the two rebuilt modules are
+reconstructions, not a recovery of that session's edits, so their individual
+counts differ (see Known Issues 37 and 38).
+
+| Module                            | 6C repaired |      6D | Change                                    |
+| --------------------------------- | ----------: | ------: | ----------------------------------------- |
+| `test_contract_freeze.py`         |          84 |      84 | **file not modified**                     |
+| `test_storage.py`                 |          64 |      64 | rebuilt for 6C; untouched by 6D           |
+| `test_runs_api.py`                |          49 |      53 | downloads/preview from memory; +2 outputs |
+| `test_runner.py`                  |          38 |      51 | rebuilt for 6C; +13 for 6D                |
+| `test_run_model.py`               |          26 |      37 | `RunResult` (+11)                         |
+| `test_parser.py`                  |          36 |      36 | unchanged                                 |
+| `test_run_store.py`               |          34 |      34 | unchanged                                 |
+| `test_product_master_builder.py`  |          34 |      34 | reads the retained frame                  |
+| `test_actions.py`                 |          30 |      30 | unchanged                                 |
+| `test_exact_duplicate_remover.py` |          21 |      21 | reads the retained frame                  |
+| `test_preview.py`                 |          15 |      17 | rewritten against frames                  |
+| `test_action_round_trip.py`       |          17 |      17 | unchanged (already reads download bytes)  |
+| `test_export.py`                  |          11 |      15 | rewritten against bytes                   |
+| `test_api.py`                     |          14 |      14 | unchanged                                 |
+| `test_schemas.py`                 |          12 |      12 | unchanged                                 |
+| **Total**                         |     **485** | **519** | **+34**                                   |
+
+The single warning is the third-party `StarletteDeprecationWarning` already
+recorded as Known Issue 7.
+
+**No test was weakened, skipped or deleted to make the suite green.** Every test
+that asserted behaviour 6D removes was rewritten against the behaviour that
+replaced it:
+
+| Assertion that could no longer hold                                                                     | What it asserts now                                                         |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `test_write_output_creates_all_three_artifacts`                                                         | `test_the_csv_export_round_trips` / `..._xlsx_export_is_a_real_workbook...` |
+| `test_the_parquet_round_trips_with_its_schema_intact`                                                   | dropped with Parquet; the frame _is_ the working representation now         |
+| `test_two_outputs_are_written_side_by_side`                                                             | `test_each_output_downloads_and_previews_its_own_table` (over HTTP)         |
+| `test_an_unsafe_output_id_is_refused` (export path building)                                            | no path is built; the ID never reaches one                                  |
+| every `preview.read_preview(paths, output_id, ...)` call                                                | `preview.read_preview(frame, ...)`                                          |
+| `test_a_missing_parquet_artifact_is_reported`                                                           | `test_a_preview_whose_result_has_been_released_returns_404`                 |
+| `test_the_preview_reads_parquet_not_the_csv_export`                                                     | `test_previewing_reads_nothing_from_disk`                                   |
+| `test_a_download_whose_file_is_missing_returns_404`                                                     | `test_a_download_whose_result_has_been_released_returns_404`                |
+| `test_the_uploaded_source_is_never_written_to_the_run_directory` (which still expected three artifacts) | `test_a_run_writes_nothing_to_the_filesystem` — the stronger fact           |
+| `pl.read_parquet(outcome.paths.working_artifact(...))` in both Action modules                           | `outcome.result.table(...)` / `outcome.result.primary`                      |
+| `_assert_failed_cleanly` checking two empty directories                                                 | checks `run.result is None` **and** that nothing was written at all         |
+
+**The 6D completion criteria, as tests:**
+
+| Build plan 6D | Test                                                                                                                                                                                                                                                                                   |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6D.1          | `test_the_pipeline_needs_no_run_directory_at_all`, `test_a_successful_run_writes_nothing_anywhere`                                                                                                                                                                                     |
+| 6D.2          | `test_the_action_run_signature_takes_named_frames`, `test_an_action_executes_with_no_filesystem_available` (both in the unchanged freeze module)                                                                                                                                       |
+| 6D.3          | the freeze module's structural checks on both Action modules                                                                                                                                                                                                                           |
+| 6D.4          | the frozen registry inventory in `test_contract_freeze.py`                                                                                                                                                                                                                             |
+| 6D.5          | `test_an_action_with_two_outputs_produces_two_result_tables`, `test_each_output_downloads_and_previews_its_own_table`, `test_a_single_table_result_needs_no_ceremony` and 8 more in `test_run_model.py`                                                                                |
+| 6D.6          | `RunStatus` unchanged, pinned by `test_run_status_values_are_frozen`                                                                                                                                                                                                                   |
+| 6D.7          | `test_a_successful_run_keeps_its_result_frame`, `test_the_retained_frame_is_the_one_the_action_returned`, `test_generating_an_export_writes_nothing`, `test_previewing_reads_nothing_from_disk`, `test_the_service_no_longer_writes_artifacts`                                         |
+| 6D.8          | `test_a_failed_validation_leaves_no_result`, `test_an_action_that_raises_leaves_no_result`, `test_an_action_that_produces_only_some_of_its_outputs_leaves_no_result`, `test_finalizing_a_failure_clears_any_result_already_recorded`, `test_deleting_a_run_releases_its_result_frames` |
+
+**Control tests — the new tests were proved to catch regressions.** Eight
+deliberate breakages were introduced one at a time, each reverted from a
+scratch-directory backup immediately afterwards. The suite returned to 519
+passed after the last revert and the tree was confirmed byte-identical to the
+backup.
+
+| Deliberate break                                   | Result                                                                                                                                                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the runner writes the result frame to disk         | 5 failures across `test_runner.py` and `test_runs_api.py`                                                                                                                                             |
+| the failure finalizer no longer clears the result  | 1 failure (`test_finalizing_a_failure_clears_any_result_already_recorded`)                                                                                                                            |
+| the _last_ declared output becomes primary         | 2 failures (`test_run_model.py`, `test_runner.py`)                                                                                                                                                    |
+| `delete_run` keeps a reference to the Run's frames | 2 failures (`test_deleting_a_run_releases_its_result_frames` and one more)                                                                                                                            |
+| an empty preview page reports no columns           | 2 failures in `test_preview.py`                                                                                                                                                                       |
+| the XLSX export drops its worksheet name           | 1 failure (`test_the_worksheet_is_named_after_the_output`)                                                                                                                                            |
+| a declared output that was not produced is skipped | 1 failure (`..._produces_only_some_of_its_outputs_leaves_no_result`)                                                                                                                                  |
+| every output serves the _primary_ table            | **0 failures — a real gap.** Two tests were added (`test_each_output_downloads_and_previews_its_own_table`, `test_each_output_downloads_its_own_worksheet`); the same break then produced 2 failures. |
+
+Two controls were informative rather than merely confirmatory, and both changed
+the work: the failure-finalizer break passed at first (the pipeline cannot
+currently reach that state, so a direct finalizer test was added), and the
+per-output download break passed at first (nothing covered a _secondary_
+output's own bytes, so two HTTP tests were added).
+
+### Deterministic-output comparison against the pre-refactor baseline (6D)
+
+Build plan 6D requires that "its output must match the pre-refactor
+deterministic output". Before any 6D code was written, both real Actions were
+executed through the Phase 6C pipeline against their committed fixtures, as CSV
+and as XLSX, and the manifest, the result frame (columns, dtypes, every row) and
+the generated CSV/XLSX were saved to a scratch directory. After 6D the same four
+cases were re-run with `FORGEXL_DATA_DIRECTORY` pointed at a path that **does not
+exist**:
+
+| Case                                  | Manifest  | Result frame | CSV bytes                 | XLSX round-trip            |
+| ------------------------------------- | --------- | ------------ | ------------------------- | -------------------------- |
+| `exact_duplicate_remover`, CSV input  | identical | identical    | identical (sha 5c399b39…) | same table, same worksheet |
+| `exact_duplicate_remover`, XLSX input | identical | identical    | identical (sha 05bcadad…) | same table, same worksheet |
+| `product_master_builder`, CSV input   | identical | identical    | identical (sha f45f1b78…) | same table, same worksheet |
+| `product_master_builder`, XLSX input  | identical | identical    | identical (sha 132b9b4a…) | same table, same worksheet |
+
+and the nonexistent data directory was still absent afterwards.
+
+One field is normalised in the comparison and it is worth stating why:
+`inputs[0].file_size_bytes` for the two **XLSX** cases. The XLSX _fixture_ is
+rebuilt for each comparison and xlsxwriter stamps a creation time into the
+workbook, so the uploaded file's compressed length can differ by a byte between
+builds (5901 vs 5902 here). That is the fixture varying, not ForgeXL's output —
+the comparison asserts the recorded size equals the length of the payload that
+run actually received before normalising it, and both CSV cases, whose fixtures
+are byte-stable, matched with nothing normalised.
+
+### Type checking (Phase 6D)
+
+    npx pyright   ->  43 files analyzed, 0 errors, 0 warnings, 0 informations
+
+Run twice: once on the repaired 6C baseline and once after 6D.
+
+### Frontend static checks (Phase 6D)
+
+    npm run lint   ->  exit 0, no errors, no warnings
+    npm run build  ->  exit 0, compiled successfully
+                       Routes: ○ /   ○ /_not-found  (both static)
+
+Unchanged from Phase 6C, as expected: Phase 6D wrote no frontend code. Zero
+`.ts`/`.tsx` files are tracked by git (the five under `.next/` are Next.js build
+output and are git-ignored).
+
+### Phase 6D end-to-end verification over real HTTP
+
+The backend was started with `FORGEXL_DATA_DIRECTORY` pointed at a scratch
+directory, so the repository's `data/runs/` was never written to.
+
+    GET  /health                        ->  {"status":"ok"}
+    GET  /api/actions                   ->  200, both Actions
+    POST /api/runs  (CSV)               ->  200 "succeeded", duration_ms 4,
+                                            engine "polars-csv", 200 bytes,
+                                            3 rows in -> 2 out,
+                                            duplicate_product_rows_removed 1
+    POST /api/runs  (XLSX)              ->  200 "succeeded", engine
+                                            "fastexcel-calamine", worksheet
+                                            "Sales", 3 rows -> 2 rows
+    POST /api/runs  (dedupe, CSV)       ->  200, duplicates_removed 1
+    GET  /api/runs/{id}                 ->  200, served from the Run Store
+    GET  .../preview?limit=5            ->  200, "Château Réal" and
+                                            "Bodegas Muñoz" intact
+    GET  .../download/csv               ->  200, text/csv; charset=utf-8,
+                                            attachment; filename="product_master.csv",
+                                            accented values intact
+    GET  .../download/xlsx              ->  200, `file` reports
+                                            "Microsoft Excel 2007+"
+
+The downloaded XLSX was re-read **through the application's own parser**: it
+came back as worksheet `product_master` with the expected columns and rows, so
+an export ForgeXL could not itself ingest would have failed here.
+
+**Error cases, each over real HTTP:**
+
+    empty.csv (0 bytes)          ->  422 EMPTY_FILE "empty.csv is empty."
+    a,b\n1,2,3,4\n (ragged)      ->  422 PARSE_ERROR
+    bad.json                     ->  422 UNSUPPORTED_EXTENSION
+    no file field at all         ->  422 MISSING_INPUT "Sales File is required."
+    wrong columns                ->  422 MISSING_COLUMNS, all six named
+    unknown action               ->  404 UNKNOWN_ACTION
+    GET /api/runs/{unknown uuid} ->  404
+    GET /api/runs/not-a-uuid     ->  404
+    GET /api/runs/..%2Fsecret    ->  404
+    .../outputs/nope/preview     ->  404
+    .../outputs/nope/download/csv->  404
+    preview?limit=501            ->  400
+    preview?offset=-1            ->  400
+    download from unknown run    ->  404
+
+**The decisive 6D check — what the backend wrote, after nine real HTTP Runs:**
+
+    files under the data directory  ->  0
+    run directories                 ->  0
+    inputs/ directories             ->  0
+    working/ directories            ->  0
+    exports/ directories            ->  0
+    *.parquet                       ->  0
+    manifest.json                   ->  0
+    repository data/runs/           ->  .gitkeep only
+
+    server path or traceback in any response body  ->  0 occurrences
+    server log: "Traceback" or "500 Internal"      ->  0 occurrences
+
+**A larger result, to confirm paging really works off the retained frame:**
+
+    50,000-row CSV -> product_master_builder
+      ->  succeeded, duration_ms 16, 20,000 output rows,
+          duplicate_product_rows_removed 30,000
+      preview offset=0      ->  total 20000, first row SKU-0
+      preview offset=19995  ->  total 20000, first row SKU-19995
+      download/csv          ->  588,937 bytes
+      download/xlsx         ->  509,881 bytes
+      files written by that run  ->  0
+
+(No timings are claimed as benchmarks — that is Phase 7G, on the real target
+machine.)
+
+    CORS   Origin http://127.0.0.1:3000    ->  echoed
+           Origin http://evil.example.com  ->  no access-control headers
+    Bind   LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
+
+**Restart behaviour (build plan Phase 6 rules 14/15) still holds:**
+
+    backend stopped and restarted
+      GET /api/runs/{earlier id}          ->  404 UNKNOWN_RUN
+      GET .../download/csv of that run    ->  404
+      GET /api/actions                    ->  200, both Actions registered
+      POST /api/runs                      ->  200, a new Run succeeds normally
+      orphaned files left behind          ->  0  (Known Issue 26 is resolved:
+                                                 nothing is written to orphan)
+
+### Phase 6D browser verification (real headless Chromium)
+
+Phase 6D changed no frontend file, so this exists to prove the Phase 5 UI still
+works end to end against the DataFrame-first pipeline. Playwright was installed
+**outside** the repository, in the session scratchpad, against the pre-installed
+Chromium at `/opt/pw-browsers/chromium-1194`. Both servers were the real ones,
+started with the real `npm run dev`.
+
+**19/19 checks passed:** page title; "Backend Connected"; the selector populated
+from `GET /api/actions` with both Actions; state `idle` on load; `Version 1.0.0`
+and the `Sales File` slot rendered from metadata; state `ready` after choosing a
+file; **a real CSV Run through the UI reaching `success`**; "Run Successful"
+shown; **a real XLSX Run through the UI reaching `success`**; the second Action
+running without reloading the app; a bad file classified `validation_error` with
+`Supplier` and `Volume` named; an empty file explained as "is empty"; no
+`[object Object]`; no traceback; **no server path rendered anywhere**; the
+browser posting directly to `127.0.0.1:8000/api/runs`; no uncaught page errors.
+
+Backend log for the whole browser session: 3 × `POST /api/runs` 200, 2 × 422,
+12 × `GET /api/actions` 200, 13 × `GET /health` 200 — **no traceback, no 500**.
+The session wrote **0 files** under the data directory.
+
+Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and
+`data/runs/` holds only `.gitkeep`.
+
+---
 
 ### Backend test suite (Phase 6C)
 
@@ -2280,7 +2696,109 @@ them. The file was restored and re-verified clean.
     written artifacts) and the download half of `test_runs_api.py` — which is
     6E's and 6F's work.
 
-None of the above blocks Phase 6D.
+**Added in Phase 6D:**
+
+37. **`backend/tests/test_runner.py` was destroyed by the Phase 6C commit and
+    has been rebuilt — the second time this has happened to this file.**
+    Commit `70c41b1` ("phase 6C fix") left `test_runner.py` byte-identical to
+    `tests/test_runs_api.py` (verified: identical md5 in the commit itself, not
+    only on disk). Known Issue 32 recorded the same failure for Phase 6B, where
+    the donor was `test_run_store.py`. The Phase 6C entry's claim of
+    "`test_runner.py` … reaching 45 tests" describes work that is not in the
+    repository. The Phase 6A version (28 tests, commit `f481552`) was recovered
+    and carried forward through 6B (outcomes read from the Run Store), 6C
+    (uploads in memory) and 6D (results in memory), reaching **51 tests**. It is
+    a reconstruction from the 6A source plus the documented 6B/6C intent, **not**
+    a recovery of those sessions' actual edits, which were never committed —
+    which is why its count differs from the 45 the 6C entry claims.
+
+    **This class of defect has now occurred four times** (Known Issues 10, 31,
+    32 and this one). Any future session must, before writing any code, verify
+    that (a) new backend modules landed under `backend/app/` and not `src/app/`,
+    and (b) no two test modules are byte-identical:
+
+        cd backend/tests && md5sum *.py | awk '{print $1}' | sort | uniq -d
+
+    An empty result is the passing condition.
+
+38. **`backend/tests/test_storage.py` was never updated by the Phase 6C
+    commit, and the committed suite therefore failed.** The file in `70c41b1`
+    is byte-identical to its Phase 6B version, so it still asserted
+    `storage.store_upload()` and `RunPaths.input_directory()` — both removed by
+    Phase 6C. `cd backend && .venv/bin/python -m pytest` on the committed state
+    reported **25 failed, 460 passed**. The Phase 6C entry's claim of
+    "`test_storage.py` 53 -> 60, upload half rewritten" describes work that is
+    not in the repository. The module was rewritten in this session against the
+    Phase 6C in-memory intake (`read_upload`, `LoadedUpload`, and the stronger
+    "a hostile slot ID reaches no path at all" assertion), reaching **64 tests**,
+    and the suite was brought to green **before any Phase 6D code was written**.
+
+39. **`services/storage.py` now holds dead runtime code.** `create_run()`,
+    `RunPaths` and its `working` / `exports` / `working_artifact` /
+    `export_artifact` members, `run_paths()`, `runs_directory()` and
+    `delete_run_directory()` are no longer called by anything in `app/` — the
+    pipeline builds no path at all. They were **deliberately left in place**:
+    build plan **6I.1** explicitly owns removing "run-directory creation …
+    working-directory creation … export-directory creation … path-building
+    helpers", and removing them in 6D would be doing a later phase's work.
+    `tests/test_storage.py` still covers them, so they cannot rot silently in
+    the meantime. `config.DATA_DIRECTORY` and `RUNS_DIRECTORY` are likewise
+    now read only by this dead code and by the test fixtures — see Known
+    Issue 21, whose `.env.example` correction is due in the same phase.
+
+40. **A Run's result frames stay in memory for the life of the process.**
+    Known Issue 28 predicted this would become a real question "when 6D/6E start
+    retaining result DataFrames in the run" — it now has. `InMemoryRunStore`
+    evicts nothing, so a session that runs twenty 50,000-row Actions holds all
+    twenty result frames until the backend restarts or `delete_run()` is called.
+    Nothing calls `delete_run()` today: no route exposes it (build plan 6B asks
+    for the capability, not an endpoint). For a local single-user POC this is
+    acceptable and is what build plan Phase 6 rules 14/15 authorise, and 6D.8's
+    actual requirement — that the memory _can_ be released — is met and pinned
+    by a `weakref` test. A retention policy or an eviction rule is a real
+    decision for Phase 7J ("Memory/Architecture Review"), which is where the
+    measurement belongs.
+
+41. **Build plan section 28 (internal Parquet) is now superseded in code, not
+    just on paper.** Known Issue 24 recorded the reversal as deliberate and
+    predicted 6E would carry it out. 6D's completion criteria ("no required
+    `working/` directory") forced it a phase earlier, so `working/<id>.parquet`
+    is no longer written and `pl.scan_parquet` no longer appears in the
+    backend. Nothing is outstanding; the cross-reference in Known Issue 24 and
+    in the Phase 6C notes is simply a phase off.
+
+42. **Preview and download changed mechanism in 6D rather than in 6E/6F.**
+    `docs/phase-6a-compatibility-audit.md` §7.1 assigns `preview.read_preview`
+    to 6E and `export.py` / the download route to 6F. Once 6D stopped writing
+    files, leaving those two reading files would have broken two working
+    endpoints, so both were re-pointed at the retained frames. **Only the
+    mechanism moved**: the `PreviewResponse` shape, the 100/500 limit rules, the
+    download media types and the `<output-id>.<format>` filename are all
+    byte-identical to their pre-6D behaviour. What 6E and 6F still own is listed
+    under **Next Phase**. Recorded because it is a real, deliberate departure
+    from the Phase 6A migration schedule, not an oversight.
+
+43. ~~**A failed Run still creates two empty directories** (Known Issue 33).~~
+    Resolved in Phase 6D: no directory is created at all.
+
+44. ~~**A backend restart orphans the run directories left on disk**
+    (Known Issue 26).~~ Resolved in Phase 6D, exactly as that issue predicted:
+    the files it orphaned are the files that stopped being written.
+
+45. ~~**Two functions are called `create_run`** (Known Issue 27).~~ Resolved in
+    Phase 6D: `storage.create_run()` is no longer called by anything, so
+    `run_store.create_run()` is the only one in the pipeline.
+
+46. **Known Issue 22 is now fully worked off.** The half of the suite that was
+    coupled to the on-disk model has been rewritten against the new runtime, in
+    four stages: 6B (run state), 6C (uploads and parsing), and 6D (the output
+    side — `test_export.py` 11 -> 15, `test_preview.py` 15 -> 17, and the
+    download/preview half of `test_runs_api.py`). Nothing in the suite now reads
+    or writes a Run artifact. `test_actions.py`, `test_api.py`,
+    `test_schemas.py` and `test_contract_freeze.py` remain untouched throughout,
+    as that issue required.
+
+None of the above blocks Phase 6E.
 
 ---
 
@@ -2542,6 +3060,37 @@ None of the above blocks Phase 6D.
     not a direct child of the runs directory, is called from exactly one place,
     and is not reachable over HTTP. It disappears with the on-disk model.
 
+31. **Build plan section 28 (internal Parquet) was removed in Phase 6D, not
+    6E.** Section 28 requires each output to be written as
+    `working/<output-id>.parquet` and the preview to read it back. Build plan
+    6D.7 forbids intermediary spreadsheet files and 6D's completion criteria
+    requires a Run to execute "with no required … `working/` … directory", so
+    Parquet could not survive this phase. The Phase 6 architectural rules state
+    that they override any earlier build-plan instruction that conflicts with
+    them. Known Issue 24 recorded the reversal as deliberate when Phase 6A
+    found it; only the phase it happened in differs from the prediction.
+
+32. **The preview and download _mechanisms_ moved in Phase 6D, ahead of the
+    Phase 6A migration schedule.** `docs/phase-6a-compatibility-audit.md` §7.1
+    assigns `preview.read_preview` to 6E and `services/export.py` plus the
+    download route to 6F. Once 6D stopped writing files, leaving those two
+    reading files would have broken two working endpoints, so both now read the
+    Run's retained result frames. The change was held to exactly that: the
+    `PreviewResponse` shape, the 100/500 limit rules, the download media types
+    and the `<output-id>.<format>` filename are byte-identical to their pre-6D
+    behaviour, and every deliverable 6E and 6F actually list is untouched (see
+    **Next Phase**). Recorded as Known Issue 42.
+
+33. **`RunStatus` was kept at three values rather than the six build plan 6D.6
+    lists.** 6D.6 offers `created / validating / ready / running / completed /
+failed` as an example and says explicitly: "Use existing equivalent status
+    names if already established." `running` / `succeeded` / `failed` are
+    established, are public API, and are pinned by `test_contract_freeze.py`.
+    A Run executes synchronously with no job queue (build plan 3.12), so
+    `created`, `validating` and `ready` are states no client can observe;
+    `completed` is `succeeded`. Adding statuses nothing could ever report would
+    have changed a frozen contract for no caller's benefit.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -2559,47 +3108,86 @@ is unchanged.
 
 ## Next Phase
 
-**Phase 6D — Convert Action Execution to DataFrame-First Processing**
+**Phase 6E — Results, Preview, Metrics, and Audit Data**
 
 Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6C: `runner._persist_outputs()` still calls `export.write_output()`,
-which still writes `working/<id>.parquet` and `exports/<id>.{csv,xlsx}` to
-disk, and `preview.read_preview()` still reads the Parquet file back, exactly
-as Phase 3 wrote them.
+Phase 6D.
 
-Scope, per build plan "Phase 6D":
+Phase 6D re-pointed the preview and the download at the Run's retained result
+frames, because a Run stopped writing files and leaving those endpoints reading
+files would have broken them (Known Issue 42). **That was a mechanism change
+only.** Everything 6E and 6F actually ask for is still unbuilt:
 
-- Make the Action Engine consume parsed DataFrames rather than server
-  filesystem locations.
-- **6D.2 has no work to do on the Actions themselves.** Phase 6A classified
-  both registered Actions **DataFrame-compatible**, and 6C confirmed it by
-  execution: neither `exact_duplicate_remover` nor `product_master_builder`
-  touches a path, and both already receive
-  `Mapping[str, pl.DataFrame]` and return `ActionResult`. 6D is about the
-  runner and export plumbing around them.
-- **6D.8** Allow memory associated with abandoned processing to be released —
-  which is where a retention policy for result DataFrames belongs
-  (Known Issues 28 and 34).
+**What Phase 6E still owns**
 
-**What Phase 6C leaves for it:**
+- **6E.1 Result metadata.** Nothing computes input row count vs output row
+  count as a _result_ record, affected rows, columns added, columns removed, or
+  the result schema. `OutputMetadata` today carries only `id`, `label`,
+  `row_count`, `column_count`, `columns` and `formats` — the Phase 6A frozen
+  shape. 6E is where `models/schemas.py` gains the fields the build plan lists,
+  and where `MANIFEST_SCHEMA_VERSION` may finally need a bump.
+- **6E.2/6E.3/6E.4.** The preview already comes from the result frame and is
+  already limited to 100/500 rows, so the mechanism is in place — but 6E.4's
+  "preserve useful schema information" is not: `PreviewResponse` reports column
+  _names_ and no dtypes, so the frontend cannot yet render values by type.
+- **6E.5 The audit summary.** Nothing builds one. The manifest carries the
+  pieces (Action, inputs, row counts, warnings, metrics, status) but no audit
+  structure assembles them.
+- **6E.6.** Audit data must stay out of the user's result table. Nothing
+  currently violates this; it is a rule to keep, not work to do.
+- **6E.7 Connect the existing frontend.** This is the largest remaining piece
+  and the one a user will actually notice. `RunStatus.jsx` still shows only
+  "Run Successful" and the Action name (Known Issue 16). Metrics, the validation
+  summary, output selection, the paginated preview table, the Run ID and the two
+  export buttons all need building **on the existing Phase 5 components** —
+  `src/components/workbench/*` must be extended, not rebuilt (build plan 6E.7
+  and the Phase 6A audit §7.1). Until then a user still cannot see or export
+  their results from the browser, even though `GET .../preview` and both
+  download endpoints work correctly.
 
-- `export.write_output()`, `RunPaths.working_artifact`, `RunPaths.export_artifact`
-  and `storage.create_run()`'s directory tree are the pieces 6D and 6F replace.
-  `storage.read_upload()`, `LoadedUpload`, `extension_of()`,
-  `stored_filename_for()`, `display_filename()` and `_human_size()` are all
-  Phase 6C-current and correct.
-- `parser.parse_tabular_bytes()` is byte-based and needs no further change.
-- Result DataFrames are currently discarded once written to Parquet. 6D/6E is
-  where the `Run` starts carrying them, which is what makes Known Issue 28
-  (`InMemoryRunStore` growth) a real question rather than a theoretical one.
-- Build plan **section 28 (internal Parquet) is superseded** by 6E.2 — see
-  Known Issue 24. Removing Parquet is 6E's call, not 6D's.
-- `tests/test_export.py` (11), `tests/test_preview.py` (15) and the download
-  half of `tests/test_runs_api.py` are the modules 6D-6F rewrite.
-  `tests/test_contract_freeze.py` must keep passing **unchanged**, as it has
-  through both 6B and 6C.
-- **Check first that Phase 6C's files are actually under `backend/app/`**, not
-  `src/app/`, and that no test module has been overwritten by another
-  (Known Issues 31 and 32 — this failure has now occurred twice).
+**What Phase 6F still owns** (do not start it in 6E)
 
-Do not begin Phase 6E.
+- **6F.4** Multiple result tables in one workbook — the XLSX export writes one
+  worksheet per request today. `RunResult.secondary` exists to make this
+  straightforward.
+- **6F.5** Collision-safe worksheet naming. `export.worksheet_name()` truncates
+  to Excel's 31 characters and nothing more; two outputs whose IDs share a
+  31-character prefix would collide.
+- **6F.6** The ForgeXL download filename convention
+  (`forgexl-<action>-<timestamp>.xlsx`). The filename is still
+  `<output-id>.<format>`, deliberately unchanged.
+- **6F.7** An explicit release policy for export buffers, and **6F.8**'s
+  standing rule that no response exposes a server path (already true, and
+  checked by execution in 6D).
+- **6F**'s own completion-criteria test battery: execute, request CSV, read the
+  bytes, request XLSX, reopen from memory, verify worksheet names, headers and
+  representative values. `test_export.py` and `test_action_round_trip.py`
+  already cover much of this; 6F should confirm rather than duplicate.
+
+**What Phase 6D leaves in the tree**
+
+- `services/storage.py` keeps `create_run()`, `RunPaths`, `run_paths()`,
+  `runs_directory()` and `delete_run_directory()` as **dead runtime code**.
+  Build plan 6I.1 owns removing them, together with `config.DATA_DIRECTORY` /
+  `RUNS_DIRECTORY` and the `.env.example` line that documents them
+  (Known Issues 21 and 39). Do not remove them in 6E or 6F.
+- The `runs_dir` fixture in `tests/conftest.py` no longer isolates anything the
+  application writes — it now exists so tests can assert that the directory
+  stays **empty**. That is deliberate and worth keeping until 6I.
+- Result frames accumulate in `InMemoryRunStore` for the life of the process
+  (Known Issue 40). 6E adds no retention pressure of its own; Phase 7J is where
+  the measurement and any eviction policy belong.
+
+**Before writing any code, verify the repository is intact.** This session
+found two test modules destroyed or unwritten by the previous commit, and that
+class of defect has now occurred four times (Known Issues 10, 31, 32, 37, 38).
+Run, in order:
+
+    ls backend/app/models backend/app/services backend/app/api   # not src/app/
+    cd backend/tests && md5sum *.py | awk '{print $1}' | sort | uniq -d
+    cd backend && .venv/bin/python -m pytest
+
+The first must show the backend modules under `backend/`, the second must print
+nothing, and the third must report **519 passed** before any new work begins.
+
+Do not begin Phase 6F.

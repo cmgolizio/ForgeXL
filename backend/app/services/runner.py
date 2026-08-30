@@ -1,7 +1,7 @@
-"""The generic Run pipeline (build plan 3.7-3.9, 3.11, 6C and section 24).
+"""The generic Run pipeline (build plan 3.7-3.9, 6B-6D and section 24).
 
-    resolve Action -> create Run -> read input -> parse input -> validate input
-    -> execute Action -> persist Parquet -> create exports -> finalize the Run
+    resolve Action -> record Run -> read input -> parse input -> validate input
+    -> execute Action -> keep the result frames -> finalize the Run
 
 Everything above belongs to the runner. An Action only transforms dataframes,
 so adding an Action never means reproducing any of this machinery.
@@ -10,19 +10,29 @@ The runner is deliberately independent of the web framework: it takes
 :class:`PendingUpload` objects carrying a filename and a readable stream, so
 the same pipeline is driven identically by the API and by tests.
 
-Since Phase 6C an upload is read into memory and parsed from there. Nothing
-the user uploads is written to the filesystem, so the pipeline no longer has a
-"save it, then reopen it" step, and the bytes are released as soon as they have
-become a dataframe.
+**The pipeline touches no filesystem.** Phase 6C moved uploads into memory;
+Phase 6D moved results there too, so the whole of build plan 6D's processing
+boundary now holds:
+
+    named uploaded inputs -> parser -> named DataFrame(s)
+        -> Action Registry -> Action -> result DataFrame(s)
+
+A Run needs no ``inputs/``, ``working/`` or ``exports/`` directory: nothing is
+saved and reopened, and no intermediary spreadsheet is written merely to be
+read back (build plan 6D.7). Exports are generated from the retained frames at
+download time by :mod:`app.services.export`.
 
 Run state is owned by :mod:`app.services.run_store` (build plan 6B). The runner
 records a Run when it starts and hands the store a new state at every
 transition; it never writes run state anywhere itself, so where that state
-lives is not the runner's concern.
+lives is not the runner's concern. The result frames travel with the Run, so
+forgetting the Run releases them (build plan 6D.8).
 
 Failure handling follows build plan 3.9: once a Run is recorded, every
 outcome — including a failure — leaves the Run recorded, with its error and its
-full validation results. Evidence of a failed Run is never destroyed.
+full validation results. Evidence of a failed Run is never destroyed. A failed
+Run carries no result at all, so a half-finished transformation can never be
+mistaken for a usable one.
 """
 
 from __future__ import annotations
@@ -47,7 +57,7 @@ from app.errors import (
     UnsupportedExtensionError,
     WorkbenchError,
 )
-from app.models.run import Run, now
+from app.models.run import Run, RunResult, now
 from app.models.schemas import (
     ActionReference,
     InputMetadata,
@@ -57,8 +67,9 @@ from app.models.schemas import (
     ValidationIssue,
     ValidationSummary,
 )
-from app.services import export, parser, run_store, storage
-from app.services.storage import BinarySource, LoadedUpload, RunPaths
+from app.services import parser, run_store, storage
+from app.services.export import EXPORT_FORMATS
+from app.services.storage import BinarySource, LoadedUpload
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +89,24 @@ class PendingUpload:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """The result of :func:`execute_run`."""
+    """The result of :func:`execute_run`.
+
+    Carries the finalized Run and nothing else. Until Phase 6D it also carried
+    the Run's directory; a Run has no directory now, so there is nothing left
+    for a caller to be handed but the Run itself.
+    """
 
     run: Run
-    paths: RunPaths
 
     @property
     def manifest(self) -> RunManifest:
         """The Run rendered in the API's frozen manifest shape."""
         return self.run.to_manifest()
+
+    @property
+    def result(self) -> RunResult | None:
+        """The tables the Run produced, or None if it failed."""
+        return self.run.result
 
 
 def execute_run(
@@ -119,10 +139,6 @@ def execute_run(
         Run.create(action_reference, created_at=created_at, warnings=warnings)
     )
     try:
-        # The Run's ID comes from the Run, not from the filesystem: `storage`
-        # only builds the directories the upload and the exports still need.
-        paths = storage.create_run(run.run_id)
-
         loaded, input_issues = _read_and_check_slots(action, uploads)
         parsed, parse_issues = _parse_inputs(action, loaded)
         issues = [*input_issues, *parse_issues]
@@ -144,7 +160,7 @@ def execute_run(
             raise RunValidationError(issues)
 
         result = _execute_action(action, _frames_by_slot(parsed))
-        outputs = _persist_outputs(action, result, paths)
+        outputs, tables = _collect_outputs(action, result)
 
         completed_at = now()
         run = run_store.update_run(
@@ -154,11 +170,12 @@ def execute_run(
                 updated_at=completed_at,
                 duration_ms=_elapsed_ms(created_at, completed_at),
                 validation=ValidationSummary(passed=True, warnings=warnings),
-                outputs=tuple(outputs),
+                outputs=outputs,
                 metrics=dict(result.metrics),
+                result=tables,
             )
         )
-        return RunOutcome(run=run, paths=paths)
+        return RunOutcome(run=run)
 
     except WorkbenchError as error:
         _finalize_failed(run, created_at, error, warnings)
@@ -330,11 +347,26 @@ def _execute_action(
         ) from error
 
 
-def _persist_outputs(
-    action: Action, result: ActionResult, paths: RunPaths
-) -> list[OutputMetadata]:
-    """Write Parquet plus the CSV and XLSX exports for each declared output."""
+def _collect_outputs(
+    action: Action, result: ActionResult
+) -> tuple[tuple[OutputMetadata, ...], RunResult]:
+    """Describe each declared output and keep its frame (build plan 6D.5).
+
+    Walks the Action's declared outputs in declaration order, so the first one
+    an Action declares is the primary result table and the rest, if any, are
+    secondary. An Action that declares an output and does not produce it fails
+    the Run: a missing result is never quietly dropped.
+
+    Nothing is written. The frames the Action returned are the frames the Run
+    keeps, and CSV/XLSX are generated from them when a download asks for them
+    (build plan 6D.7).
+
+    The reported formats stay the runner's :data:`EXPORT_FORMATS`, exactly as
+    before this phase: which formats an output is offered in is not something
+    Phase 6D changes.
+    """
     outputs: list[OutputMetadata] = []
+    tables: dict[str, pl.DataFrame] = {}
 
     for declared in action.outputs:
         frame = result.outputs.get(declared.id)
@@ -345,19 +377,19 @@ def _persist_outputs(
                 details={"action_id": action.id, "output_id": declared.id},
             )
 
-        written = export.write_output(paths, declared.id, frame)
+        tables[declared.id] = frame
         outputs.append(
             OutputMetadata(
                 id=declared.id,
                 label=declared.label,
-                row_count=written.row_count,
-                column_count=written.column_count,
-                columns=written.columns,
-                formats=written.formats,
+                row_count=frame.height,
+                column_count=frame.width,
+                columns=tuple(frame.columns),
+                formats=EXPORT_FORMATS,
             )
         )
 
-    return outputs
+    return tuple(outputs), RunResult.of(tables)
 
 
 def _finalize_failed(
@@ -383,20 +415,27 @@ def _finalize_failed(
                 warnings=warnings,
             ),
             error=error.as_run_error(),
+            # Build plan 6D.8: a failed Run must not leave a partially valid
+            # result behind. Set explicitly rather than left to the default,
+            # because a Run can fail after its Action has already produced
+            # frames — an Action that omits a declared output is exactly that
+            # case.
+            outputs=(),
+            result=None,
         )
     )
 
 
 def delete_run(run_id: str) -> bool:
-    """Forget a Run and release the state it holds (build plan 6B.6).
+    """Forget a Run and release the state it holds (build plan 6B.6, 6D.8).
 
-    Returns True if a Run was forgotten. The Run Store owns the Run's state;
-    the directory removal is the interim half, and it disappears with the last
-    of the Run's on-disk files in Phase 6C/6F.
+    Returns True if a Run was forgotten. Everything a Run holds — its metadata
+    and its result frames — travels with the Run, so forgetting the record is
+    what releases the memory: once the store drops its reference, the frames
+    are unreachable and Python reclaims them. There is nothing on disk to
+    remove, because Phase 6C/6D stopped writing a Run's files at all.
     """
-    removed = run_store.delete_run(run_id)
-    storage.delete_run_directory(run_id)
-    return removed
+    return run_store.delete_run(run_id)
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,10 @@
-"""Logical Run model tests (build plan 6B.1, 6B.7).
+"""Logical Run model tests (build plan 6B.1, 6B.7, 6D.5).
 
-The Run is runtime state with no filesystem in it. These tests pin three
+The Run is runtime state with no filesystem in it. These tests pin four
 things: the Run ID convention Phase 3 established is preserved, a Run is a
-value that is derived rather than mutated, and the public manifest is produced
-faithfully from it.
+value that is derived rather than mutated, the public manifest is produced
+faithfully from it, and — since Phase 6D — the result tables it carries are
+one primary plus any secondaries, never rows in the manifest.
 
 Deliberately filesystem-free — nothing here uses the `runs_dir` fixture.
 """
@@ -16,10 +17,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from app.errors import UnknownRunError
-from app.models.run import Run, new_run_id, now, parse_run_id
+from app.models.run import Run, RunResult, new_run_id, now, parse_run_id
 from app.models.schemas import (
     ActionReference,
     InputMetadata,
@@ -266,3 +268,95 @@ def test_the_manifest_metrics_are_a_copy() -> None:
     manifest.metrics["rows"] = 999
 
     assert metrics == {"rows": 1}
+
+# ---------------------------------------------------------------------------
+# 6D.5 One or more result tables
+# ---------------------------------------------------------------------------
+
+
+PRIMARY = pl.DataFrame({"SKU": ["A1", "A2"]})
+SECONDARY = pl.DataFrame({"note": ["duplicate"]})
+
+
+def test_a_single_table_result_needs_no_ceremony() -> None:
+    """Build plan 6D.5: multiple results must never be required."""
+    result = RunResult.of({"result": PRIMARY})
+
+    assert result.primary_output_id == "result"
+    assert result.primary.rows() == PRIMARY.rows()
+    assert dict(result.secondary) == {}
+
+
+def test_the_first_table_given_is_the_primary_one() -> None:
+    """The runner builds the mapping in declaration order, so first is first."""
+    result = RunResult.of({"main": PRIMARY, "rejects": SECONDARY})
+
+    assert result.primary_output_id == "main"
+    assert result.primary.rows() == PRIMARY.rows()
+    assert list(result.secondary) == ["rejects"]
+
+
+def test_a_table_can_be_looked_up_by_output_id() -> None:
+    result = RunResult.of({"main": PRIMARY, "rejects": SECONDARY})
+
+    main = result.table("main")
+    rejects = result.table("rejects")
+    assert main is not None and main.rows() == PRIMARY.rows()
+    assert rejects is not None and rejects.rows() == SECONDARY.rows()
+
+
+def test_an_unknown_output_id_returns_none_rather_than_guessing() -> None:
+    result = RunResult.of({"main": PRIMARY})
+
+    assert result.table("rejects") is None
+    assert result.table("MAIN") is None
+    assert result.table("../main") is None
+
+
+def test_a_result_must_contain_at_least_one_table() -> None:
+    with pytest.raises(ValueError):
+        RunResult.of({})
+
+
+def test_the_primary_output_must_be_one_of_the_tables() -> None:
+    with pytest.raises(ValueError):
+        RunResult(tables={"main": PRIMARY}, primary_output_id="rejects")
+
+
+def test_the_tables_cannot_be_added_to_or_removed_from() -> None:
+    """A caller must not be able to change what a Run produced."""
+    result = RunResult.of({"main": PRIMARY})
+
+    with pytest.raises(TypeError):
+        result.tables["rejects"] = SECONDARY  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.primary_output_id = "rejects"  # type: ignore[misc]
+
+
+def test_the_result_is_not_a_copy_of_the_action_frames() -> None:
+    """The Run keeps the Action's own frames; nothing is re-materialised."""
+    result = RunResult.of({"main": PRIMARY})
+
+    assert result.primary is PRIMARY
+
+
+def test_a_run_carries_no_result_until_it_has_one() -> None:
+    assert Run.create(ACTION).result is None
+
+
+def test_a_run_can_carry_its_result() -> None:
+    result = RunResult.of({"result": PRIMARY})
+
+    run = Run.create(ACTION).with_changes(result=result)
+
+    assert run.result is result
+
+
+def test_the_manifest_never_carries_result_rows() -> None:
+    """Build plan section 23: the manifest describes results, never their rows."""
+    run = Run.create(ACTION).with_changes(result=RunResult.of({"result": PRIMARY}))
+
+    payload = run.to_manifest().model_dump()
+
+    assert "result" not in payload
+    assert "A1" not in json.dumps(payload, default=str)
