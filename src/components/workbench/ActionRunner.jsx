@@ -6,6 +6,7 @@ import ActionDescription from "@/components/workbench/ActionDescription";
 import ActionSelector from "@/components/workbench/ActionSelector";
 import AuditSummary from "@/components/workbench/AuditSummary";
 import DataPreview from "@/components/workbench/DataPreview";
+import ExportButtons from "@/components/workbench/ExportButtons";
 import FileUploadSlot from "@/components/workbench/FileUploadSlot";
 import OutputSelector from "@/components/workbench/OutputSelector";
 import ResultsSummary from "@/components/workbench/ResultsSummary";
@@ -288,6 +289,12 @@ export default function ActionRunner() {
             runId={manifest.run_id}
             outputId={selectedOutput.id}
             label={outputs.length > 1 ? selectedOutput.label : null}
+          />
+
+          <ExportButtons
+            runId={manifest.run_id}
+            output={selectedOutput}
+            outputs={outputs}
           />
 
           <AuditSummary manifest={manifest} />

@@ -1,8 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-08-30
+Last Updated: 2026-09-01
 Current Phase: None
-Last Completed Phase: Phase 6E — Results, Preview, Metrics, and Audit Data
+Last Completed Phase: Phase 6F — In-Memory CSV and XLSX Export
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -1096,6 +1096,149 @@ retained frames) and are unchanged by this phase. Recorded as Known Issue 47.
 
 ---
 
+### Phase 6F — In-Memory CSV and XLSX Export
+
+All eight items of build plan "Phase 6F" were implemented and verified, and a
+user can now export a result from the browser for the first time. **No
+filesystem behaviour changed in the direction of writing** — the opposite: this
+phase removed the last place ForgeXL still touched a disk during an export.
+
+**Repository state found at the start.** The committed branch was at
+`phase 6D complete`; Phase 6E was complete but on an unmerged branch
+(`claude/forgexl-phase-6e-fe009v`, commit `1caab84`). This session's branch was
+re-based onto that commit — a fast-forward, since 6D is its ancestor — so 6F is
+built on the real 6E code rather than duplicating or skipping it. The three
+integrity checks the previous session prescribed were then run in order: the
+backend modules are under `backend/app/` and not `src/app/`; `md5sum` across
+`backend/tests/*.py` printed no duplicate; and the suite reported **568
+passed**, which is the number the 6E commit records. `npx pyright`,
+`npx eslint` and `npm run build` were also clean before any change.
+
+**6F.1 CSV from the result frame.** Already the mechanism since 6D; this phase
+pinned it as a contract. `export.to_csv_bytes` writes the frame straight into a
+buffer and closes the buffer before returning, so only the bytes handed to the
+caller survive the call.
+
+**6F.2 XLSX genuinely in memory — the one real defect this phase found.**
+`DataFrame.write_excel` opens its own `xlsxwriter.Workbook`, and xlsxwriter
+**spools the workbook's parts through the OS temporary directory** unless the
+`in_memory` option is set. Polars does not set it. Measured before the fix by
+spying on `tempfile`: one small export created **12 temporary files** under
+`/tmp`. Build plan 6F.2 asks for "an in-memory binary buffer", and Phase 6
+rule 3 says an export must not have to be written to disk before download, so
+`export.py` now opens the workbook itself with `in_memory: True`. Measured
+after: **0 temporary files**. Two tests hold the line — one asserts the option,
+one spies on `tempfile.mkstemp` / `NamedTemporaryFile` across a single-sheet
+and a multi-sheet export.
+
+Opening the workbook here means Polars' own workbook defaults had to be
+reproduced rather than inherited. All four are set explicitly in
+`export.WORKBOOK_OPTIONS`, and one of them is a data-safety rule, not just a
+default: `strings_to_formulas: False` means a cell whose text begins with `=`
+is written as **text**, never as a formula (build plan section 16). A test
+round-trips `=SUM(A1:A9)` through a workbook and back.
+
+**6F.3 Sensible cell values — the second defect.** Polars applies
+`#,##0.000;[Red]-#,##0.000` to every numeric column by default. The stored
+value stays exact, but what Excel _shows_ is what a reader trusts, and it
+showed `0.000123` as **`0.000`** and `3000` as `3,000` in red-negative styling
+the user's data never had. That is the same class of silent presentation change
+the preview is forbidden to make (build plan section 3.3, and 6F.3's "sensible
+cell values"), so numeric columns are now written with Excel's `General`
+format. The numeric column list is derived from the frame's own schema via
+`dtype.is_numeric()`, so a Polars numeric type this application has never seen
+is covered too. **Date formats are deliberately kept** — an Excel date with no
+format renders as its serial number, which would be strictly less faithful.
+Three tests: no `#,##0` in the workbook's styles, values round-tripping
+exactly, and `yyyy-mm-dd` still present for a date column.
+
+**6F.4 Several result tables in one workbook.** `export.to_workbook_bytes`
+takes `(label, frame)` pairs and writes one worksheet each into a single
+workbook; `to_xlsx_bytes` is now its one-table case, so there is one code path,
+not two. A new route exposes it:
+
+    GET /api/runs/{run_id}/download/xlsx
+
+Every result table of the Run, in the Action's declaration order, so the
+primary result is the first sheet. The per-output endpoints are unchanged and
+remain the way to fetch one table alone or to fetch anything as CSV — there is
+deliberately no whole-Run CSV, because a CSV file holds one table by
+definition. A Run with no result — a failed Run, or one whose result has been
+released — returns `MISSING_ARTIFACT`, not a workbook with no sheets.
+
+**6F.5 Worksheet names.** `export.worksheet_names` satisfies the three
+requirements together:
+
+| Requirement    | Rule                                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Understandable | the Action's **label**, kept as written wherever Excel allows it                                                                                                                                                          |
+| Valid          | `: \ / ? * [ ]` become spaces; runs of space collapse; a leading or trailing apostrophe is dropped; cut to Excel's 31 characters; the reserved name "History" is never handed over; an empty result falls back to `Sheet` |
+| Collision-safe | duplicates numbered ` 2`, ` 3`, …, compared **case-insensitively** because Excel compares that way, with the base truncated so the numbered name still fits 31 characters                                                 |
+
+**The name now comes from the output's label rather than its ID** — "Product
+Master" instead of `product_master`. That is a deliberate behaviour change,
+recorded under **Deviations**: 6F.5 asks for an understandable name, this is
+the phase that owns worksheet naming, and the label is exactly the
+human-readable name the Action declares and the UI already shows.
+
+**6F.6 Download information.** `export.download_filename` produces:
+
+    forgexl-<action>-<output>-<YYYYMMDD-HHMMSS>.<ext>   per-output download
+    forgexl-<action>-<YYYYMMDD-HHMMSS>.xlsx             whole-Run workbook
+
+Every part comes from the Run's own record — the Action it executed, the output
+requested, and the Run's `completed_at`. Two consequences are deliberate: the
+same output downloaded twice arrives under the **same** name rather than a new
+one, and two outputs of one Run never collide in a downloads folder. The
+timestamp is rendered in **UTC**, so a machine that changes timezone does not
+rename a Run it already recorded. Each slug is reduced to `a-z0-9-`, which
+means the name is safe to place in a `Content-Disposition` header verbatim and
+can never carry a directory component out of an Action or output ID — pinned by
+a parametrised test over `../../escape`, `a b/c`, `!!!` and a 200-character ID.
+
+**6F.7 Nothing is retained.** Each request builds its bytes, sends them, and
+closes its buffer; the module holds no cache and a Run stores no rendered
+export. Three tests: the module's mutable module-level state is unchanged
+across CSV, XLSX and workbook generation; a Run compares equal to itself
+before and after three downloads; and repeated downloads return identical
+bytes.
+
+**6F.8 No server paths.** A parametrised test walks the manifest, the preview
+and all three downloads and asserts that no header or body contains `/Users/`,
+`/home/`, `/tmp`, `data/runs` or `\Users\`; a further test does the same for a
+404 error body. This was already true — there is no path left to leak — and is
+now asserted rather than assumed.
+
+**Frontend (Known Issue 47, closed).** `ExportButtons.jsx` renders **one link
+per format the backend says the selected output is available in**, so an Action
+offering a format this file has never heard of still gets a working button; a
+whole-Run workbook link appears only when the Run produced more than one table.
+The links are plain `<a href>`, not fetches — following one is an ordinary
+navigation, so the file goes straight from the backend to the downloads folder
+and the page never holds a second copy of the result. No `download` attribute
+is used: the backend's `Content-Disposition` names the file, which is also what
+6F.6 is for. `formatExportLabel` was added to `lib/formatters.js` and both
+download URL builders to `lib/api.js`, so **no endpoint path or backend URL
+appears outside `lib/api.js`** — the rule Phase 6G depends on. Every other
+component is untouched; `ActionRunner` gained six lines.
+
+**There is still no branch on any Action ID anywhere in the frontend.**
+Verified by driving a temporary two-output Action through the real UI with no
+frontend change: the output selector, the preview, both export buttons and the
+"Download All Results (Excel)" link all appeared and worked, and the downloaded
+workbook held two correctly named worksheets. The temporary Action was removed
+and `registry.py` restored to its committed state before this report; `git diff`
+on `backend/app/actions/` is empty.
+
+**What Phase 6F deliberately did not do.** It did not touch
+`services/storage.py`'s dead runtime code, `config.DATA_DIRECTORY` /
+`RUNS_DIRECTORY`, or the `runs_dir` test fixture — build plan 6I.1 owns those
+(Known Issues 21 and 39). It did not begin 6G: `lib/api.js` still holds
+`http://127.0.0.1:8000` and the browser still calls FastAPI directly, exactly
+as build plan section 5 requires until 6G changes it.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -1118,8 +1261,11 @@ Frontend files:
     src/app/page.jsx               header + BackendStatus + ActionRunner
     src/app/globals.css            Tailwind import + theme tokens
     src/app/favicon.ico
-    src/lib/api.js                 the ONLY module holding a backend URL
-    src/lib/formatters.js          formatFileSize / fileExtension / joinWithOr
+    src/lib/api.js                 the ONLY module holding a backend URL,
+                                   including the two download URL builders
+    src/lib/formatters.js          display helpers: file size, extension,
+                                   counts, duration, metric and export labels,
+                                   preview cells
     src/components/backend/BackendStatus.jsx
                                    client component, /health indicator
     src/components/workbench/ActionRunner.jsx
@@ -1134,7 +1280,21 @@ Frontend files:
                                    Run / Processing…, disabled-state rules
     src/components/workbench/RunStatus.jsx
                                    running / success / structured errors
+    src/components/workbench/OutputSelector.jsx      (6E)
+                                   rendered only when a Run has >1 result
+    src/components/workbench/ResultsSummary.jsx      (6E)
+                                   counts, column changes, Action metrics
+    src/components/workbench/DataPreview.jsx         (6E)
+                                   the paginated result table
+    src/components/workbench/AuditSummary.jsx        (6E)
+                                   what happened, from manifest.audit
+    src/components/workbench/ExportButtons.jsx       (6F)
+                                   one link per offered format, plus the
+                                   whole-Run workbook when >1 result
     public/.gitkeep
+
+(The 6E components were added to the repository in Phase 6E but this list was
+not updated at the time; the entries above are the actual repository state.)
 
 `page.jsx` stays a server component; `ActionRunner` is the client boundary, so
 server-only and client-only code remain separated (build plan §15).
@@ -1284,8 +1444,23 @@ variable names.
                         ->  200 attachment | 404
                             The bytes are generated from the retained result
                             frame for that request; no file is read or
-                            written (6D). The filename convention is still
-                            `<output-id>.<format>` — 6F.6 changes it.
+                            written (6D), and the workbook is assembled in a
+                            memory buffer with no temporary file at all (6F.2).
+                            Named by the ForgeXL convention (6F.6):
+                            forgexl-<action>-<output>-<YYYYMMDD-HHMMSS>.<ext>
+                            404 unknown Run or output, or the Run no longer
+                                holds its result (MISSING_ARTIFACT)
+
+    GET  /api/runs/{run_id}/download/xlsx                       (new in 6F)
+                        ->  200 attachment | 404
+                            Every result table of the Run as one workbook,
+                            one worksheet each, in the Action's declaration
+                            order (6F.4). Named
+                            forgexl-<action>-<YYYYMMDD-HHMMSS>.xlsx.
+                            There is deliberately no whole-Run CSV: a CSV
+                            file holds one table by definition.
+                            404 unknown Run, or a Run with no result
+                                (MISSING_ARTIFACT) — a failed Run included
 
 Every error body has the shape build plan section 22 specifies:
 
@@ -1419,6 +1594,169 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6F)
+
+Environment note: this session started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist. Both were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`); no undocumented step
+was required and no dependency was added. `backend/requirements.txt`,
+`package.json` and `package-lock.json` are byte-identical to their committed
+state.
+
+    cd backend && .venv/bin/python -m pytest   ->  638 passed, 1 warning
+
+The 6E baseline of **568 passed** was reproduced before any edit, together with
+the other two integrity checks (backend modules under `backend/`, no duplicate
+test-module checksums).
+
+| Module                            |  6E |  6F | Change                                           |
+| --------------------------------- | --: | --: | ------------------------------------------------ |
+| `test_contract_freeze.py`         |  84 |  84 | **amended** — one route added to `FROZEN_ROUTES` |
+| `test_storage.py`                 |  64 |  64 | unchanged                                        |
+| `test_runs_api.py`                |  59 |  59 | 5 download assertions moved to the 6F convention |
+| `test_export.py`                  |  15 |  56 | **+41** — 6F.2 to 6F.7 at the service level      |
+| `test_runner.py`                  |  51 |  51 | unchanged                                        |
+| `test_run_model.py`               |  37 |  37 | unchanged                                        |
+| `test_parser.py`                  |  36 |  36 | unchanged                                        |
+| `test_run_store.py`               |  34 |  34 | unchanged                                        |
+| `test_product_master_builder.py`  |  34 |  34 | unchanged                                        |
+| `test_export_download.py`         |   — |  29 | **new** — 6F's completion battery over real HTTP |
+| `test_actions.py`                 |  30 |  30 | unchanged                                        |
+| `test_audit.py`                   |  22 |  22 | unchanged                                        |
+| `test_exact_duplicate_remover.py` |  21 |  21 | unchanged                                        |
+| `test_preview.py`                 |  21 |  21 | unchanged                                        |
+| `test_results.py`                 |  17 |  17 | unchanged                                        |
+| `test_action_round_trip.py`       |  17 |  17 | 2 filename assertions moved to the 6F convention |
+| `test_api.py`                     |  14 |  14 | unchanged                                        |
+| `test_schemas.py`                 |  12 |  12 | unchanged                                        |
+| **Total**                         | 568 | 638 | **+70**                                          |
+
+**Nothing was weakened to pass.** Seven assertions across three modules changed,
+all of them because the download filename convention and the worksheet-name
+source deliberately changed in this phase, and each is now **stricter** than
+before, not looser:
+
+- `test_runs_api.py` and `test_action_round_trip.py` previously asserted
+  `"result.csv" in content-disposition` — a substring check. They now read the
+  filename out of the header and compare it against
+  `export.download_filename(...)` built from **that Run's own recorded
+  completion time**, so the whole convention is asserted rather than a
+  fragment of it.
+- One worksheet-name assertion moved from `"rejected"` to `"Rejected"`, the
+  output's label. Same exactness, different expected value.
+- `test_contract_freeze.py` gained one route. Every route, method and schema
+  already listed is untouched — this is an **addition** to the published
+  surface, not a change to any part of it (see **Deviations**).
+
+No test was skipped, deleted, loosened or marked `xfail`, and no warning was
+suppressed. One test drafted with `pl.read_excel(sheet_id=0)` raised a Polars
+`FutureWarning`; it was rewritten to read each worksheet with `fastexcel` — the
+application's own engine — rather than silenced.
+
+**What the new module pins.** `test_export_download.py` (29) runs build plan
+6F's completion criteria in order — execute an Action, request CSV, read the
+bytes, verify the content, request XLSX, reopen it from memory, verify the
+worksheet names, the headers and representative values — and then the rules
+around them: the whole-Run workbook and its sheet order, a workbook for a Run
+that has no result, labels Excel would reject (`Results: 2026/2027` twice, in
+two cases) still producing an openable workbook, the filename convention,
+re-download stability, a hostile upload filename never reaching a download
+name, and the no-server-path rule across five endpoints. Every workbook is
+reopened with `fastexcel`, so an export ForgeXL could not itself ingest fails
+the test.
+
+**41 new tests in `test_export.py`** cover the service directly: the
+`in_memory` option and the zero-temporary-file measurement, `=SUM(...)` staying
+text, the numeric-format and date-format rules, multi-sheet workbooks and their
+order, ten worksheet-name cases plus reserved-name, case-insensitive-collision
+and truncation-collision handling, the filename convention including UTC
+rendering and a safety regex over hostile IDs, and the retention rules.
+
+### Type checking (Phase 6F)
+
+    npx pyright   ->  0 errors, 0 warnings, 0 informations
+
+Pyright rejected a first draft that passed a `dict[str, str]` to Polars'
+`column_formats` parameter, whose declared key type is a union. It was not
+suppressed and no `# type: ignore` was added: the dict is now built inline at
+the call site, where Pyright infers it against the expected type.
+
+### Frontend static checks (Phase 6F)
+
+    npx eslint .   ->  clean, 0 problems
+    npm run build  ->  Compiled successfully; routes / and /_not-found
+
+(`npm run build` was re-run after deleting `.next/`, so the result is a clean
+build rather than a cached one.)
+
+### Phase 6F end-to-end verification over real HTTP
+
+Backend on `127.0.0.1:8000`, `next dev` on `127.0.0.1:3000`, both started the
+documented way. **19/19 checks passed.**
+
+| Build plan | Check                                           | Result                                                                    |
+| ---------- | ----------------------------------------------- | ------------------------------------------------------------------------- |
+| —          | `product_master_builder` executes on a real CSV | `succeeded`                                                               |
+| 6F.1       | `GET .../download/csv`                          | 200, `text/csv; charset=utf-8`                                            |
+| 6F.1       | CSV header                                      | `SKU,Vintage,Supplier,Producer,Selection,Volume`                          |
+| 6F.1       | CSV rows                                        | the deduplicated result, accents intact                                   |
+| 6F.6       | CSV filename                                    | `forgexl-product-master-builder-product-master-20260901-043949.csv`       |
+| 6F.2       | `GET .../download/xlsx`                         | 200, correct spreadsheetml content type                                   |
+| 6F.6       | XLSX filename                                   | same stem, `.xlsx`                                                        |
+| 6F.3       | Valid workbook container                        | `xl/workbook.xml` + `[Content_Types].xml` present                         |
+| 6F.5       | Worksheet name                                  | `["Product Master"]` — the output's label                                 |
+| 6F.3       | Headers preserved and ordered                   | the six Product Master columns, in order                                  |
+| 6F.3       | Representative values                           | `Château Margaux` / `Bodegas Muñoz`, `750.0` / `1500.0`                   |
+| 6F.4       | `GET /api/runs/{id}/download/xlsx`              | 200, one worksheet per result table                                       |
+| 6F.6       | Whole-Run filename                              | `forgexl-product-master-builder-20260901-043949.xlsx` — no output segment |
+| 6F.7       | Re-downloading the CSV                          | byte-identical to the first download                                      |
+| 6F.8       | Server paths in any header or body              | none                                                                      |
+| 6D/6F      | Files written under `data/`                     | **0** — `data/runs/.gitkeep` only, before and after                       |
+
+The same script was re-run after the temporary verification Action was removed
+and `registry.py` restored: **19/19 again**, on the committed two-Action
+registry.
+
+### Phase 6F browser verification (real headless Chromium)
+
+Driven with Playwright against the real dev servers — a real browser, a real
+file input, a real file picker, real downloads written to a directory outside
+the repository. Playwright was installed **outside** the repository, in the
+session scratchpad, and launched against the pre-installed Chromium.
+**14/14 checks passed.**
+
+**Run 1 — Product Master Builder (one result table).**
+
+| Check                                    | Result                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------- |
+| Results view shows an **Export** section | yes                                                                 |
+| Buttons offered                          | `Download CSV`, `Download Excel` — from `output.formats`            |
+| Whole-Run workbook link                  | **not** rendered (one result table)                                 |
+| Filename the browser received (CSV)      | `forgexl-product-master-builder-product-master-20260901-044125.csv` |
+| Downloaded CSV content                   | header + 3 deduplicated rows, accents intact                        |
+| Filename the browser received (XLSX)     | same stem, `.xlsx`                                                  |
+| Downloaded workbook                      | begins `PK` — a real XLSX file on disk                              |
+
+**Run 2 — a temporary two-output Action, with no frontend change.**
+
+| Check                                 | Result                                                  |
+| ------------------------------------- | ------------------------------------------------------- |
+| Whole-Run workbook link appears       | `Download All Results (Excel)`                          |
+| Its filename                          | `forgexl-split-check-20260901-044126.xlsx`              |
+| Worksheets in the downloaded workbook | `["Kept Rows", "Rejected Rows"]`, correct rows in each  |
+| Switching the result selector         | export buttons follow it                                |
+| Secondary result's CSV filename       | `forgexl-split-check-rejected-rows-20260901-044126.csv` |
+| Secondary result's CSV rows           | only its own row (`A3, …`)                              |
+
+**Across both runs.**
+
+| Check                                         | Result                                          |
+| --------------------------------------------- | ----------------------------------------------- |
+| Any page or download URL naming a server path | none                                            |
+| Uncaught page errors                          | none                                            |
+| Every backend request                         | straight to `http://127.0.0.1:8000` (section 5) |
 
 ### Backend test suite (Phase 6E)
 
@@ -3143,16 +3481,12 @@ them. The file was restored and re-verified clean.
 
 **Added in Phase 6E:**
 
-47. **Results cannot be exported from the browser yet.** Known Issue 16's
-    remaining half. The results view now shows the status, the metrics, the
-    paginated preview, validation warnings and the audit summary — but not the
-    CSV/XLSX download buttons. That is deliberate: build plan 6E's completion
-    criteria list five things a completed Run must display and export is not
-    among them, and **Phase 6F owns export**, including 6F.6, which changes the
-    download filename from `<output-id>.<format>` to
-    `forgexl-<action>-<timestamp>.<format>`. Building the buttons in 6E would
-    have been scaffolding for a later phase against a convention about to
-    change. The two download endpoints themselves work and were not touched.
+47. ~~**Results cannot be exported from the browser yet.**~~ Resolved in
+    Phase 6F, which owns export. `ExportButtons.jsx` renders one link per
+    format the backend offers for the selected output, plus the whole-Run
+    workbook link when a Run has more than one result table. Known Issue 16 is
+    now fully closed: the results view shows status, metrics, the paginated
+    preview, validation warnings, the audit summary **and** export.
 
 48. **`test_contract_freeze.py` is no longer "unchanged since 6A".** It was
     amended once, in this phase, for the manifest-shape change build plan
@@ -3160,9 +3494,13 @@ them. The file was restored and re-verified clean.
     `MANIFEST_SCHEMA_VERSION` assertion and one `PreviewResponse` construction
     changed; every other assertion is untouched. Recorded because the module's
     value came from passing unmodified, and a future session must be able to
-    see that the change was a decision rather than drift. **6F, 6G, 6H and 6I
-    should leave it unchanged again** — none of them has a reason to alter a
-    frozen contract.
+    see that the change was a decision rather than drift. It was amended a
+    second time in **Phase 6F**, by one line: the whole-Run workbook route of
+    6F.4 was added to `FROZEN_ROUTES`. That is an addition to the published
+    surface rather than a change to any part of it, and the module's docstring
+    now records both amendments. **6G, 6H and 6I should leave it unchanged** —
+    none of them has a reason to alter a frozen contract, and 6G in particular
+    changes the _browser-side_ prefix, not the server routes.
 
 49. **`MANIFEST_SCHEMA_VERSION` is 2, and nothing reads a version 1 manifest.**
     The bump is honest — the new required fields mean an old manifest would not
@@ -3203,7 +3541,66 @@ them. The file was restored and re-verified clean.
     of scope: section 31 also says not to add a spreadsheet component to the
     POC.
 
-None of the above blocks Phase 6F.
+**Added in Phase 6F:**
+
+54. **Phase 6E was complete on an unmerged branch, not on `main`.** The
+    repository this session started in was at `phase 6D complete`; 6E lived on
+    `claude/forgexl-phase-6e-fe009v` (commit `1caab84`), which `main` did not
+    contain. The 6F branch was re-based onto that commit — a fast-forward,
+    since 6D is its ancestor — so no 6E work was skipped or duplicated.
+    **Recorded because it will recur:** a session told "phases 0-6X are
+    complete" must check `git branch -r`, not only the checked-out branch,
+    before concluding that work is missing. Merging the phase branches into
+    `main` would remove the hazard.
+
+55. **The XLSX export used to write 12 temporary files per download.**
+    Resolved in this phase and recorded because it stood, unnoticed, from
+    Phase 3 through 6E — including through 6D, whose whole point was that a
+    Run writes nothing. Polars' `write_excel` opens its own
+    `xlsxwriter.Workbook`, and xlsxwriter spools workbook parts through the OS
+    temporary directory unless `in_memory` is set, which Polars does not set.
+    The 6D-era test that asserted "nothing is written" only watched the current
+    working directory and `data/runs`, so `/tmp` went unobserved. The new test
+    spies on `tempfile` itself. **The lesson generalises:** an assertion that
+    nothing was written must name _where_ it looked.
+
+56. **Excel used to display the user's numbers with a format they never had.**
+    Also resolved in this phase, also long-standing. Polars applies
+    `#,##0.000;[Red]-#,##0.000` to numeric columns, which showed `0.000123` as
+    `0.000`. The stored value was always exact, so no test comparing values
+    caught it; the defect was only visible to a human opening the file. Now
+    written with `General`. Date formats are deliberately kept.
+
+57. **The whole-Run workbook is not offered as CSV.** Deliberate: a CSV file
+    holds one table. A user who wants every table as CSV downloads each one.
+    Noted so a future session does not read the asymmetry as an oversight.
+
+58. **`export.WORKBOOK_OPTIONS` reproduces four Polars defaults by hand.**
+    Opening the workbook in `export.py` — which 6F.2 and 6F.4 both require —
+    means Polars no longer applies `use_zip64`, `nan_inf_to_errors`,
+    `strings_to_formulas` and `default_date_format` itself, so they are set
+    explicitly. If a future Polars release changes one of those defaults,
+    ForgeXL will keep the old one until this constant is updated. The values
+    are commented with what each is for, and `strings_to_formulas: False` has
+    its own test because it is a data-safety rule (build plan section 16), not
+    only a default.
+
+59. **Downloads are stamped in UTC, not local time.** A user in `UTC-7`
+    downloading at 8:45 pm gets a filename reading `20260901-034512`. The
+    alternative — local time — would rename a Run when the machine's timezone
+    changed, and would sort a downloads folder incorrectly across a timezone
+    move. Recorded because the number in the filename will not match the
+    user's wall clock. It is not used for anything but naming; the manifest
+    carries the real ISO timestamps.
+
+60. **A worksheet name numbered for the reserved word "History".** An output
+    labelled `History` becomes `History 2`, because Excel reserves `History`
+    and refuses to open a workbook that uses it. The number reads oddly with no
+    "History 1" beside it. It is valid, understandable enough, and loses no
+    data; a better rename is not worth a special case for a label neither real
+    Action uses.
+
+None of the above blocks Phase 6G.
 
 ---
 
@@ -3530,7 +3927,49 @@ failed` as an example and says explicitly: "Use existing equivalent status
     `ExportButtons`. `ResultsSummary.jsx` and `DataPreview.jsx` exist under
     those names. `AuditSummary.jsx` and `OutputSelector.jsx` are additions
     required by build plan 6E.5 and by 6E.1's "available result tables", which
-    §10 predates. `ExportButtons` was **not** built — see Known Issue 47.
+    §10 predates. `ExportButtons` was **not** built in 6E — see deviation 38.
+
+**Added in Phase 6F:**
+
+38. **`ExportButtons.jsx` was built in Phase 6F rather than Phase 6E.** §10
+    lists it among the eventual components and §29's layout puts the two
+    download buttons after the preview, which is exactly where it now sits.
+    It was deferred out of 6E because 6E's completion criteria do not list
+    export and 6F.6 changes the filename convention it depends on. Known Issue
+    47 is closed.
+
+39. **A worksheet is named after the output's _label_, not its ID.** Before
+    this phase the sheet was `product_master`; it is now `Product Master`.
+    Build plan 6F.5 requires an "understandable" name, this is the phase that
+    owns worksheet naming, and the label is the human-readable name the Action
+    already declares and the UI already shows. Nothing frozen changed: the
+    output ID, the manifest and the API shapes are untouched, and the two
+    existing tests that asserted the old sheet name now assert the new one
+    with the same exactness.
+
+40. **One route was added that §21's API contract does not list:**
+    `GET /api/runs/{run_id}/download/xlsx`. Build plan 6F.4 requires that
+    several result tables be exportable to separate worksheets, and a
+    per-output endpoint can only ever produce one worksheet, so without a
+    run-level route the requirement would have been satisfied only on paper —
+    a capability with no caller, which build plan §15 explicitly warns
+    against. §21 states what the API "should provide", a floor rather than a
+    ceiling, and the Phase 6 rules override earlier instructions they conflict
+    with. `FROZEN_ROUTES` was amended by exactly this one addition; no
+    existing route, method or schema changed.
+
+41. **Numeric columns in an XLSX export carry Excel's `General` format**
+    instead of the `#,##0.000` Polars applies by default. Build plan 6F.3
+    requires "sensible cell values"; the default showed `0.000123` as `0.000`
+    and added grouping separators the user's data never had. This is a
+    presentation change only — the stored values were always exact — and it
+    matches the rule the preview already follows (§3.3). Temporal formats are
+    deliberately unchanged.
+
+42. **The XLSX workbook is opened by `export.py`, not by Polars.** Required by
+    6F.2 (`in_memory`, so no temporary file is written) and by 6F.4 (several
+    worksheets in one workbook). The four Polars workbook defaults are
+    reproduced explicitly in `export.WORKBOOK_OPTIONS` — see Known Issue 58.
 
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
@@ -3543,89 +3982,95 @@ real browser actually made.
 
 Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and
 native browser APIs (`fetch`, `FormData`, `File`, `DataTransfer`). `package.json`
-is unchanged, and remained unchanged through 6A-6E — as did
-`package-lock.json` and `backend/requirements.txt`.
+is unchanged, and remained unchanged through 6A-6F — as did
+`package-lock.json` and `backend/requirements.txt`. Phase 6F added no dependency
+either: `xlsxwriter` was already a declared direct dependency (build plan §6.2),
+previously reached only through Polars and now imported directly.
 
 ---
 
 ## Next Phase
 
-**Phase 6F — In-Memory CSV and XLSX Export**
+**Phase 6G — Same-Origin Next.js Proxy and LAN Testing**
 
 Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6E: no export button was added to the UI, no filename convention was
-changed, `services/export.py` was not modified, and `test_export.py` was not
-touched.
+Phase 6F: `next.config.mjs` is untouched, no `/forge-api` path exists anywhere,
+`lib/api.js` still resolves `NEXT_PUBLIC_API_BASE_URL` to
+`http://127.0.0.1:8000`, and both servers still bind to `127.0.0.1`.
 
-**Where 6F starts from.** The export _mechanism_ 6F.1 and 6F.2 describe already
-exists — Phase 6D built it, because a Run stopped writing files and a download
-that served a file would otherwise have broken (Known Issue 42).
-`export.to_csv_bytes` / `to_xlsx_bytes` render the retained frame into a memory
-buffer, and the download endpoints return those bytes. So 6F.1/6F.2 are to be
-**confirmed**, not built.
+**Where 6G starts from — the one thing 6F did for it.** Every backend URL and
+every endpoint path in the frontend lives in `src/lib/api.js` and nowhere else.
+6F kept that rule while adding downloads: `outputDownloadUrl()` and
+`runWorkbookUrl()` build their URLs there, and `ExportButtons.jsx` calls them
+rather than composing a path of its own. Confirmed by grep — no other frontend
+file contains `8000` or `http://`, and the only two occurrences of `/api/`
+outside `lib/api.js` are inside doc comments (`ActionSelector.jsx`,
+`ActionRunner.jsx`) naming the endpoint the options come from, not building a
+URL. So 6G's first two items should be a change to one module plus two comment
+updates.
 
-**What Phase 6F actually owns**
+**What Phase 6G owns**
 
-- **6F.3 Excel compatibility.** Confirm by reopening a generated workbook, not
-  by inspecting the writer. `test_action_round_trip.py` and `test_export.py`
-  already do some of this — extend rather than duplicate.
-- **6F.4 Multiple result tables in one workbook.** The XLSX download writes one
-  worksheet per request today. `RunResult.secondary` and the manifest's
-  `outputs` (and now `audit.results`) make the multi-table case straightforward.
-  Decide deliberately whether a download of one output stays one worksheet and
-  a new "whole run" download carries all of them, or whether the existing
-  endpoint changes shape — the second is a frozen-route change.
-- **6F.5 Collision-safe worksheet names.** `export.worksheet_name()` truncates
-  to Excel's 31 characters and does nothing else; two outputs whose IDs share a
-  31-character prefix would collide. Excel also forbids `: \ / ? * [ ]` and
-  reserves `History`, none of which is handled.
-- **6F.6 The ForgeXL filename convention.** Still `<output-id>.<format>`;
-  6F.6 wants `forgexl-<action>-<timestamp>.<format>`. This is the reason the
-  export buttons were **not** built in 6E (Known Issue 47) — build them in 6F,
-  against the final convention, using the existing
-  `src/components/workbench/*` components. Build plan §10 names the component
-  `ExportButtons`.
-- **6F.7 Release the export buffer.** Make the policy explicit rather than
-  incidental: the bytes are generated per request and dropped with the
-  response, and nothing retains a second copy.
-- **6F.8 No server filesystem information in any response.** Already true and
-  checked by execution in 6D and again in 6E; keep the check.
-- **6F's own completion-criteria battery**: execute, request CSV, read the
-  bytes, request XLSX, reopen it from memory, verify worksheet names, headers
-  and representative values.
+- **6G.1/6G.2/6G.3.** Move the browser onto `/forge-api/*` and add the Next.js
+  rewrite to FastAPI. `API_BASE_URL` becomes the same-origin prefix; the
+  `NEXT_PUBLIC_API_BASE_URL` variable and its `.env.example` entry need a
+  decision (the browser must not need it; the rewrite target still does).
+- **6G.4.** The rewrite must not transform the body. Uploads are up to 250 MB
+  and downloads are whole spreadsheets, so this is the item to actually
+  measure, not assume — a rewrite that buffers either direction would undo
+  build plan §5's "copy the file once" rule.
+- **6G.5/6G.6.** FastAPI stays on `127.0.0.1`; only `next dev` is exposed to
+  the LAN. `config.HOST` already defaults to `127.0.0.1` and is overridable, so
+  no backend change should be required — verify rather than edit.
+- **6G.7/6G.8/6G.9.** Test the real file picker, drag-and-drop and error
+  handling from a second machine. **Note for that session:** this container has
+  no second laptop. The honest options are to drive a real browser against the
+  LAN address from the same machine and say so, or to record the item as
+  unverifiable here and defer it to the user's own hardware. Do not report a
+  second-laptop test that did not happen.
+- **6G.10.** No public deployment. Nothing in the repository moves toward one.
 
-**What Phase 6E leaves in the tree for 6I**
+**What 6G must not disturb**
 
-- `services/storage.py` still keeps `create_run()`, `RunPaths`, `run_paths()`,
-  `runs_directory()` and `delete_run_directory()` as **dead runtime code**, and
-  `config.DATA_DIRECTORY` / `RUNS_DIRECTORY` and the `.env.example` line that
-  documents them still exist. Build plan 6I.1 owns removing them (Known Issues
-  21 and 39). **Do not remove them in 6F.**
-- The `runs_dir` fixture in `tests/conftest.py` still exists so tests can assert
-  the directory stays **empty**. Keep until 6I.
-- Result frames still accumulate in `InMemoryRunStore` for the life of the
-  process (Known Issue 40). 6E added no retention pressure of its own — it
-  reads the frames a Run already holds. Measurement and any eviction policy
-  belong to Phase 7J.
-- Browser requests still go straight to `http://127.0.0.1:8000` via
-  `NEXT_PUBLIC_API_BASE_URL`. The same-origin `/forge-api/*` namespace is
-  **6G**, not 6F. `src/lib/api.js` is still the only frontend module that
-  knows a backend URL, which is what will make 6G a one-file change.
+- **The download links are plain `<a href>` navigations, not fetches.** They
+  work today because the response carries `Content-Disposition: attachment`.
+  Under a same-origin rewrite they must keep working; re-verify a real download
+  in a real browser, not only the JSON endpoints.
+- **CORS.** Once the browser is same-origin with Next.js, the CORS allowlist in
+  `config.ALLOWED_FRONTEND_ORIGINS` stops being what permits the request. Do
+  not delete it — build plan §19 still requires FastAPI to refuse unexpected
+  origins, and a direct browser call to `:8000` must still be governed.
+- **`test_contract_freeze.py`.** 6G changes the _browser-side_ prefix, not the
+  server routes. The module's `FROZEN_ROUTES` should need no edit; if it does,
+  something has changed that 6G was not asked to change.
 
-**Before writing any code, verify the repository is intact.** The defect class
-recorded as Known Issues 10, 31, 32, 37 and 38 (backend code committed into
-`src/app/`, or a test module overwritten by a copy of another) has occurred
-four times. It did **not** recur before this session, but check anyway. Run, in
-order:
+**What later phases still own**
 
+- **6H** — synthetic fixtures and end-to-end regression tests. Note that the
+  browser and HTTP verifications this project relies on live in the session
+  scratchpad and are re-written every session (Deviation 22); 6H is where that
+  becomes a committed suite.
+- **6I.1** — removing the dead runtime code in `services/storage.py`
+  (`create_run()`, `RunPaths`, `run_paths()`, `runs_directory()`,
+  `delete_run_directory()`), `config.DATA_DIRECTORY` / `RUNS_DIRECTORY`, the
+  `.env.example` line documenting them, and the `data/runs/` directory itself.
+  The `runs_dir` fixture in `tests/conftest.py` exists now only so tests can
+  assert the directory stays **empty**; it goes with them. Known Issues 21 and 39.
+- **Phase 7J** — result frames still accumulate in `InMemoryRunStore` for the
+  life of the process (Known Issue 40). 6F added no retention of its own:
+  exports are generated per request and released.
+
+**Before writing any code, verify the repository is intact.** Two things this
+session found are worth repeating as checks:
+
+    git branch -r                                    # is the last phase on an unmerged branch?
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
-    cd backend/tests && md5sum *.py | awk '{print $1}' | sort | uniq -d
+    md5sum backend/tests/*.py | awk '{print $1}' | sort | uniq -d
     cd backend && .venv/bin/python -m pytest
 
-The first must show the backend modules under `backend/`, the second must print
-nothing, and the third must report **568 passed** before any new work begins.
-If `backend/.venv/` or `node_modules/` is missing, the container is fresh:
-recreate both exactly as `backend/requirements.txt` and `package.json`
-document, and add nothing.
+The first must show whether a completed phase is sitting on a branch `main` does
+not contain (Known Issue 54 — it was, this session). The second must show the
+backend modules under `backend/`. The third must print nothing. The fourth must
+report **638 passed** before any new work begins.
 
-Do not begin Phase 6G.
+Do not begin Phase 6H.

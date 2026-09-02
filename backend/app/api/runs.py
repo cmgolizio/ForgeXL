@@ -10,9 +10,16 @@ Next.js and never copied through an intermediate service (build plan section 5).
 Since Phase 6D nothing here touches the filesystem. A Run holds its result
 tables in memory, so the preview slices one of those frames and a download
 renders one into bytes on the way out; no path is built, opened or served.
+
+Phase 6F completes the download side (6F.6): every export is offered under the
+ForgeXL filename convention, built from the Run's own record, and a Run with
+several result tables can be downloaded as one workbook. No response carries a
+server path, because there is no server path to carry (6F.8).
 """
 
 from __future__ import annotations
+
+from datetime import datetime
 
 import polars as pl
 from fastapi import APIRouter, Query, Request, Response
@@ -128,14 +135,42 @@ def get_output_preview(
 
 @router.get("/runs/{run_id}/outputs/{output_id}/download/csv")
 def download_output_csv(run_id: str, output_id: str) -> Response:
-    """Download one output as CSV (build plan 3.16)."""
+    """Download one output as CSV (build plan 3.16, 6F.1)."""
     return _download(run_id, output_id, export.CSV_FORMAT)
 
 
 @router.get("/runs/{run_id}/outputs/{output_id}/download/xlsx")
 def download_output_xlsx(run_id: str, output_id: str) -> Response:
-    """Download one output as XLSX (build plan 3.16)."""
+    """Download one output as XLSX (build plan 3.16, 6F.2)."""
     return _download(run_id, output_id, export.XLSX_FORMAT)
+
+
+@router.get("/runs/{run_id}/download/xlsx")
+def download_run_xlsx(run_id: str) -> Response:
+    """Download every result table of one Run as a single workbook.
+
+    Build plan 6F.4: an Action may return more than one table, and those tables
+    belong together. Each becomes its own worksheet, in the order the Action
+    declares its outputs, so the primary result is the first sheet. An Action
+    with one output produces a one-worksheet workbook, which is the same file
+    its per-output download produces.
+
+    The per-output endpoints are unchanged and remain the way to fetch one
+    table on its own, or to fetch anything as CSV — a CSV file holds one table
+    by definition, so there is no whole-Run CSV.
+    """
+    run = run_store.get_run(run_id)
+    sheets = _result_sheets(run)
+
+    return _attachment(
+        export.to_workbook_bytes(sheets),
+        export.XLSX_FORMAT,
+        filename=export.download_filename(
+            action_id=run.action.id,
+            extension=export.XLSX_FORMAT,
+            timestamp=_result_timestamp(run),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +215,52 @@ def _result_table(run: Run, output_id: str) -> pl.DataFrame:
     return table
 
 
+def _result_sheets(run: Run) -> list[tuple[str, pl.DataFrame]]:
+    """Return every result table of `run`, labelled, in declaration order.
+
+    Walks the Run's recorded outputs rather than its result mapping, so the
+    worksheets appear in the order the Action declares them and each one is
+    labelled the way the rest of the interface labels it.
+
+    A Run with no result at all — a failed Run, or one whose result has been
+    released — has nothing to export, which is a missing artifact rather than
+    an unknown output.
+    """
+    if not run.outputs or run.result is None:
+        raise MissingArtifactError(
+            "That Run has no result data available.",
+            details={"run_id": run.run_id},
+        )
+    return [
+        (output.label, _result_table(run, output.id)) for output in run.outputs
+    ]
+
+
+def _result_timestamp(run: Run) -> datetime:
+    """The moment a download's filename is stamped with.
+
+    The Run's completion, so re-downloading an output produces the same
+    filename rather than a new one each time. A Run still running has not
+    completed, so its creation stands in.
+    """
+    return run.completed_at or run.created_at
+
+
+def _attachment(payload: bytes, export_format: str, *, filename: str) -> Response:
+    """Send `payload` as a download named `filename`.
+
+    `filename` comes from :func:`app.services.export.download_filename`, which
+    emits only ``a-z``, ``0-9``, ``-`` and a single ``.`` — nothing the client
+    supplied reaches this header, and nothing here names a server location
+    (build plan 6F.6, 6F.8).
+    """
+    return Response(
+        content=payload,
+        media_type=_DOWNLOAD_MEDIA_TYPES[export_format],
+        headers={"content-disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _download(run_id: str, output_id: str, export_format: str) -> Response:
     """Generate one export from the Run's result table and send it.
 
@@ -203,15 +284,16 @@ def _download(run_id: str, output_id: str, export_format: str) -> Response:
         )
 
     payload = export.to_bytes(
-        _result_table(run, output_id), export_format, name=output_id
+        _result_table(run, output_id), export_format, name=output.label
     )
 
-    return Response(
-        content=payload,
-        media_type=_DOWNLOAD_MEDIA_TYPES[export_format],
-        headers={
-            "content-disposition": (
-                f'attachment; filename="{output_id}.{export_format}"'
-            )
-        },
+    return _attachment(
+        payload,
+        export_format,
+        filename=export.download_filename(
+            action_id=run.action.id,
+            output_id=output_id,
+            extension=export_format,
+            timestamp=_result_timestamp(run),
+        ),
     )

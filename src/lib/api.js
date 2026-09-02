@@ -112,6 +112,34 @@ export async function fetchPreview({
   );
 }
 
+/**
+ * The address one result table is downloaded from (build plan 6F.1, 6F.2).
+ *
+ * A URL rather than a request: the browser follows it as an ordinary
+ * navigation, so the file is streamed straight to the user's downloads folder
+ * and never becomes a copy of the result held in page memory. The backend
+ * names the file through `Content-Disposition` (build plan 6F.6), which is
+ * also why no `download` attribute is needed at the link.
+ */
+export function outputDownloadUrl({ runId, outputId, format }) {
+  return (
+    `${API_BASE_URL}/api/runs/${encodeURIComponent(runId)}` +
+    `/outputs/${encodeURIComponent(outputId)}` +
+    `/download/${encodeURIComponent(format)}`
+  );
+}
+
+/**
+ * The address a Run's complete workbook is downloaded from (build plan 6F.4).
+ *
+ * Every result table of the Run, one worksheet each. Only meaningful for an
+ * Action that produced more than one table; the caller decides when to offer
+ * it.
+ */
+export function runWorkbookUrl({ runId }) {
+  return `${API_BASE_URL}/api/runs/${encodeURIComponent(runId)}/download/xlsx`;
+}
+
 /** Report whether the backend answers `GET /health`. */
 export async function fetchHealth({ signal } = {}) {
   const payload = await request("/health", { signal });

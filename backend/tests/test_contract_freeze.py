@@ -24,15 +24,22 @@ current implementation in depth, and several of them are expected to be
 rewritten as the runtime changes. This module is the part that must not need
 rewriting.
 
-**Amended once, in Phase 6E.** The freeze passed unchanged through 6B, 6C and
-6D. Phase 6E is the phase build plan Phase 6 always intended to change the
+**Amended twice.** The freeze passed unchanged through 6B, 6C and 6D.
+
+*Phase 6E* is the phase build plan Phase 6 always intended to change the
 manifest: 6E.1 requires result metadata and 6E.5 requires an audit summary,
-neither of which the frozen shape could carry. The amendment is confined to
-three schema field lists and the manifest version constant, and every other
-assertion in this module — the Action inventory, the routes, the error table,
-the metric keys, the preview limits, the determinism checks — is untouched and
-still passing. Each amended entry says below exactly what changed and why, so
-the change stays a recorded decision rather than a quiet edit.
+neither of which the frozen shape could carry. That amendment is confined to
+three schema field lists and the manifest version constant.
+
+*Phase 6F* adds one route to :data:`FROZEN_ROUTES` for the whole-Run workbook
+of 6F.4. It is an addition and not a change: every route, method and shape
+already listed is untouched.
+
+Everything else in this module — the Action inventory, the error table, the
+metric keys, the preview limits, the determinism checks — is untouched across
+both amendments and still passing. Each amended entry says below exactly what
+changed and why, so the change stays a recorded decision rather than a quiet
+edit.
 """
 
 from __future__ import annotations
@@ -167,6 +174,13 @@ FROZEN_ACTION_IDS: tuple[str, ...] = tuple(
 #: Every server-side route the frontend or a future client may call, with the
 #: methods it answers, exactly as the published OpenAPI schema reports them.
 #: Phase 6G changes the *browser-side* prefix, not these.
+#:
+#: **Added to once, in Phase 6F**, for the whole-Run workbook download build
+#: plan 6F.4 requires: an Action returning several tables has to be exportable
+#: as the one file a user expects, and a per-output route can only ever produce
+#: one worksheet. Every route already listed is untouched — this is an
+#: addition to the published surface, not a change to any part of it, which is
+#: the only kind of amendment this inventory should ever take.
 FROZEN_ROUTES: dict[str, list[str]] = {
     "/health": ["get"],
     "/api/actions": ["get"],
@@ -175,6 +189,7 @@ FROZEN_ROUTES: dict[str, list[str]] = {
     "/api/runs/{run_id}/outputs/{output_id}/preview": ["get"],
     "/api/runs/{run_id}/outputs/{output_id}/download/csv": ["get"],
     "/api/runs/{run_id}/outputs/{output_id}/download/xlsx": ["get"],
+    "/api/runs/{run_id}/download/xlsx": ["get"],
 }
 
 #: Every error the backend reports, with the status the API boundary returns.

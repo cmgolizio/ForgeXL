@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import polars as pl
@@ -21,7 +22,7 @@ import pytest
 
 from app.actions.exact_duplicate_remover import ExactDuplicateRemoverAction
 from app.actions.product_master_builder import ProductMasterBuilderAction
-from app.services import parser
+from app.services import export, parser
 
 from tests.fixtures import duplicate_rows, product_rows
 from tests.helpers import csv_bytes, upload_file, xlsx_bytes
@@ -68,6 +69,21 @@ CASES = (
 )
 
 CASE_IDS = [case.action_id for case in CASES]
+
+
+def _expected_filename(run: dict[str, Any], case: Case, extension: str) -> str:
+    """The name build plan 6F.6's convention gives this Run's download.
+
+    Derived from the Run's own recorded completion time, so the assertion
+    checks the whole convention — prefix, Action, output and timestamp —
+    against this specific Run rather than against a hard-coded string.
+    """
+    return export.download_filename(
+        action_id=case.action_id,
+        output_id=case.output_id,
+        extension=extension,
+        timestamp=datetime.fromisoformat(run["completed_at"]),
+    )
 
 
 def _numbers_as_floats(rows) -> list[tuple[Any, ...]]:
@@ -133,7 +149,9 @@ def test_the_downloaded_csv_matches_the_expected_output_exactly(
     frame = pl.read_csv(io.BytesIO(response.content))
 
     assert response.headers["content-type"].startswith("text/csv")
-    assert f"{case.output_id}.csv" in response.headers["content-disposition"]
+    assert _expected_filename(run, case, "csv") in response.headers[
+        "content-disposition"
+    ]
     assert tuple(frame.columns) == case.expected_columns
     assert frame.height == len(case.expected_rows)
     assert frame.rows() == list(case.expected_rows)
@@ -168,7 +186,9 @@ def test_the_downloaded_xlsx_matches_the_expected_output(
     response = _download(client, run["run_id"], case, "xlsx")
     frame = _read_downloaded_xlsx(response.content)
 
-    assert f"{case.output_id}.xlsx" in response.headers["content-disposition"]
+    assert _expected_filename(run, case, "xlsx") in response.headers[
+        "content-disposition"
+    ]
     assert tuple(frame.columns) == case.expected_columns
     assert frame.height == len(case.expected_rows)
     assert _numbers_as_floats(frame.rows()) == _numbers_as_floats(

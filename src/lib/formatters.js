@@ -109,6 +109,23 @@ export function formatCell(value) {
   return String(value);
 }
 
+/**
+ * Name an export format the way a person would, e.g. `xlsx` → `Download Excel`.
+ *
+ * The formats come from the backend's own output metadata, so a format this UI
+ * has never seen still gets a readable label rather than being dropped — the
+ * same rule the Action metrics follow.
+ */
+const EXPORT_FORMAT_LABELS = {
+  csv: "Download CSV",
+  xlsx: "Download Excel",
+};
+
+export function formatExportLabel(format) {
+  const key = String(format ?? "").toLowerCase();
+  return EXPORT_FORMAT_LABELS[key] ?? `Download ${key.toUpperCase()}`;
+}
+
 /** True when a cell holds no value at all, so it can be styled as empty. */
 export function isBlankCell(value) {
   return value === null || value === undefined;

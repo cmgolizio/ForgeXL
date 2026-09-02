@@ -11,10 +11,12 @@ const PRESENTATION = {
 };
 
 /**
- * Small indicator showing whether the local FastAPI backend answers /health.
+ * Small indicator showing whether the ForgeXL backend answers /health.
  *
- * The browser talks to the backend directly; requests are not proxied through
- * Next.js. This also exercises the backend CORS configuration.
+ * The request is same-origin — `/forge-api/health` — and the Next.js server
+ * forwards it to FastAPI (build plan 6G.2/6G.3). So this reports on the
+ * backend of whichever machine served the page, which is what makes it
+ * meaningful when the page is open on a second laptop.
  */
 export default function BackendStatus() {
   const [status, setStatus] = useState("checking");

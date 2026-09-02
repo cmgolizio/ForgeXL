@@ -15,7 +15,7 @@ import pytest
 
 from app import config
 from app.models.run import new_run_id
-from app.services import run_store
+from app.services import export, run_store
 
 from tests.helpers import csv_bytes, make_action, upload_file, xlsx_bytes
 
@@ -43,6 +43,18 @@ def _start_run(client, payload: bytes | None = None, action_id: str = "passthrou
         data={"action_id": action_id},
         files={"source_file": upload_file("sales.csv", payload or _sales_csv())},
     )
+
+
+def _disposition_filename(response) -> str:
+    """The filename a download response offers, unquoted.
+
+    Read out rather than substring-matched so a test states the whole name the
+    convention produced (build plan 6F.6).
+    """
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="'), disposition
+    assert disposition.endswith('"'), disposition
+    return disposition[len('attachment; filename="') : -1]
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +376,10 @@ def test_the_csv_download_returns_the_generated_file(run_client) -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert "result.csv" in response.headers["content-disposition"]
+    assert _disposition_filename(response).startswith(
+        f"{export.FILENAME_PREFIX}-passthrough-result-"
+    )
+    assert _disposition_filename(response).endswith(".csv")
     assert response.text.splitlines()[0] == "SKU,Vintage,Supplier"
 
 
@@ -374,7 +389,10 @@ def test_the_xlsx_download_returns_a_real_workbook(run_client) -> None:
     response = run_client.get(f"/api/runs/{run_id}/outputs/result/download/xlsx")
 
     assert response.status_code == 200
-    assert "result.xlsx" in response.headers["content-disposition"]
+    assert _disposition_filename(response).startswith(
+        f"{export.FILENAME_PREFIX}-passthrough-result-"
+    )
+    assert _disposition_filename(response).endswith(".xlsx")
     # A genuine XLSX is a zip container holding the workbook part.
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert "xl/workbook.xml" in archive.namelist()
@@ -403,9 +421,10 @@ def test_the_download_filename_comes_from_the_output_not_the_upload(
 
     download = run_client.get(f"/api/runs/{run_id}/outputs/result/download/csv")
 
-    disposition = download.headers["content-disposition"]
-    assert "result.csv" in disposition
-    assert "evil" not in disposition
+    filename = _disposition_filename(download)
+    assert filename.startswith(f"{export.FILENAME_PREFIX}-passthrough-result-")
+    assert filename.endswith(".csv")
+    assert "evil" not in filename
 
 
 def test_each_output_downloads_and_previews_its_own_table(
@@ -450,8 +469,12 @@ def test_each_output_downloads_and_previews_its_own_table(
     rejected_csv = client.get(f"/api/runs/{run_id}/outputs/rejected/download/csv")
     assert kept_csv.text.splitlines()[1] == "A1,2019,Acme"
     assert rejected_csv.text.splitlines()[1] == "A3,2021,Gamma"
-    assert "kept.csv" in kept_csv.headers["content-disposition"]
-    assert "rejected.csv" in rejected_csv.headers["content-disposition"]
+    assert _disposition_filename(kept_csv).startswith(
+        f"{export.FILENAME_PREFIX}-two-outputs-kept-"
+    )
+    assert _disposition_filename(rejected_csv).startswith(
+        f"{export.FILENAME_PREFIX}-two-outputs-rejected-"
+    )
 
 
 def test_each_output_downloads_its_own_worksheet(client, registered_actions) -> None:
@@ -489,7 +512,7 @@ def test_each_output_downloads_its_own_worksheet(client, registered_actions) -> 
     response = client.get(f"/api/runs/{run_id}/outputs/rejected/download/xlsx")
     parsed = parser.parse_tabular_bytes(response.content, ".xlsx")
 
-    assert parsed.worksheet == "rejected"
+    assert parsed.worksheet == "Rejected"
     assert parsed.frame.rows() == [("A3", 2021.0, "Gamma")]
 
 

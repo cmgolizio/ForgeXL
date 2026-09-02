@@ -6,6 +6,8 @@
     "dev": "concurrently --names web,api --prefix-colors cyan,magenta --kill-others-on-fail \"npm:dev:web\" \"npm:dev:api\"",
     "dev:web": "next dev --hostname 127.0.0.1 --port 3000",
     "dev:api": "bash scripts/dev-backend.sh",
+    "dev:lan": "concurrently --names web,api --prefix-colors cyan,magenta --kill-others-on-fail \"npm:dev:web:lan\" \"npm:dev:api\"",
+    "dev:web:lan": "node scripts/lan-address.mjs && next dev --hostname 0.0.0.0 --port 3000",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3000",
     "lint": "eslint"
