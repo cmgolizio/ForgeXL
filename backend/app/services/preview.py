@@ -12,6 +12,10 @@ merely to be read back (build plan 6D.7).
 The whole dataset is never serialised into a response. The limit rules —
 100 by default, 500 at most, an over-large limit refused rather than clamped —
 are unchanged public contract.
+
+Since Phase 6E a page also carries the table's column schema, so the client can
+render each value by its actual type instead of inferring one from the sample
+of rows it happens to have been sent (build plan 6E.4).
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from dataclasses import dataclass
 import polars as pl
 
 from app.errors import InvalidRequestError
+from app.models.schemas import ColumnSchema
+from app.services import results
 
 #: Rows returned when the caller does not ask for a specific page size.
 DEFAULT_PREVIEW_LIMIT = 100
@@ -31,13 +37,19 @@ MAX_PREVIEW_LIMIT = 500
 
 @dataclass(frozen=True)
 class PreviewPage:
-    """One page of an output dataset."""
+    """One page of an output dataset.
+
+    `column_schema` describes the whole table, not just this page: a client
+    renders every page the same way, so the types must not change as the user
+    pages through (build plan 6E.4).
+    """
 
     columns: tuple[str, ...]
     rows: list[list[object]]
     offset: int
     limit: int
     total_rows: int
+    column_schema: tuple[ColumnSchema, ...]
 
 
 def validate_offset(offset: int) -> int:
@@ -92,4 +104,5 @@ def read_preview(
         offset=offset,
         limit=limit,
         total_rows=frame.height,
+        column_schema=results.column_schema(frame),
     )

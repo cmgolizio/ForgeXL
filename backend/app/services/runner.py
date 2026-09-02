@@ -1,4 +1,4 @@
-"""The generic Run pipeline (build plan 3.7-3.9, 6B-6D and section 24).
+"""The generic Run pipeline (build plan 3.7-3.9, 6B-6E and section 24).
 
     resolve Action -> record Run -> read input -> parse input -> validate input
     -> execute Action -> keep the result frames -> finalize the Run
@@ -27,6 +27,13 @@ records a Run when it starts and hands the store a new state at every
 transition; it never writes run state anywhere itself, so where that state
 lives is not the runner's concern. The result frames travel with the Run, so
 forgetting the Run releases them (build plan 6D.8).
+
+Since Phase 6E the runner also describes what came out. Each result table is
+measured by :mod:`app.services.results` — its schema, the rows the Run
+received, and the columns it added or dropped — and the Action's own
+`rows_affected`, when it reports one, is carried onto the Run so the audit
+summary can state it. None of that reaches the result table itself: audit and
+result metadata stay out of the user's data (build plan 6E.6).
 
 Failure handling follows build plan 3.9: once a Run is recorded, every
 outcome — including a failure — leaves the Run recorded, with its error and its
@@ -67,7 +74,7 @@ from app.models.schemas import (
     ValidationIssue,
     ValidationSummary,
 )
-from app.services import parser, run_store, storage
+from app.services import parser, results, run_store, storage
 from app.services.export import EXPORT_FORMATS
 from app.services.storage import BinarySource, LoadedUpload
 
@@ -160,7 +167,7 @@ def execute_run(
             raise RunValidationError(issues)
 
         result = _execute_action(action, _frames_by_slot(parsed))
-        outputs, tables = _collect_outputs(action, result)
+        outputs, tables = _collect_outputs(action, result, input_records)
 
         completed_at = now()
         run = run_store.update_run(
@@ -173,6 +180,7 @@ def execute_run(
                 outputs=outputs,
                 metrics=dict(result.metrics),
                 result=tables,
+                rows_affected=result.rows_affected,
             )
         )
         return RunOutcome(run=run)
@@ -348,25 +356,39 @@ def _execute_action(
 
 
 def _collect_outputs(
-    action: Action, result: ActionResult
+    action: Action,
+    result: ActionResult,
+    input_records: Sequence[InputMetadata],
 ) -> tuple[tuple[OutputMetadata, ...], RunResult]:
-    """Describe each declared output and keep its frame (build plan 6D.5).
+    """Describe each declared output and keep its frame (build plan 6D.5, 6E.1).
 
     Walks the Action's declared outputs in declaration order, so the first one
     an Action declares is the primary result table and the rest, if any, are
     secondary. An Action that declares an output and does not produce it fails
     the Run: a missing result is never quietly dropped.
 
+    Since Phase 6E each output is described in full by
+    :func:`app.services.results.describe_output`: its schema, the rows the Run
+    received, and the columns this result added or dropped relative to what was
+    uploaded. Those are measured against `input_records` — the inputs that
+    actually parsed — rather than against what the Action declares it wants, so
+    the description is of the data, not of the intention.
+
     Nothing is written. The frames the Action returned are the frames the Run
     keeps, and CSV/XLSX are generated from them when a download asks for them
     (build plan 6D.7).
 
     The reported formats stay the runner's :data:`EXPORT_FORMATS`, exactly as
-    before this phase: which formats an output is offered in is not something
-    Phase 6D changes.
+    before: which formats an output is offered in is not something Phase 6D or
+    6E changes.
     """
     outputs: list[OutputMetadata] = []
     tables: dict[str, pl.DataFrame] = {}
+
+    received_columns = results.input_columns(
+        record.columns for record in input_records
+    )
+    received_rows = sum(record.row_count for record in input_records)
 
     for declared in action.outputs:
         frame = result.outputs.get(declared.id)
@@ -379,13 +401,13 @@ def _collect_outputs(
 
         tables[declared.id] = frame
         outputs.append(
-            OutputMetadata(
-                id=declared.id,
+            results.describe_output(
+                output_id=declared.id,
                 label=declared.label,
-                row_count=frame.height,
-                column_count=frame.width,
-                columns=tuple(frame.columns),
                 formats=EXPORT_FORMATS,
+                frame=frame,
+                received_columns=received_columns,
+                received_rows=received_rows,
             )
         )
 
@@ -422,6 +444,9 @@ def _finalize_failed(
             # case.
             outputs=(),
             result=None,
+            # Same rule: a Run that produced nothing has affected nothing it
+            # can report (build plan 6D.8).
+            rows_affected=None,
         )
     )
 

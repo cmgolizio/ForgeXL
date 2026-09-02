@@ -23,6 +23,14 @@ export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL
 ).replace(/\/+$/, "");
 
+/**
+ * Rows requested per preview page.
+ *
+ * Matches the backend's own default. The backend refuses anything above its
+ * maximum rather than clamping, so this is a page size, not a limit to widen.
+ */
+export const DEFAULT_PREVIEW_LIMIT = 100;
+
 /** The backend could not be reached at all — it is probably not running. */
 export const NETWORK_ERROR_CODE = "NETWORK_ERROR";
 
@@ -76,6 +84,32 @@ export async function createRun({ actionId, files = {}, signal } = {}) {
     if (file) formData.append(slotId, file);
   }
   return request("/api/runs", { method: "POST", body: formData, signal });
+}
+
+/**
+ * Return one page of a Run's result table (build plan 6E.2, 6E.3).
+ *
+ * Only the requested page crosses the network: the backend slices the result
+ * frame it is holding and serves at most `limit` rows, so a large result is
+ * never sent to the browser in order to show the first hundred rows of it.
+ */
+export async function fetchPreview({
+  runId,
+  outputId,
+  offset = 0,
+  limit = DEFAULT_PREVIEW_LIMIT,
+  signal,
+} = {}) {
+  const query = new URLSearchParams({
+    offset: String(offset),
+    limit: String(limit),
+  });
+  return request(
+    `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(
+      outputId,
+    )}/preview?${query}`,
+    { signal },
+  );
 }
 
 /** Report whether the backend answers `GET /health`. */

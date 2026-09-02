@@ -54,3 +54,62 @@ export function joinWithOr(values) {
   if (items.length <= 1) return items.join("");
   return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
+
+/**
+ * Render a row or column count the way a reader expects, e.g. `15,842`.
+ *
+ * Grouping separators are a presentation of a count the application itself
+ * produced, never of a value from the user's file — the preview shows those
+ * exactly as they were uploaded (build plan section 3.3).
+ */
+export function formatCount(value) {
+  return Number.isFinite(value) ? value.toLocaleString() : "";
+}
+
+/**
+ * Render an execution time, e.g. `0.82 s` or `42 ms`.
+ *
+ * Sub-100 ms durations stay in milliseconds: rounding them to two decimal
+ * places of a second would report most of them as `0.00 s`.
+ */
+export function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+  if (milliseconds < 100) return `${Math.round(milliseconds)} ms`;
+  return `${(milliseconds / 1000).toFixed(2)} s`;
+}
+
+/**
+ * Turn a backend metric key into a label, e.g. `duplicates_removed` →
+ * `Duplicates removed`.
+ *
+ * Metric keys are the Action's own, so they are presented rather than
+ * translated: no key is renamed, reordered or dropped, and one this UI has
+ * never seen still reads correctly.
+ */
+export function formatMetricLabel(key) {
+  const words = String(key ?? "")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  if (!words) return "";
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Render one preview cell.
+ *
+ * Values are shown exactly as the backend sent them: no number is regrouped,
+ * no string is trimmed and no blank is filled in. Only `null` is given a
+ * visible stand-in, because an empty cell and a cell holding an empty string
+ * would otherwise look identical — and they are different facts about the
+ * user's data.
+ */
+export function formatCell(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
+
+/** True when a cell holds no value at all, so it can be styled as empty. */
+export function isBlankCell(value) {
+  return value === null || value === undefined;
+}

@@ -23,6 +23,16 @@ The 311 tests that existed before this phase are unaffected: they cover the
 current implementation in depth, and several of them are expected to be
 rewritten as the runtime changes. This module is the part that must not need
 rewriting.
+
+**Amended once, in Phase 6E.** The freeze passed unchanged through 6B, 6C and
+6D. Phase 6E is the phase build plan Phase 6 always intended to change the
+manifest: 6E.1 requires result metadata and 6E.5 requires an audit summary,
+neither of which the frozen shape could carry. The amendment is confined to
+three schema field lists and the manifest version constant, and every other
+assertion in this module — the Action inventory, the routes, the error table,
+the metric keys, the preview limits, the determinism checks — is untouched and
+still passing. Each amended entry says below exactly what changed and why, so
+the change stays a recorded decision rather than a quiet edit.
 """
 
 from __future__ import annotations
@@ -68,6 +78,8 @@ from app.models.schemas import (
     ActionListResponse,
     ActionOutput,
     ActionReference,
+    ColumnKind,
+    ColumnSchema,
     InputMetadata,
     OutputMetadata,
     PreviewResponse,
@@ -224,11 +236,29 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        # Amended in Phase 6E: build plan 6E.1 requires result metadata that
+        # the frozen six fields could not carry. The six are all still here,
+        # in their original order and meaning; the four additions describe the
+        # result and never carry a row.
         OutputMetadata,
-        ("id", "label", "row_count", "column_count", "columns", "formats"),
+        (
+            "id",
+            "label",
+            "row_count",
+            "column_count",
+            "columns",
+            "formats",
+            "column_schema",
+            "input_row_count",
+            "columns_added",
+            "columns_removed",
+        ),
     ),
     (RunError, ("code", "message", "details")),
     (
+        # Amended in Phase 6E: build plan 6E.5 requires an assembled audit
+        # summary. `audit` is derived from the fields above it, so nothing
+        # already frozen changed meaning.
         RunManifest,
         (
             "schema_version",
@@ -244,9 +274,14 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "outputs",
             "metrics",
             "error",
+            "audit",
         ),
     ),
     (
+        # Amended in Phase 6E: build plan 6E.4 requires enough column metadata
+        # for a client to render values by type. `rows` stays positional and
+        # `columns` stays a plain list of names — the additions sit beside
+        # them.
         PreviewResponse,
         (
             "run_id",
@@ -256,6 +291,7 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "offset",
             "limit",
             "total_rows",
+            "column_schema",
         ),
     ),
 )
@@ -879,10 +915,13 @@ def test_run_status_values_are_frozen() -> None:
     }
 
 
-def test_the_manifest_schema_version_is_one() -> None:
+def test_the_manifest_schema_version_is_two() -> None:
     # Bumping this is a deliberate decision to record, not a side effect of a
-    # refactor. Phase 6 may need to; it must not do so silently.
-    assert MANIFEST_SCHEMA_VERSION == 1
+    # refactor. Phase 6E made it: `OutputMetadata` gained four required fields
+    # and `RunManifest` gained a required `audit`, so a version 1 manifest no
+    # longer validates against this model. Recorded in
+    # `docs/implementation-status.md` under Phase 6E.
+    assert MANIFEST_SCHEMA_VERSION == 2
 
 
 def test_preview_limits_are_frozen() -> None:
@@ -906,6 +945,10 @@ def test_preview_rows_stay_positional_lists() -> None:
         offset=0,
         limit=100,
         total_rows=2,
+        column_schema=(
+            ColumnSchema(name="SKU", dtype="String", kind=ColumnKind.TEXT),
+            ColumnSchema(name="Volume", dtype="String", kind=ColumnKind.TEXT),
+        ),
     )
 
     payload = response.model_dump(mode="json")

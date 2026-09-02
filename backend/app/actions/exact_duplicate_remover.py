@@ -81,4 +81,9 @@ class ExactDuplicateRemoverAction(Action):
                 "output_rows": output_rows,
                 "duplicates_removed": input_rows - output_rows,
             },
+            # This Action only ever removes rows, so the rows it affected are
+            # exactly the duplicates it dropped. Stated explicitly rather than
+            # left for the runner to infer from the two counts (build plan
+            # 6E.5).
+            rows_affected=input_rows - output_rows,
         )

@@ -122,6 +122,7 @@ def get_output_preview(
         offset=page.offset,
         limit=page.limit,
         total_rows=page.total_rows,
+        column_schema=page.column_schema,
     )
 
 

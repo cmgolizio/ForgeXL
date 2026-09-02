@@ -1,8 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-08-29
+Last Updated: 2026-08-30
 Current Phase: None
-Last Completed Phase: Phase 6D — DataFrame-First Action Execution
+Last Completed Phase: Phase 6E — Results, Preview, Metrics, and Audit Data
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -941,6 +941,161 @@ is the whole reason it exists.
 
 ---
 
+### Phase 6E — Results, Preview, Metrics, and Audit Data
+
+All seven items of build plan "Phase 6E" were implemented and verified. A Run
+now describes what it produced and explains what it did, and the browser shows
+all of it: metrics, the paginated preview, validation warnings and the audit
+summary. **No filesystem behaviour changed** — nothing is written, and the run
+still needs no directory. Export buttons were deliberately **not** built; that
+is Phase 6F (see below).
+
+**The repository was verified intact before any code was written.** The three
+checks the previous session's _Next Phase_ prescribed were run in order: the
+backend modules are under `backend/app/` and not `src/app/`; `md5sum` across
+`backend/tests/*.py` printed no duplicate; and the suite reported **519
+passed**. The class of defect recorded as Known Issues 10, 31, 32, 37 and 38
+did **not** recur this time. `npx eslint .` and `npm run build` were also clean
+before any change, so this phase started from a verified baseline.
+
+**6E.1 Result metadata.** `backend/app/services/results.py` is the new,
+single place that describes a result frame. It is a service rather than code
+inside the runner because the runner, the preview and (later) the export all
+need the same description of a table, and describing a result twice is how two
+descriptions come to disagree.
+
+`OutputMetadata` gains four fields, all **measured**, never inferred:
+
+| Field             | What it is                                                 |
+| ----------------- | ---------------------------------------------------------- |
+| `column_schema`   | Each column's name, Polars dtype and a coarse `ColumnKind` |
+| `input_row_count` | Rows the Run actually received, across every input         |
+| `columns_added`   | Result columns that appeared in **no** input               |
+| `columns_removed` | Input columns that are **not** in this result              |
+
+The two column lists are set differences over real column names in
+first-appearance order, so they are deterministic and mean the same thing for a
+one-input Action and a three-input one. A reordered column is reported as
+neither added nor removed, which a test pins.
+
+**"Affected row count" is the Action's to state, not the runner's to guess.**
+Build plan 6E.1 lists it and 6E.5 qualifies it with _"where supported by the
+Action"_. A generic `input_rows - output_rows` labelled "rows affected" would
+be a guess about semantics — an Action that rewrites 500 values in place
+affects 500 rows and changes the row count by zero — and build plan section 3.3
+forbids guessing. So `ActionResult` gained an optional
+`rows_affected: int | None`, defaulting to `None`; both real Actions set it to
+the count of duplicate rows they dropped, which is exactly what they affected.
+An Action that states nothing reports `null`, and the audit shows `null` rather
+than substituting a different fact. **Neither Action's metrics, ID, version,
+inputs, outputs or transformation changed** — `test_contract_freeze.py`'s
+frozen metric-key sets still pass untouched.
+
+**6E.2/6E.3 Preview from the result frame.** Already true since 6D: the preview
+slices the retained DataFrame and no temporary spreadsheet is generated to read
+back. The 100-row default and 500-row maximum are unchanged, and the browser
+requests exactly one page — verified in a real browser by recording the network
+requests a "Next" click produced (one `?offset=100&limit=100`, nothing else).
+
+**6E.4 Schema information.** `ColumnSchema` carries three things: `name`, the
+Polars `dtype` verbatim (`Int64`, `String`, …) and `kind` — a small closed
+enum (`number`, `text`, `boolean`, `temporal`, `other`). The dtype is evidence
+of what the data is; the kind is what a table actually branches on. `Boolean`
+is classified before numeric deliberately, so a true/false column is never
+right-aligned as though it were a count, and an unrecognised type falls back to
+`other` rather than to a guess. Both `OutputMetadata` and `PreviewResponse`
+carry it, and the preview's schema describes the whole table rather than the
+page, so column types cannot change as the user pages forward.
+
+**6E.5 The audit summary.** `RunAudit` (with `AuditInput` and `AuditResult`)
+assembles what build plan 6E.5 lists: the Action executed, the inputs used,
+rows received, rows returned, rows affected, the result tables available,
+validation warnings and errors, the Action's metrics, the execution status and
+the duration.
+
+It is **derived, not recorded**: `Run.to_audit()` builds it from the Run's own
+fields and `Run.to_manifest()` carries it, so the audit can never drift out of
+step with the manifest it sits in — a test asserts field-by-field that the two
+agree. A Run explains itself in whatever state it is in: a `running` Run
+reports zero rows received and no results, and a **failed** Run reports its
+status, what it received, `null` for what it returned, and the errors that
+stopped it (build plan 3.9's evidence rule, now visible to a reader).
+`rows_returned` is the **primary** table's row count, not a total across
+tables — a total would belong to no table — and every table is listed in
+`results`.
+
+**6E.6 Audit data stays out of the user's data.** Nothing in this phase writes
+a value into a result frame, and that is asserted rather than assumed: three
+tests check the result table's columns after a Run, compare the retained frame
+byte-for-byte against what the Action returned, and confirm that describing a
+result does not alter it.
+
+**6E.7 The existing frontend was extended, not rebuilt.** Every Phase 5
+component still exists and none was replaced. `ActionSelector`,
+`ActionDescription`, `FileUploadSlot` and `RunButton` were **not touched at
+all**. Four components were added and two files extended:
+
+    src/components/workbench/ResultsSummary.jsx   new — counts, column changes,
+                                                  the Action's own metrics
+    src/components/workbench/DataPreview.jsx      new — the paginated table
+    src/components/workbench/AuditSummary.jsx     new — the audit record
+    src/components/workbench/OutputSelector.jsx   new — only when >1 result
+    src/components/workbench/RunStatus.jsx        + validation warnings, and a
+                                                  success line that now names
+                                                  the row counts
+    src/components/workbench/ActionRunner.jsx     + result-table state and the
+                                                  four components above
+    src/lib/api.js                                + fetchPreview()
+    src/lib/formatters.js                         + formatCount, formatDuration,
+                                                  formatMetricLabel, formatCell,
+                                                  isBlankCell
+
+**There is still no branch on any Action ID anywhere in the frontend.** The
+output selector is built from the manifest's own `outputs`, the metric rows
+from the Action's own metric keys (humanised for display, never renamed,
+reordered or dropped), and the preview's alignment from the column kinds the
+backend reported. Verified by running a two-output Action against the real UI
+with no frontend change of any kind — see **Tests**.
+
+**Preview values are shown exactly as they arrived.** No number is regrouped
+with thousands separators, no string is trimmed and no blank is filled in — the
+preview is the user's data (build plan section 3.3). Grouping separators appear
+only on counts the application itself produced (`15,842 rows`). The single
+display convention is that a `null` renders as a muted em dash, because an
+empty cell and a cell holding an empty string are different facts and would
+otherwise look identical.
+
+**`MANIFEST_SCHEMA_VERSION` is now 2, and this is the one deliberate contract
+change.** `OutputMetadata` gained four required fields and `RunManifest` gained
+a required `audit`, so a version 1 manifest does not validate against the new
+model — that is an incompatibility in the parse direction and the constant says
+so. Nothing already frozen changed name, order or meaning; every addition sits
+beside what was there. `PreviewResponse.rows` is still positional and
+`columns` is still a plain list of names.
+
+**`test_contract_freeze.py` was amended, for the first time since Phase 6A.**
+It passed unchanged through 6B, 6C and 6D, which is what made it useful. Phase
+6E is the phase build plan Phase 6 always intended to change the manifest, and
+the freeze did exactly its job: it turned that change into a decision that had
+to be written down. The amendment is confined to three schema field lists, the
+version constant and one `PreviewResponse` construction; each amended entry
+carries a comment saying what changed and why. **Every other assertion in the
+module — the Action inventory, the route table, the error/status table, the
+frozen metric keys, the preview limits, the determinism checks, the
+DataFrame-first classification — is untouched and still passing.**
+
+**What Phase 6E deliberately did not build.** Build plan 6E's completion
+criteria require a completed Run to display status, metrics, preview,
+validation warnings and the audit summary. **Export buttons are not among
+them**, and Phase 6F owns export — including 6F.6, which changes the download
+filename convention from `<output-id>.<format>` to
+`forgexl-<action>-<timestamp>.<format>`. Building the buttons now would have
+been scaffolding for a later phase against a filename convention that is about
+to change. The download endpoints themselves work (6D re-pointed them at the
+retained frames) and are unchanged by this phase. Recorded as Known Issue 47.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -1043,9 +1198,13 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_runner.py        the pipeline, validation, failed Runs, results,
                               deletion   (rebuilt again in 6D; see KI 37)
         test_export.py        CSV/XLSX bytes round trips                  (6D)
-        test_preview.py       paging limits over a result frame           (6D)
+        test_preview.py       paging limits and the column schema      (6D/6E)
+        test_results.py       column kinds, added/removed columns,
+                              describe_output                            (6E)
+        test_audit.py         result metadata and the audit summary through
+                              the pipeline; audit stays out of the data  (6E)
         test_runs_api.py      the Run endpoints and their status codes
-        test_contract_freeze.py  the Phase 6A freeze (unchanged since 6A)
+        test_contract_freeze.py  the Phase 6A freeze (amended once, in 6E)
         test_exact_duplicate_remover.py / test_product_master_builder.py /
         test_action_round_trip.py                                (Phase 4)
 
@@ -1094,6 +1253,9 @@ variable names.
                             there (6C); the Action's result frames are held
                             by the Run. The whole pipeline writes nothing to
                             disk and needs no run directory at all (6D).
+                            The manifest carries result metadata on every
+                            output and a derived `audit` summary (6E);
+                            `schema_version` is now 2.
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
@@ -1110,7 +1272,9 @@ variable names.
 
     GET  /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=
                         ->  200 PreviewResponse (default 100, max 500)
-                            Sliced from the Run's retained result frame (6D).
+                            Sliced from the Run's retained result frame (6D),
+                            with the table's `column_schema` so a client can
+                            render values by type (6E).
                             400 offset/limit out of range
                             404 unknown Run or output, or the Run no longer
                                 holds its result (MISSING_ARTIFACT)
@@ -1255,6 +1419,181 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6E)
+
+Environment note: this session also started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist. Both were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`); no undocumented step
+was required and no dependency was added. `backend/requirements.txt`,
+`package.json` and `package-lock.json` are byte-identical to their committed
+state.
+
+    cd backend && .venv/bin/python -m pytest   ->  568 passed, 1 warning
+
+The committed state was **intact** this time: the three integrity checks the
+previous session prescribed all passed before any edit (backend modules under
+`backend/`, no duplicate test-module checksums, **519 passed**).
+
+| Module                            |  6D |  6E | Change                                          |
+| --------------------------------- | --: | --: | ----------------------------------------------- |
+| `test_contract_freeze.py`         |  84 |  84 | **amended** — 3 field lists + version constant  |
+| `test_storage.py`                 |  64 |  64 | unchanged                                       |
+| `test_runs_api.py`                |  53 |  59 | +6 — result metadata, preview schema, audit     |
+| `test_runner.py`                  |  51 |  51 | one case extended (a failure clears the effect) |
+| `test_run_model.py`               |  37 |  37 | updated for the new required fields             |
+| `test_parser.py`                  |  36 |  36 | unchanged                                       |
+| `test_run_store.py`               |  34 |  34 | unchanged                                       |
+| `test_product_master_builder.py`  |  34 |  34 | unchanged                                       |
+| `test_actions.py`                 |  30 |  30 | unchanged                                       |
+| `test_audit.py`                   |   — |  22 | **new** — the audit summary, end to end         |
+| `test_exact_duplicate_remover.py` |  21 |  21 | unchanged                                       |
+| `test_preview.py`                 |  17 |  21 | +4 — the page's column schema                   |
+| `test_results.py`                 |   — |  17 | **new** — the result-metadata service           |
+| `test_action_round_trip.py`       |  17 |  17 | unchanged                                       |
+| `test_export.py`                  |  15 |  15 | unchanged                                       |
+| `test_api.py`                     |  14 |  14 | unchanged                                       |
+| `test_schemas.py`                 |  12 |  12 | updated for the new required fields             |
+| **Total**                         | 519 | 568 | **+49**                                         |
+
+**Nothing was weakened to pass.** The four modules whose assertions changed
+(`test_contract_freeze.py`, `test_schemas.py`, `test_run_model.py`,
+`test_runner.py`) changed because the manifest shape deliberately changed: each
+now asserts the **new** shape exactly, with the same strictness as before —
+`test_schema_field_names_are_frozen` is still an exact tuple equality, and
+`test_manifest_carries_no_dataframe_rows` still asserts the complete key set of
+an output rather than a subset. No test was skipped, deleted or loosened, and
+no `xfail` was added.
+
+**What the two new modules pin.**
+
+`test_results.py` (17) — that a boolean is not classified as a number, that an
+unclassified Polars type falls back to `other` rather than to a guess, that the
+dtype is reported verbatim, that received columns keep first-appearance order,
+that reordering columns is reported as neither added nor removed, and that
+result metadata carries no row of the result (asserted by searching the
+serialised metadata for the cell values).
+
+`test_audit.py` (22) — the metadata and the audit through the real pipeline:
+row counts, dropped and created columns, the schema, several result tables, an
+Action that states no effect reporting `null` rather than a number, a failed
+Run still explaining itself, a `running` Run reporting the state it is actually
+in, the audit agreeing field-by-field with the manifest it sits in, and three
+cases proving no audit value reaches the user's result table (build plan 6E.6),
+including one that compares the retained frame byte-for-byte against what the
+Action returned.
+
+### Type checking (Phase 6E)
+
+    npx pyright   ->  0 errors, 0 warnings, 0 informations
+
+### Frontend static checks (Phase 6E)
+
+    npx eslint .   ->  clean, 0 problems
+    npm run build  ->  Compiled successfully; routes / and /_not-found
+
+ESLint's `react-hooks/set-state-in-effect` rule caught a first draft of
+`DataPreview` that reset its paging offset from an effect. It was not
+suppressed: the offset reset now happens because `ActionRunner` gives the
+component a `key` of `<run id>:<output id>`, so a different table is a
+different component instance and starts at its first page. That is the React
+idiom the rule points at, and it removed an effect rather than silencing one.
+
+### Phase 6E end-to-end verification over real HTTP
+
+Backend on `127.0.0.1:8000`, `next dev` on `127.0.0.1:3000`, both started the
+documented way.
+
+| Check                                          | Result                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------- |
+| `POST /api/runs` (product_master_builder, CSV) | 200; `schema_version: 2`                                      |
+| Result metadata on the output                  | `input_row_count: 75`, `row_count: 60`                        |
+| `columns_removed`                              | `["Customer"]` — the sales column the Product Master drops    |
+| `columns_added`                                | `[]`                                                          |
+| `column_schema`                                | 6 entries; `Vintage` → `Int64`/`number`, rest `String`/`text` |
+| Audit summary                                  | rows_received 75, rows_returned 60, **rows_affected 15**      |
+| Audit metrics                                  | the Action's own three keys, verbatim                         |
+| `GET .../preview?offset=0&limit=3`             | 3 rows, `total_rows: 60`, `column_schema` present             |
+| `GET .../preview?offset=58&limit=100`          | 2 rows returned, `total_rows: 60`                             |
+| Accented values through the whole pipeline     | `Château Léoville` / `Sélection Prestige` intact              |
+| Files written anywhere under `data/`           | **0** — `data/runs/.gitkeep` only, before and after           |
+
+### Phase 6E browser verification (real headless Chromium)
+
+Driven with Playwright against the real dev servers — a real browser, a real
+file input, real network requests. Screenshots saved outside the repository.
+
+**Run 1 — Product Master Builder, 280-row CSV (250 unique products).**
+
+| Check                           | Result                                                                                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend indicator               | `Backend Connected`                                                                                                                                 |
+| Workbench state                 | `success`                                                                                                                                           |
+| Success line                    | "Product Master Builder read 280 rows and returned 250."                                                                                            |
+| Results figures                 | Input Rows 280 · Output Rows 250 · Columns 6 · Execution 2 ms                                                                                       |
+| Columns removed shown           | `Customer`                                                                                                                                          |
+| Action metrics                  | "Duplicate product rows removed" listed with its value                                                                                              |
+| Preview headers                 | SKU, Vintage, Supplier, Producer, Selection, Volume                                                                                                 |
+| Accents in the preview          | `Château Léoville` / `Sélection Prestige` rendered intact                                                                                           |
+| Alignment from column kinds     | `Vintage` right-aligned; every text column left-aligned                                                                                             |
+| Rows rendered                   | 100 (the page size, not the 250-row result)                                                                                                         |
+| Paging line                     | `Showing 1–100 of 250`                                                                                                                              |
+| Click **Next**                  | `Showing 101–200 of 250`                                                                                                                            |
+| Network requests for that click | **exactly one** — `?offset=100&limit=100` (build plan section 31)                                                                                   |
+| Click **Previous**              | `Showing 1–100 of 250`                                                                                                                              |
+| Audit summary on screen         | action + version, status, 280 received, 250 returned, 30 affected, duration, Run ID, the input file with its shape, the result table with its shape |
+| `[object Object]` anywhere      | none                                                                                                                                                |
+| Server paths anywhere           | none (`/home/`, `data/runs` absent from the rendered page)                                                                                          |
+| Uncaught page errors            | none                                                                                                                                                |
+
+**Run 2 — a validation failure, same session.** A zero-byte CSV posted to
+Exact Duplicate Remover: state `validation_error`, panel reads
+"Validation Failed / empty.csv is empty.", and **no results block, no preview
+table and no audit panel are rendered** — a failed Run never shows a result
+area.
+
+**Run 3 — Exact Duplicate Remover, 140-row XLSX (20 duplicates).**
+
+| Check                    | Result                                                     |
+| ------------------------ | ---------------------------------------------------------- |
+| Success line             | "Exact Duplicate Remover read 140 rows and returned 120."  |
+| Figures                  | Input 140 · Output 120 · Columns 4 · Execution 3 ms        |
+| Action metrics           | Input rows 140, Output rows 120, Duplicates removed 20     |
+| Boolean column `InStock` | rendered `false` and **left**-aligned, not as a number     |
+| `Vintage`                | right-aligned                                              |
+| Output selector          | **not rendered** — the Action has one output               |
+| Column-change rows       | **not rendered** — this Action adds and removes nothing    |
+| Audit                    | 140 received, 120 returned, 20 affected, `book.xlsx` 140×4 |
+| Uncaught page errors     | none                                                       |
+
+**Run 4 — blank cells.** A CSV with an empty numeric cell and an empty text
+cell: both render as a muted `—`, and the duplicate row is removed (3 → 2).
+No value is otherwise reformatted.
+
+**Run 5 — a two-output Action, to prove the UI needs no Action-specific code.**
+A verification-only server (`scratchpad/temp_server.py`, **outside the
+repository**) served the real application with one extra Action registered,
+declaring two outputs. **No repository file was changed for this test.**
+
+| Check                            | Result                                                                           |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| Output selector appears          | yes, with options "Kept Rows" and "Dropped Rows"                                 |
+| Preview heading                  | `Preview — Kept Rows`, then `Preview — Dropped Rows`                             |
+| Switching result tables          | headers change 7 columns → 2; `Showing 1–100 of 280` → `Showing 1–3 of 3`        |
+| Requests on switch               | the new table's first page only                                                  |
+| Results figures follow the table | Output Rows 3, Columns 2 for the secondary table                                 |
+| Audit "Results Produced"         | "Kept Rows (primary) 280 rows · 7 columns" and "Dropped Rows 3 rows · 2 columns" |
+
+**Run 6 — the validation-warnings panel.** The UI only ever submits the slots
+an Action declares, so a real `UNEXPECTED_INPUT` warning cannot be produced by
+clicking. A genuine warning was obtained from the backend first (posting an
+undeclared `stray_file` field returned a manifest whose
+`validation.warnings[0].code` is `UNEXPECTED_INPUT`), and that **real backend
+manifest** was then served to the UI through request interception. The page
+rendered an amber panel headed "Warning" reading "…does not use stray_file; the
+file was ignored." beside — not instead of — the "Run Successful" panel, which
+is build plan section 6.2's rule that a warning never fails a Run.
 
 ### Backend test suite (Phase 6D)
 
@@ -2480,14 +2819,18 @@ them. The file was restored and re-verified clean.
     the accented-text and Excel round-trip assertions) is described only by the
     tests themselves.
 
-16. **The Run result view is intentionally minimal.** On success the UI shows
-    only "Run Successful" and the Action name. Metrics, the validation summary,
-    output selection, the paginated preview, cell formatting, Run ID display,
-    the CSV/XLSX download buttons and "Start New Run" are all build plan
-    Phase 6 (6.1-6.9) and were deliberately not built — Phase 5's exit criteria
-    stop at "show success/error". A user running the app today therefore cannot
-    yet see or export their results from the browser, even though the backend
-    has already written every export to `data/runs/<run-id>/exports/`.
+16. ~~**The Run result view is intentionally minimal.**~~ Mostly resolved in
+    Phase 6E. On success the UI now shows the row counts, the columns the
+    result added or dropped, the Action's own metrics, output selection when a
+    Run made more than one table, the paginated preview with type-aware
+    alignment, validation warnings, the audit summary and the Run ID. Two
+    pieces of the original list remain and are **not** 6E's: the CSV/XLSX
+    download buttons belong to Phase 6F (Known Issue 47), and "Start New Run"
+    was never a build-plan requirement — choosing another Action or replacing
+    a file already clears the previous result. (The last sentence of the
+    original entry is also now obsolete: since Phase 6D the backend writes no
+    export to `data/runs/<run-id>/exports/`, because no such directory is
+    created.)
 
 17. **Client-side extension checking duplicates a backend rule.** Build plan
     5.7 requires the convenience check, so the accepted-extension list is
@@ -2798,7 +3141,69 @@ them. The file was restored and re-verified clean.
     `test_schemas.py` and `test_contract_freeze.py` remain untouched throughout,
     as that issue required.
 
-None of the above blocks Phase 6E.
+**Added in Phase 6E:**
+
+47. **Results cannot be exported from the browser yet.** Known Issue 16's
+    remaining half. The results view now shows the status, the metrics, the
+    paginated preview, validation warnings and the audit summary — but not the
+    CSV/XLSX download buttons. That is deliberate: build plan 6E's completion
+    criteria list five things a completed Run must display and export is not
+    among them, and **Phase 6F owns export**, including 6F.6, which changes the
+    download filename from `<output-id>.<format>` to
+    `forgexl-<action>-<timestamp>.<format>`. Building the buttons in 6E would
+    have been scaffolding for a later phase against a convention about to
+    change. The two download endpoints themselves work and were not touched.
+
+48. **`test_contract_freeze.py` is no longer "unchanged since 6A".** It was
+    amended once, in this phase, for the manifest-shape change build plan
+    6E.1/6E.4/6E.5 requires. Three schema field lists, the
+    `MANIFEST_SCHEMA_VERSION` assertion and one `PreviewResponse` construction
+    changed; every other assertion is untouched. Recorded because the module's
+    value came from passing unmodified, and a future session must be able to
+    see that the change was a decision rather than drift. **6F, 6G, 6H and 6I
+    should leave it unchanged again** — none of them has a reason to alter a
+    frozen contract.
+
+49. **`MANIFEST_SCHEMA_VERSION` is 2, and nothing reads a version 1 manifest.**
+    The bump is honest — the new required fields mean an old manifest would not
+    validate — but it has no consumer, because Phase 6B stopped writing
+    `manifest.json` and no manifest outlives the process. The constant is
+    documentation of a shape change, not a migration path. It becomes load
+    bearing only if run history is ever persisted (the `PersistentRunStore`
+    extension point 6I.8 records).
+
+50. **The audit duplicates facts the manifest already carries.**
+    `audit.action`, `audit.status`, `audit.metrics`, `audit.warnings`,
+    `audit.errors` and `audit.duration_ms` restate manifest fields, and
+    `audit.inputs` restates part of `manifest.inputs`. That is what build plan
+    6E.5 asks for — an assembled explanation — and the duplication is made safe
+    by deriving the audit in `Run.to_audit()` rather than storing it, with a
+    test asserting the two agree field by field. It does make the response
+    body larger; the cost is a few hundred bytes on a metadata payload that
+    never contains rows.
+
+51. **`rows_affected` is only as good as the Action that reports it.** The
+    runner cannot verify the figure — it is the Action's own claim about what
+    it did, exactly as the `metrics` dict is. A test proves the _measured_
+    metadata (row counts, columns, schema) cannot be corrupted by an Action
+    that reports a wrong count, but a wrong `rows_affected` would be displayed
+    as given. Both real Actions compute it from the same two heights the
+    freeze test already checks for internal consistency.
+
+52. **Two preview requests per page in development.** React Strict Mode invokes
+    effects twice in `next dev`, so selecting a result table fires the preview
+    fetch twice. The same dev-only behaviour as Known Issues 2 and 19; a
+    production build issues one request. Observed directly during the browser
+    verification.
+
+53. **A very wide result relies on horizontal scrolling alone.** The preview
+    table scrolls inside its own `overflow-x-auto` box, which is what build
+    plan section 31 requires, but there is no column freezing or column
+    selection — a 60-column result means a lot of scrolling. Deliberately out
+    of scope: section 31 also says not to add a spreadsheet component to the
+    POC.
+
+None of the above blocks Phase 6F.
 
 ---
 
@@ -3091,6 +3496,42 @@ failed` as an example and says explicitly: "Use existing equivalent status
     `completed` is `succeeded`. Adding statuses nothing could ever report would
     have changed a frozen contract for no caller's benefit.
 
+34. **`MANIFEST_SCHEMA_VERSION` moved from 1 to 2, and
+    `test_contract_freeze.py` was amended (Phase 6E).** Build plan section 23
+    fixes the manifest's approximate shape and Phase 6A froze it exactly.
+    Build plan 6E.1, 6E.4 and 6E.5 require result metadata, column type
+    information and an audit summary, none of which that shape could carry, so
+    the manifest was extended: `OutputMetadata` gained four required fields,
+    `RunManifest` gained a required `audit`, and `PreviewResponse` gained
+    `column_schema`. **Nothing already frozen changed name, order or meaning.**
+    The version constant was bumped because a version 1 manifest no longer
+    validates. Recorded here and in Known Issues 48 and 49 because Phase 6A's
+    whole purpose was to make this a decision rather than a side effect.
+
+35. **`ActionResult` gained an optional `rows_affected` field (Phase 6E).**
+    Build plan 6E.5 asks for "rows affected" and qualifies it with "where
+    supported by the Action". Deriving it generically from two row counts would
+    be a guess about what a transformation did, which build plan section 3.3
+    forbids, so Actions state it or say nothing. It is optional and defaults to
+    `None`, so an Action that ignores it is unaffected — the field is additive
+    to the Action contract, not a new requirement on it. Both real Actions set
+    it; neither changed its ID, version, inputs, outputs, metrics or
+    transformation.
+
+36. **One module §10 does not sketch: `app/services/results.py` (Phase 6E).**
+    Build plan §10 lists five services. The result-metadata logic could have
+    gone into `runner.py`, but the runner, the preview and (in 6F) the export
+    all need the same description of a result frame, and describing a result
+    twice is how two descriptions come to disagree. Same reasoning that placed
+    `run_store.py` beside them in 6B.
+
+37. **Four frontend components §10 does not sketch, and one it does under a
+    different name (Phase 6E).** §10 lists `ResultsSummary`, `DataPreview` and
+    `ExportButtons`. `ResultsSummary.jsx` and `DataPreview.jsx` exist under
+    those names. `AuditSummary.jsx` and `OutputSelector.jsx` are additions
+    required by build plan 6E.5 and by 6E.1's "available result tables", which
+    §10 predates. `ExportButtons` was **not** built — see Known Issue 47.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -3102,92 +3543,89 @@ real browser actually made.
 
 Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and
 native browser APIs (`fetch`, `FormData`, `File`, `DataTransfer`). `package.json`
-is unchanged.
+is unchanged, and remained unchanged through 6A-6E — as did
+`package-lock.json` and `backend/requirements.txt`.
 
 ---
 
 ## Next Phase
 
-**Phase 6E — Results, Preview, Metrics, and Audit Data**
+**Phase 6F — In-Memory CSV and XLSX Export**
 
 Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6D.
+Phase 6E: no export button was added to the UI, no filename convention was
+changed, `services/export.py` was not modified, and `test_export.py` was not
+touched.
 
-Phase 6D re-pointed the preview and the download at the Run's retained result
-frames, because a Run stopped writing files and leaving those endpoints reading
-files would have broken them (Known Issue 42). **That was a mechanism change
-only.** Everything 6E and 6F actually ask for is still unbuilt:
+**Where 6F starts from.** The export _mechanism_ 6F.1 and 6F.2 describe already
+exists — Phase 6D built it, because a Run stopped writing files and a download
+that served a file would otherwise have broken (Known Issue 42).
+`export.to_csv_bytes` / `to_xlsx_bytes` render the retained frame into a memory
+buffer, and the download endpoints return those bytes. So 6F.1/6F.2 are to be
+**confirmed**, not built.
 
-**What Phase 6E still owns**
+**What Phase 6F actually owns**
 
-- **6E.1 Result metadata.** Nothing computes input row count vs output row
-  count as a _result_ record, affected rows, columns added, columns removed, or
-  the result schema. `OutputMetadata` today carries only `id`, `label`,
-  `row_count`, `column_count`, `columns` and `formats` — the Phase 6A frozen
-  shape. 6E is where `models/schemas.py` gains the fields the build plan lists,
-  and where `MANIFEST_SCHEMA_VERSION` may finally need a bump.
-- **6E.2/6E.3/6E.4.** The preview already comes from the result frame and is
-  already limited to 100/500 rows, so the mechanism is in place — but 6E.4's
-  "preserve useful schema information" is not: `PreviewResponse` reports column
-  _names_ and no dtypes, so the frontend cannot yet render values by type.
-- **6E.5 The audit summary.** Nothing builds one. The manifest carries the
-  pieces (Action, inputs, row counts, warnings, metrics, status) but no audit
-  structure assembles them.
-- **6E.6.** Audit data must stay out of the user's result table. Nothing
-  currently violates this; it is a rule to keep, not work to do.
-- **6E.7 Connect the existing frontend.** This is the largest remaining piece
-  and the one a user will actually notice. `RunStatus.jsx` still shows only
-  "Run Successful" and the Action name (Known Issue 16). Metrics, the validation
-  summary, output selection, the paginated preview table, the Run ID and the two
-  export buttons all need building **on the existing Phase 5 components** —
-  `src/components/workbench/*` must be extended, not rebuilt (build plan 6E.7
-  and the Phase 6A audit §7.1). Until then a user still cannot see or export
-  their results from the browser, even though `GET .../preview` and both
-  download endpoints work correctly.
+- **6F.3 Excel compatibility.** Confirm by reopening a generated workbook, not
+  by inspecting the writer. `test_action_round_trip.py` and `test_export.py`
+  already do some of this — extend rather than duplicate.
+- **6F.4 Multiple result tables in one workbook.** The XLSX download writes one
+  worksheet per request today. `RunResult.secondary` and the manifest's
+  `outputs` (and now `audit.results`) make the multi-table case straightforward.
+  Decide deliberately whether a download of one output stays one worksheet and
+  a new "whole run" download carries all of them, or whether the existing
+  endpoint changes shape — the second is a frozen-route change.
+- **6F.5 Collision-safe worksheet names.** `export.worksheet_name()` truncates
+  to Excel's 31 characters and does nothing else; two outputs whose IDs share a
+  31-character prefix would collide. Excel also forbids `: \ / ? * [ ]` and
+  reserves `History`, none of which is handled.
+- **6F.6 The ForgeXL filename convention.** Still `<output-id>.<format>`;
+  6F.6 wants `forgexl-<action>-<timestamp>.<format>`. This is the reason the
+  export buttons were **not** built in 6E (Known Issue 47) — build them in 6F,
+  against the final convention, using the existing
+  `src/components/workbench/*` components. Build plan §10 names the component
+  `ExportButtons`.
+- **6F.7 Release the export buffer.** Make the policy explicit rather than
+  incidental: the bytes are generated per request and dropped with the
+  response, and nothing retains a second copy.
+- **6F.8 No server filesystem information in any response.** Already true and
+  checked by execution in 6D and again in 6E; keep the check.
+- **6F's own completion-criteria battery**: execute, request CSV, read the
+  bytes, request XLSX, reopen it from memory, verify worksheet names, headers
+  and representative values.
 
-**What Phase 6F still owns** (do not start it in 6E)
+**What Phase 6E leaves in the tree for 6I**
 
-- **6F.4** Multiple result tables in one workbook — the XLSX export writes one
-  worksheet per request today. `RunResult.secondary` exists to make this
-  straightforward.
-- **6F.5** Collision-safe worksheet naming. `export.worksheet_name()` truncates
-  to Excel's 31 characters and nothing more; two outputs whose IDs share a
-  31-character prefix would collide.
-- **6F.6** The ForgeXL download filename convention
-  (`forgexl-<action>-<timestamp>.xlsx`). The filename is still
-  `<output-id>.<format>`, deliberately unchanged.
-- **6F.7** An explicit release policy for export buffers, and **6F.8**'s
-  standing rule that no response exposes a server path (already true, and
-  checked by execution in 6D).
-- **6F**'s own completion-criteria test battery: execute, request CSV, read the
-  bytes, request XLSX, reopen from memory, verify worksheet names, headers and
-  representative values. `test_export.py` and `test_action_round_trip.py`
-  already cover much of this; 6F should confirm rather than duplicate.
+- `services/storage.py` still keeps `create_run()`, `RunPaths`, `run_paths()`,
+  `runs_directory()` and `delete_run_directory()` as **dead runtime code**, and
+  `config.DATA_DIRECTORY` / `RUNS_DIRECTORY` and the `.env.example` line that
+  documents them still exist. Build plan 6I.1 owns removing them (Known Issues
+  21 and 39). **Do not remove them in 6F.**
+- The `runs_dir` fixture in `tests/conftest.py` still exists so tests can assert
+  the directory stays **empty**. Keep until 6I.
+- Result frames still accumulate in `InMemoryRunStore` for the life of the
+  process (Known Issue 40). 6E added no retention pressure of its own — it
+  reads the frames a Run already holds. Measurement and any eviction policy
+  belong to Phase 7J.
+- Browser requests still go straight to `http://127.0.0.1:8000` via
+  `NEXT_PUBLIC_API_BASE_URL`. The same-origin `/forge-api/*` namespace is
+  **6G**, not 6F. `src/lib/api.js` is still the only frontend module that
+  knows a backend URL, which is what will make 6G a one-file change.
 
-**What Phase 6D leaves in the tree**
-
-- `services/storage.py` keeps `create_run()`, `RunPaths`, `run_paths()`,
-  `runs_directory()` and `delete_run_directory()` as **dead runtime code**.
-  Build plan 6I.1 owns removing them, together with `config.DATA_DIRECTORY` /
-  `RUNS_DIRECTORY` and the `.env.example` line that documents them
-  (Known Issues 21 and 39). Do not remove them in 6E or 6F.
-- The `runs_dir` fixture in `tests/conftest.py` no longer isolates anything the
-  application writes — it now exists so tests can assert that the directory
-  stays **empty**. That is deliberate and worth keeping until 6I.
-- Result frames accumulate in `InMemoryRunStore` for the life of the process
-  (Known Issue 40). 6E adds no retention pressure of its own; Phase 7J is where
-  the measurement and any eviction policy belong.
-
-**Before writing any code, verify the repository is intact.** This session
-found two test modules destroyed or unwritten by the previous commit, and that
-class of defect has now occurred four times (Known Issues 10, 31, 32, 37, 38).
-Run, in order:
+**Before writing any code, verify the repository is intact.** The defect class
+recorded as Known Issues 10, 31, 32, 37 and 38 (backend code committed into
+`src/app/`, or a test module overwritten by a copy of another) has occurred
+four times. It did **not** recur before this session, but check anyway. Run, in
+order:
 
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
     cd backend/tests && md5sum *.py | awk '{print $1}' | sort | uniq -d
     cd backend && .venv/bin/python -m pytest
 
 The first must show the backend modules under `backend/`, the second must print
-nothing, and the third must report **519 passed** before any new work begins.
+nothing, and the third must report **568 passed** before any new work begins.
+If `backend/.venv/` or `node_modules/` is missing, the container is fresh:
+recreate both exactly as `backend/requirements.txt` and `package.json`
+document, and add nothing.
 
-Do not begin Phase 6F.
+Do not begin Phase 6G.

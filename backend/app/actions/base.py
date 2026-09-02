@@ -45,6 +45,16 @@ class ActionResult:
     #: Copied verbatim into the manifest, so the UI never invents a metric.
     metrics: dict[str, Any] = field(default_factory=dict)
 
+    #: How many rows this Action changed, when it can say (build plan 6E.5).
+    #: Reported in the Run's audit summary as `rows_affected`.
+    #:
+    #: Optional on purpose. An Action that removes rows knows exactly how many
+    #: it removed; an Action that reshapes data may have no honest single
+    #: figure. Leaving this None means "this Action does not state one", and
+    #: the audit reports null rather than substituting the difference between
+    #: two row counts, which is a different fact (build plan section 3.3).
+    rows_affected: int | None = None
+
 
 class Action(abc.ABC):
     """Base class for every Action.

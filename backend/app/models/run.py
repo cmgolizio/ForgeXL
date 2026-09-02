@@ -26,6 +26,11 @@ the Run releases the frames (build plan 6D.5, 6D.7 and 6D.8). This is why the
 model is a dataclass and not Pydantic — a DataFrame is runtime state, not
 API-facing data, and :meth:`Run.to_manifest` deliberately does not carry it.
 
+Since Phase 6E a Run can also explain itself. :meth:`Run.to_audit` assembles
+the audit summary build plan 6E.5 asks for out of the Run's own fields, and
+:meth:`Run.to_manifest` carries it, so the explanation is always derived from
+the record rather than kept beside it.
+
 Run identity lives here too. :func:`new_run_id` and :func:`parse_run_id` keep
 the Phase 3 convention exactly — ``str(uuid.uuid4())``, validated as the
 canonical string form of a UUID (build plan 6B.7).
@@ -45,8 +50,11 @@ import polars as pl
 from app.errors import UnknownRunError
 from app.models.schemas import (
     ActionReference,
+    AuditInput,
+    AuditResult,
     InputMetadata,
     OutputMetadata,
+    RunAudit,
     RunError,
     RunManifest,
     RunStatus,
@@ -183,6 +191,13 @@ class Run:
     #: it never carries their rows (build plan section 23).
     result: RunResult | None = None
 
+    #: The Action's own count of the rows it changed, when the Action reports
+    #: one (build plan 6E.5). None means the Action did not state a figure —
+    #: never that it changed nothing. Kept out of `metrics` because it is a
+    #: field of the audit contract, not one of the Action's free-form counts,
+    #: whose key names are the Action's own.
+    rows_affected: int | None = None
+
     @classmethod
     def create(
         cls,
@@ -239,4 +254,50 @@ class Run:
             outputs=self.outputs,
             metrics=dict(self.metrics),
             error=self.error,
+            audit=self.to_audit(),
+        )
+
+    def to_audit(self) -> RunAudit:
+        """Assemble the explanation of what happened (build plan 6E.5).
+
+        Derived from this Run's own fields rather than recorded alongside them,
+        so the audit can never drift out of step with the manifest it sits in.
+        A Run still running, and a Run that failed, both produce an audit: it
+        reports the state the Run is actually in, which is the point of an
+        audit record.
+
+        `rows_returned` is the primary result's row count, so a Run with
+        several result tables reports the one it calls primary rather than a
+        total that belongs to no table. Every table is listed in `results`.
+        """
+        primary = self.outputs[0] if self.outputs else None
+        return RunAudit(
+            action=self.action,
+            status=self.status,
+            inputs=tuple(
+                AuditInput(
+                    slot_id=record.slot_id,
+                    original_filename=record.original_filename,
+                    row_count=record.row_count,
+                    column_count=record.column_count,
+                )
+                for record in self.inputs
+            ),
+            rows_received=sum(record.row_count for record in self.inputs),
+            rows_returned=primary.row_count if primary else None,
+            rows_affected=self.rows_affected,
+            results=tuple(
+                AuditResult(
+                    output_id=output.id,
+                    label=output.label,
+                    row_count=output.row_count,
+                    column_count=output.column_count,
+                )
+                for output in self.outputs
+            ),
+            primary_result_id=primary.id if primary else None,
+            warnings=self.validation.warnings,
+            errors=self.validation.errors,
+            metrics=dict(self.metrics),
+            duration_ms=self.duration_ms,
         )

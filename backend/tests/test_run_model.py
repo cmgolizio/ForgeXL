@@ -24,6 +24,8 @@ from app.errors import UnknownRunError
 from app.models.run import Run, RunResult, new_run_id, now, parse_run_id
 from app.models.schemas import (
     ActionReference,
+    ColumnKind,
+    ColumnSchema,
     InputMetadata,
     OutputMetadata,
     RunError,
@@ -207,6 +209,12 @@ def test_to_manifest_carries_every_recorded_field() -> None:
         column_count=1,
         columns=("SKU",),
         formats=("csv", "xlsx"),
+        column_schema=(
+            ColumnSchema(name="SKU", dtype="String", kind=ColumnKind.TEXT),
+        ),
+        input_row_count=5,
+        columns_added=(),
+        columns_removed=("Volume",),
     )
     run = _run(created_at=created).with_changes(
         status=RunStatus.SUCCEEDED,
@@ -228,7 +236,7 @@ def test_to_manifest_carries_every_recorded_field() -> None:
     assert manifest.outputs == (output,)
     assert manifest.metrics == {"duplicates_removed": 3}
     assert manifest.error is None
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
 
 
 def test_to_manifest_carries_a_failure() -> None:

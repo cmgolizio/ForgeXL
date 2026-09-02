@@ -1,5 +1,7 @@
+import { formatCount } from "@/lib/formatters";
+
 /**
- * What happened to the Run (build plan 5.9, 5.10).
+ * What happened to the Run (build plan 5.9, 5.10, 6E.5).
  *
  * Renders the processing indicator, the success confirmation and the failure
  * panel. Only strings that the backend meant for a human are shown: an error
@@ -8,6 +10,12 @@
  *
  * There is no progress percentage. The Run's real progress is unknown while it
  * executes, so the indicator says so rather than inventing a number.
+ *
+ * A successful Run may still carry validation warnings — a submitted file the
+ * Action does not use, for instance. Those are shown beside the success
+ * confirmation rather than folded into it: a warning never failed the Run
+ * (build plan section 6.2), but hiding it would leave the user unaware of
+ * something the backend deliberately reported.
  */
 export default function RunStatus({ state, error, manifest }) {
   if (state === "running") {
@@ -27,18 +35,23 @@ export default function RunStatus({ state, error, manifest }) {
   }
 
   if (state === "success" && manifest) {
+    const audit = manifest.audit;
     return (
-      <section
-        aria-live='polite'
-        className='flex flex-col gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 dark:border-emerald-900 dark:bg-emerald-950/40'
-      >
-        <h3 className='text-sm font-semibold text-emerald-900 dark:text-emerald-200'>
-          Run Successful
-        </h3>
-        <p className='text-sm text-emerald-800 dark:text-emerald-300'>
-          {manifest.action?.name} finished.
-        </p>
-      </section>
+      <div className='flex flex-col gap-3'>
+        <section
+          aria-live='polite'
+          className='flex flex-col gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 dark:border-emerald-900 dark:bg-emerald-950/40'
+        >
+          <h3 className='text-sm font-semibold text-emerald-900 dark:text-emerald-200'>
+            Run Successful
+          </h3>
+          <p className='text-sm text-emerald-800 dark:text-emerald-300'>
+            {manifest.action?.name} read {formatCount(audit?.rows_received)}{" "}
+            rows and returned {formatCount(audit?.rows_returned)}.
+          </p>
+        </section>
+        <ValidationWarnings warnings={manifest.validation?.warnings} />
+      </div>
     );
   }
 
@@ -70,6 +83,37 @@ export default function RunStatus({ state, error, manifest }) {
   }
 
   return null;
+}
+
+/**
+ * Warnings the backend reported about a Run that nevertheless succeeded.
+ *
+ * Rendered only when there are some, so a clean Run says nothing rather than
+ * announcing that it has no warnings.
+ */
+function ValidationWarnings({ warnings }) {
+  const issues = Array.isArray(warnings)
+    ? warnings.filter((issue) => typeof issue?.message === "string")
+    : [];
+  if (issues.length === 0) return null;
+
+  return (
+    <section className='flex flex-col gap-1 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-900 dark:bg-amber-950/40'>
+      <h3 className='text-sm font-semibold text-amber-900 dark:text-amber-200'>
+        {issues.length === 1 ? "Warning" : "Warnings"}
+      </h3>
+      <ul className='flex flex-col gap-1'>
+        {issues.map((issue, index) => (
+          <li
+            key={`${issue.code}-${index}`}
+            className='text-sm text-amber-800 dark:text-amber-300'
+          >
+            {issue.message}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 /**

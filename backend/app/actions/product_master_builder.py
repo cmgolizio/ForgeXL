@@ -99,4 +99,8 @@ class ProductMasterBuilderAction(Action):
                 "output_rows": output_rows,
                 "duplicate_product_rows_removed": input_rows - output_rows,
             },
+            # The rows this Action affected are the repeated product
+            # combinations it dropped. Stated explicitly rather than left for
+            # the runner to infer from the two counts (build plan 6E.5).
+            rows_affected=input_rows - output_rows,
         )

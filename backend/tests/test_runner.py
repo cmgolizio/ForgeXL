@@ -965,7 +965,12 @@ def test_finalizing_a_failure_clears_any_result_already_recorded(
     """
     from app.errors import ActionExecutionError as _Failure
     from app.models.run import Run
-    from app.models.schemas import ActionReference, OutputMetadata
+    from app.models.schemas import (
+        ActionReference,
+        ColumnKind,
+        ColumnSchema,
+        OutputMetadata,
+    )
 
     reference = ActionReference(id="passthrough", version="1.0.0", name="Passthrough")
     started = _now()
@@ -980,9 +985,16 @@ def test_finalizing_a_failure_clears_any_result_already_recorded(
                 column_count=1,
                 columns=("SKU",),
                 formats=("csv", "xlsx"),
+                column_schema=(
+                    ColumnSchema(name="SKU", dtype="String", kind=ColumnKind.TEXT),
+                ),
+                input_row_count=2,
+                columns_added=(),
+                columns_removed=(),
             ),
         ),
         result=RunResult.of({"result": pl.DataFrame({"SKU": ["A1", "A2"]})}),
+        rows_affected=0,
     )
     run_store.update_run(recorded)
 
@@ -991,6 +1003,9 @@ def test_finalizing_a_failure_clears_any_result_already_recorded(
     assert finalized.status is RunStatus.FAILED
     assert finalized.result is None
     assert finalized.outputs == ()
+    # Build plan 6D.8: nothing from the abandoned result survives, including
+    # the effect it would have reported.
+    assert finalized.rows_affected is None
     assert run_store.get_run(recorded.run_id).result is None
 
 

@@ -18,7 +18,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 #: Version of the manifest format. Bump when the shape changes incompatibly,
 #: so a manifest produced by an older build remains identifiable.
-MANIFEST_SCHEMA_VERSION = 1
+#:
+#: Version 2 (Phase 6E): a manifest now carries the result metadata build plan
+#: 6E.1 requires and the assembled audit summary of 6E.5. `OutputMetadata`
+#: gained `column_schema`, `input_row_count`, `columns_added` and
+#: `columns_removed`, and `RunManifest` gained `audit`; all four are required,
+#: so a version 1 manifest does not validate against this model. The change is
+#: deliberate and is recorded in `docs/implementation-status.md`.
+MANIFEST_SCHEMA_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +152,22 @@ class RunStatus(str, Enum):
     FAILED = "failed"
 
 
+class ColumnKind(str, Enum):
+    """How a column's values should be presented (build plan 6E.4).
+
+    Deliberately coarse and closed: a client needs to know whether to
+    right-align a value, not which width of integer it is. `OTHER` covers
+    everything a simple table renders as-is, so a new Polars type can never
+    make this set incomplete.
+    """
+
+    NUMBER = "number"
+    TEXT = "text"
+    BOOLEAN = "boolean"
+    TEMPORAL = "temporal"
+    OTHER = "other"
+
+
 class ActionReference(BaseModel):
     """Identity of the Action a Run executed, captured at execution time.
 
@@ -188,8 +211,35 @@ class InputMetadata(BaseModel):
     columns: tuple[str, ...]
 
 
+class ColumnSchema(BaseModel):
+    """One column of a result table, described so a client can render it.
+
+    `dtype` is the Polars type name exactly as the engine reports it, e.g.
+    ``Int64`` or ``String``; it is evidence of what the data actually is and is
+    never adjusted to look tidier. `kind` is the coarse category a table needs
+    in order to present a value correctly — numbers right-aligned, text left —
+    so the UI branches on a small closed set rather than on every Polars type
+    (build plan 6E.4).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    dtype: str = Field(description="Polars type name, e.g. 'Int64'.")
+    kind: ColumnKind = Field(
+        description="Coarse category for rendering; see ColumnKind."
+    )
+
+
 class OutputMetadata(BaseModel):
-    """A dataset a Run produced, described without any of its rows."""
+    """A dataset a Run produced, described without any of its rows.
+
+    Phase 6E adds the result metadata build plan 6E.1 asks for. The counts are
+    measured, never inferred: `input_row_count` is what the Run actually
+    received, `row_count` is what this table actually holds, and the two column
+    lists are set differences over the real column names rather than a guess at
+    what the Action meant to do.
+    """
 
     id: str
     label: str
@@ -197,6 +247,30 @@ class OutputMetadata(BaseModel):
     column_count: int
     columns: tuple[str, ...]
     formats: tuple[str, ...]
+    column_schema: tuple[ColumnSchema, ...] = Field(
+        description=(
+            "This table's columns with their types, in column order. Carries "
+            "the same names as `columns`, which stays a plain list because "
+            "every existing client reads it (build plan 6E.1, 6E.4)."
+        )
+    )
+    input_row_count: int = Field(
+        description=(
+            "Rows the Run received across all of its inputs, so a reader can "
+            "see this result against what went in."
+        )
+    )
+    columns_added: tuple[str, ...] = Field(
+        description=(
+            "Columns in this result that appeared in no input — the columns "
+            "the Action created."
+        )
+    )
+    columns_removed: tuple[str, ...] = Field(
+        description=(
+            "Columns that appeared in an input and are not in this result."
+        )
+    )
 
 
 class RunError(BaseModel):
@@ -208,6 +282,77 @@ class RunError(BaseModel):
     code: str
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Audit summary (build plan 6E.5)
+#
+# The manifest already records every fact about a Run. The audit *assembles*
+# those facts into the short explanation of what happened that a user reads
+# after a Run, in one place and in audit vocabulary.
+#
+# It is metadata about the Run and never touches the Run's data: no audit value
+# is ever written into a result table (build plan 6E.6).
+# ---------------------------------------------------------------------------
+
+
+class AuditInput(BaseModel):
+    """One input the Run used, as the audit reports it."""
+
+    slot_id: str
+    original_filename: str
+    row_count: int = Field(description="Rows this input contributed.")
+    column_count: int
+
+
+class AuditResult(BaseModel):
+    """One result table the Run produced, as the audit reports it."""
+
+    output_id: str
+    label: str
+    row_count: int
+    column_count: int
+
+
+class RunAudit(BaseModel):
+    """What happened during one Run (build plan 6E.5).
+
+    Every field is measured or reported, never inferred. In particular
+    `rows_affected` is the Action's own count of the rows it changed and is
+    ``null`` unless the Action states one: a difference between two row counts
+    is a difference between two row counts, and calling it "rows affected"
+    would be a guess about what the Action did (build plan section 3.3).
+    """
+
+    action: ActionReference
+    status: RunStatus
+    inputs: tuple[AuditInput, ...] = ()
+    rows_received: int = Field(
+        default=0, description="Rows received across every input."
+    )
+    rows_returned: int | None = Field(
+        default=None,
+        description="Rows in the primary result, or null if there is none.",
+    )
+    rows_affected: int | None = Field(
+        default=None,
+        description=(
+            "Rows the Action reports it changed. Null when the Action does "
+            "not report one."
+        ),
+    )
+    results: tuple[AuditResult, ...] = Field(
+        default=(), description="The result tables this Run makes available."
+    )
+    primary_result_id: str | None = Field(
+        default=None, description="Output ID of the primary result table."
+    )
+    warnings: tuple[ValidationIssue, ...] = ()
+    errors: tuple[ValidationIssue, ...] = ()
+    metrics: dict[str, Any] = Field(
+        default_factory=dict, description="The Action's own reported counts."
+    )
+    duration_ms: int | None = None
 
 
 class RunManifest(BaseModel):
@@ -234,6 +379,13 @@ class RunManifest(BaseModel):
         description="Action-reported counts, e.g. {'duplicates_removed': 238}.",
     )
     error: RunError | None = None
+    audit: RunAudit = Field(
+        description=(
+            "The assembled explanation of what happened (build plan 6E.5). "
+            "Derived from the fields above rather than recorded separately, so "
+            "it can never disagree with them."
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -256,3 +408,9 @@ class PreviewResponse(BaseModel):
     offset: int
     limit: int
     total_rows: int
+    column_schema: tuple[ColumnSchema, ...] = Field(
+        description=(
+            "The columns with their types, in column order, so the client can "
+            "render each value correctly (build plan 6E.4)."
+        )
+    )

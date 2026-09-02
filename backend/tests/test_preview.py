@@ -138,3 +138,39 @@ def test_previewing_reads_nothing_from_disk(
     assert page.rows == [[0, "row-0"]]
     assert list(empty.iterdir()) == []
     assert list(runs_dir.rglob("*")) == []
+
+# ---------------------------------------------------------------------------
+# Column schema (build plan 6E.4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_page_carries_the_column_schema(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, limit=1)
+
+    assert [(c.name, c.dtype) for c in page.column_schema] == [
+        ("i", "Int64"),
+        ("label", "String"),
+    ]
+
+
+def test_the_schema_describes_the_whole_table_not_the_page() -> None:
+    """A client must not see column types change as the user pages forward."""
+    frame = pl.DataFrame({"n": [1, None, 3], "s": ["a", "b", None]})
+
+    first = preview.read_preview(frame, offset=0, limit=1)
+    last = preview.read_preview(frame, offset=2, limit=1)
+
+    assert first.column_schema == last.column_schema
+
+
+def test_the_schema_names_match_the_reported_columns(frame: pl.DataFrame) -> None:
+    page = preview.read_preview(frame, limit=1)
+
+    assert tuple(c.name for c in page.column_schema) == page.columns
+
+
+def test_an_empty_result_still_reports_its_schema() -> None:
+    page = preview.read_preview(pl.DataFrame({"a": [], "b": []}))
+
+    assert page.rows == []
+    assert tuple(c.name for c in page.column_schema) == ("a", "b")

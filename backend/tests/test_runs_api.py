@@ -643,3 +643,93 @@ def test_an_xlsx_upload_becomes_a_dataframe_over_http(run_client) -> None:
     assert recorded["parser_engine"] == "fastexcel-calamine"
     assert recorded["row_count"] == len(SALES_ROWS)
     assert response.json()["outputs"][0]["row_count"] == len(SALES_ROWS)
+
+# ---------------------------------------------------------------------------
+# 6E — result metadata, preview schema and audit over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_the_manifest_carries_result_metadata(run_client) -> None:
+    """Build plan 6E.1, through the HTTP boundary."""
+    (output,) = _start_run(run_client).json()["outputs"]
+
+    assert output["input_row_count"] == 3
+    assert output["row_count"] == 3
+    assert output["columns_added"] == []
+    assert output["columns_removed"] == []
+    assert [c["name"] for c in output["column_schema"]] == SALES_HEADER
+    assert [c["kind"] for c in output["column_schema"]] == [
+        "text",
+        "number",
+        "text",
+    ]
+
+
+def test_the_preview_response_carries_the_column_schema(run_client) -> None:
+    """Build plan 6E.4: enough type information to render values correctly."""
+    run_id = _start_run(run_client).json()["run_id"]
+
+    body = run_client.get(f"/api/runs/{run_id}/outputs/result/preview").json()
+
+    assert [c["name"] for c in body["column_schema"]] == body["columns"]
+    assert [c["kind"] for c in body["column_schema"]] == ["text", "number", "text"]
+    assert [c["dtype"] for c in body["column_schema"]] == [
+        "String",
+        "Int64",
+        "String",
+    ]
+
+
+def test_the_manifest_carries_the_audit_summary(run_client) -> None:
+    """Build plan 6E.5: a completed Run explains what happened."""
+    audit = _start_run(run_client).json()["audit"]
+
+    assert audit["status"] == "succeeded"
+    assert audit["action"]["id"] == "passthrough"
+    assert audit["rows_received"] == 3
+    assert audit["rows_returned"] == 3
+    assert audit["primary_result_id"] == "result"
+    assert [r["output_id"] for r in audit["results"]] == ["result"]
+    assert audit["inputs"][0]["slot_id"] == "source_file"
+    assert audit["inputs"][0]["original_filename"] == "sales.csv"
+    assert audit["duration_ms"] is not None
+
+
+def test_a_run_fetched_later_carries_the_same_audit(run_client) -> None:
+    created = _start_run(run_client).json()
+
+    fetched = run_client.get(f"/api/runs/{created['run_id']}").json()
+
+    assert fetched["audit"] == created["audit"]
+    assert fetched["outputs"] == created["outputs"]
+
+
+def test_a_failed_run_reports_a_failed_audit(run_client) -> None:
+    response = run_client.post(
+        "/api/runs",
+        data={"action_id": "strict"},
+        files={"source_file": upload_file("sales.csv", _sales_csv())},
+    )
+    assert response.status_code == 422
+
+    (run,) = run_store.list_runs()
+    audit = run_client.get(f"/api/runs/{run.run_id}").json()["audit"]
+
+    assert audit["status"] == "failed"
+    assert audit["rows_returned"] is None
+    assert audit["rows_affected"] is None
+    assert audit["results"] == []
+    assert audit["errors"][0]["code"] == "MISSING_COLUMNS"
+
+
+def test_no_response_exposes_a_server_path(run_client) -> None:
+    """Build plan section 11: the browser sees logical IDs, never paths."""
+    created = _start_run(run_client)
+    run_id = created.json()["run_id"]
+    preview = run_client.get(f"/api/runs/{run_id}/outputs/result/preview")
+
+    for body in (created.text, preview.text):
+        assert "/home/" not in body
+        assert "/Users/" not in body
+        assert "data/runs" not in body
+        assert "/tmp/" not in body

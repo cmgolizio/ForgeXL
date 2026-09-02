@@ -4,7 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionDescription from "@/components/workbench/ActionDescription";
 import ActionSelector from "@/components/workbench/ActionSelector";
+import AuditSummary from "@/components/workbench/AuditSummary";
+import DataPreview from "@/components/workbench/DataPreview";
 import FileUploadSlot from "@/components/workbench/FileUploadSlot";
+import OutputSelector from "@/components/workbench/OutputSelector";
+import ResultsSummary from "@/components/workbench/ResultsSummary";
 import RunButton from "@/components/workbench/RunButton";
 import RunStatus from "@/components/workbench/RunStatus";
 import { ApiError, createRun, fetchActions } from "@/lib/api";
@@ -33,6 +37,7 @@ export default function ActionRunner() {
   const [runStatus, setRunStatus] = useState("idle");
   const [runError, setRunError] = useState(null);
   const [manifest, setManifest] = useState(null);
+  const [selectedOutputId, setSelectedOutputId] = useState("");
 
   // Guards against a second submission slipping through between the click and
   // the re-render that disables the button.
@@ -101,11 +106,28 @@ export default function ActionRunner() {
     missingRequiredSlots,
   ]);
 
+  /**
+   * The result table currently on screen.
+   *
+   * Resolved from the manifest rather than stored alongside it, so a stale ID
+   * from a previous Run can never select a table this Run does not have.
+   */
+  const outputs = useMemo(() => manifest?.outputs ?? [], [manifest]);
+
+  const selectedOutput = useMemo(
+    () =>
+      outputs.find((output) => output.id === selectedOutputId) ??
+      outputs[0] ??
+      null,
+    [outputs, selectedOutputId],
+  );
+
   /** Clear a finished Run once the inputs it described no longer apply. */
   const clearRunResult = useCallback(() => {
     setRunStatus("idle");
     setRunError(null);
     setManifest(null);
+    setSelectedOutputId("");
   }, []);
 
   const handleSelectAction = useCallback(
@@ -180,6 +202,8 @@ export default function ActionRunner() {
       // exactly those names (build plan 5.8).
       const result = await createRun({ actionId: selectedAction.id, files });
       setManifest(result);
+      // The Action decides which table is primary by declaring it first.
+      setSelectedOutputId(result?.outputs?.[0]?.id ?? "");
       setRunStatus("success");
     } catch (error) {
       setRunError(asApiError(error));
@@ -246,6 +270,29 @@ export default function ActionRunner() {
       <RunButton onRun={handleRun} running={running} disabled={!canRun} />
 
       <RunStatus state={state} error={runError} manifest={manifest} />
+
+      {state === "success" && manifest && selectedOutput ? (
+        <div className='flex flex-col gap-6 border-t border-zinc-200 pt-6 dark:border-zinc-800'>
+          <OutputSelector
+            outputs={outputs}
+            selectedOutputId={selectedOutput.id}
+            onSelect={setSelectedOutputId}
+          />
+
+          <ResultsSummary manifest={manifest} output={selectedOutput} />
+
+          <DataPreview
+            // A different Run or result table is a different preview: the key
+            // remounts it so paging starts again at the first page.
+            key={`${manifest.run_id}:${selectedOutput.id}`}
+            runId={manifest.run_id}
+            outputId={selectedOutput.id}
+            label={outputs.length > 1 ? selectedOutput.label : null}
+          />
+
+          <AuditSummary manifest={manifest} />
+        </div>
+      ) : null}
     </div>
   );
 }
