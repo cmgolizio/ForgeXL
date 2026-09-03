@@ -4974,6 +4974,1422 @@ Favor:
 
 The POC succeeds if the user can drop in raw data, choose a trusted Action, run it, understand what happened, and confidently use the result.
 
+
+# ============================================================
+
+# POST-POC PRODUCT EXPANSION
+
+# Persistent Data Library and Automated Monthly Sales Rep Reporting
+
+# ============================================================
+
+## Purpose
+
+This section begins the first deliberate expansion of ForgeXL beyond the original proof of concept.
+
+Do not begin these phases until:
+
+1. Phases 0–8 are complete.
+2. The final POC evaluation has been performed.
+3. The POC receives a **GO** decision.
+
+The purpose of this expansion is to prove that ForgeXL can evolve from an ephemeral spreadsheet-processing workbench into a persistent local reporting system without discarding the Action architecture already validated by the POC.
+
+The primary initial business workflow is:
+
+```text
+Upload latest monthly sales data
+        +
+Upload latest monthly sample data
+        +
+Upload current sales-rep/account assignment list
+        ↓
+Validate all three inputs
+        ↓
+Persist the new reporting-period data
+        ↓
+Combine it with previously stored history
+        ↓
+Execute the Monthly Sales Rep Report Action
+        ↓
+Generate one finished Excel workbook per sales rep
+        ↓
+Bundle reports for download
+```
+
+The intended recurring user workflow is eventually:
+
+```text
+Open ForgeXL
+    ↓
+Monthly Reports
+    ↓
+Upload latest files
+    ↓
+Generate
+    ↓
+Review validation
+    ↓
+Download reports
+```
+
+The user should not need to rebuild Power Query queries, PivotTables, worksheets, formulas, joins, or report formatting every month.
+
+---
+
+# Post-POC Architectural Authorization
+
+The original POC intentionally prohibited several capabilities that are now required.
+
+This section explicitly authorizes:
+
+* a persistent local Data Library
+* saved reference datasets
+* versioned historical datasets
+* persistent monthly account snapshots
+* richer generated Excel artifacts
+* multiple generated files from one Run
+* ZIP/batch downloads
+* a dedicated recurring-workflow UI built on top of the generic ForgeXL backend architecture
+
+This does **not** automatically authorize:
+
+* cloud storage
+* remote SaaS databases
+* authentication
+* multi-user support
+* public deployment
+* AI-generated business rules
+* fuzzy matching
+* scheduled jobs
+* automatic email distribution
+* external analytics or telemetry
+
+ForgeXL remains local-first unless a later build-plan update explicitly changes that requirement.
+
+---
+
+# Architectural Rule: Run State and Business Data Are Different
+
+Do not use `RunStore` as the permanent repository for company sales history.
+
+They solve different problems.
+
+```text
+RunStore
+    ↓
+temporary execution/runtime state
+
+Data Library
+    ↓
+persistent business datasets used across Runs
+```
+
+The existing DataFrame-first Action contract must remain intact.
+
+Actions should continue to receive resolved DataFrames and return deterministic results.
+
+An Action should not directly manipulate arbitrary files in the Data Library.
+
+Persistence, version resolution, dataset loading, and dataset commits belong to dedicated services outside Action transformation logic.
+
+---
+
+# ============================================================
+
+# PHASE 9
+
+# Persistent Data Library Foundation
+
+# ============================================================
+
+## Purpose
+
+Create the persistent local dataset layer required for recurring reporting while preserving ForgeXL's existing Action and Run architecture.
+
+The first required persistent datasets are:
+
+```text
+Sales History
+Sample History
+Account Assignment Snapshots
+```
+
+Additional datasets may be added later through the same architecture.
+
+Do not build the Monthly Sales Rep Report yet.
+
+---
+
+## SUBPHASE 9A — Data Library Contract
+
+Create a dedicated Data Library abstraction independent of `RunStore`.
+
+Conceptually support operations equivalent to:
+
+```text
+create dataset
+get dataset metadata
+list datasets
+commit dataset version
+get dataset version
+list dataset versions
+load dataset version
+```
+
+Exact names should follow existing ForgeXL conventions.
+
+Every persistent dataset must have a stable logical ID.
+
+Initial IDs should conceptually represent:
+
+```text
+sales_history
+sample_history
+account_assignments
+```
+
+Do not encode absolute filesystem locations into business logic.
+
+---
+
+## SUBPHASE 9B — Dataset Version Model
+
+Create structured metadata for every committed dataset version.
+
+Record at minimum:
+
+```text
+dataset ID
+version ID
+dataset type
+reporting period or effective period
+created timestamp
+source filename
+source byte size
+source content hash
+row count
+column count
+column schema
+parser information
+```
+
+Where applicable also record:
+
+```text
+minimum date
+maximum date
+report month
+replacement/supersession information
+```
+
+Dataset version IDs must be generated by ForgeXL rather than derived from unsafe user filenames.
+
+---
+
+## SUBPHASE 9C — Local Persistent Storage
+
+Implement a local persistent Data Library.
+
+For the first implementation, prefer:
+
+```text
+Parquet
++
+small structured metadata files/catalog
+```
+
+unless implementation produces concrete evidence that a database is required.
+
+A conceptual physical structure may resemble:
+
+```text
+data/
+    library/
+        sales_history/
+            ...
+        sample_history/
+            ...
+        account_assignments/
+            ...
+```
+
+Do not expose physical paths through the frontend API.
+
+Use atomic writes wherever a partial write could corrupt persistent state.
+
+Do not introduce PostgreSQL, Supabase, Redis, or another server database merely because persistent data now exists.
+
+If repeated cross-file analytical workloads later justify DuckDB or SQLite, that must be a separate approved architecture change supported by measured evidence.
+
+---
+
+## SUBPHASE 9D — Immutable Historical Versions
+
+Historical dataset versions must be treated as immutable after successful commit.
+
+Do not silently overwrite previously stored monthly history.
+
+If the user deliberately replaces incorrect data for an existing month:
+
+1. preserve the old version
+2. create a new version
+3. mark which version supersedes the previous version
+4. retain enough metadata to explain the change
+
+This requirement exists so historical reports can be reproduced.
+
+---
+
+## SUBPHASE 9E — Account Ownership Snapshots
+
+Account assignments require snapshot semantics.
+
+Do **not** maintain only one mutable file representing current ownership.
+
+Store account assignments by effective reporting period.
+
+Example:
+
+```text
+account_assignments
+    August 2026 snapshot
+    September 2026 snapshot
+    October 2026 snapshot
+```
+
+Reason:
+
+An account may belong to one rep in September and another rep in November.
+
+Regenerating the September report later must use the September ownership snapshot rather than November's current ownership.
+
+---
+
+## SUBPHASE 9F — Persistence Verification
+
+Automated tests must prove:
+
+* a dataset version survives backend restart
+* dataset metadata survives backend restart
+* multiple versions of one logical dataset can coexist
+* an older version can be loaded explicitly
+* replacing a period does not silently destroy the previous version
+* account snapshots remain independently retrievable
+* invalid/corrupt commits do not leave partially valid persistent state
+
+---
+
+## Phase 9 Exit Criteria
+
+Phase 9 is complete when ForgeXL has a persistent, versioned, local Data Library that is clearly separated from ephemeral Run state.
+
+No Monthly Sales Rep Report business logic is required yet.
+
+Stop after Phase 9.
+
+---
+
+# ============================================================
+
+# PHASE 10
+
+# Monthly Dataset Ingestion and Versioning
+
+# ============================================================
+
+## Purpose
+
+Turn the three recurring source files into safe, validated, versioned Data Library updates.
+
+The recurring inputs are:
+
+```text
+monthly sales data
+monthly sample data
+current sales-rep/account assignment data
+```
+
+The ingestion layer must protect the Data Library from malformed, duplicated, partial, or period-mismatched uploads.
+
+---
+
+## SUBPHASE 10A — Canonical Source Schemas
+
+Document the exact accepted source schemas for:
+
+```text
+Sales
+Samples
+Account Assignments
+```
+
+Use the actual company exports that support the existing manually verified monthly reports.
+
+Do not guess alternative column names.
+
+Do not silently treat semantically similar columns as equivalent.
+
+Any required normalization or aliasing must be explicitly specified, deterministic, and tested.
+
+---
+
+## SUBPHASE 10B — Reporting Period Detection
+
+For recurring monthly uploads, determine the applicable report period from trusted source data.
+
+Do not rely solely on filenames such as:
+
+```text
+September Sales.csv
+```
+
+Validate applicable dates contained inside the dataset.
+
+The program must detect situations such as:
+
+* wrong month uploaded
+* file spanning an unexpected period
+* empty reporting period
+* future-dated rows
+* duplicate monthly upload
+* mismatched periods between related files
+
+Where automatic determination is genuinely ambiguous, require explicit user selection rather than guessing.
+
+---
+
+## SUBPHASE 10C — Monthly Sales Commit
+
+Implement controlled monthly updates to Sales History.
+
+The recurring update must:
+
+1. parse the uploaded file using the existing ForgeXL parser
+2. validate schema
+3. validate reporting period
+4. calculate source hash
+5. detect an already-imported identical file
+6. validate rows before persistence
+7. commit the month as a new version/partition
+8. update Data Library metadata atomically
+
+An accidental repeat upload of the same source file must not duplicate sales history.
+
+---
+
+## SUBPHASE 10D — Monthly Samples Commit
+
+Implement the equivalent controlled process for Sample History.
+
+Sales and samples must remain logically distinct datasets even if their source schemas overlap.
+
+Do not convert samples into ordinary sales merely to simplify implementation.
+
+---
+
+## SUBPHASE 10E — Account Assignment Commit
+
+Import the current sales-rep/account assignment list as the snapshot for the applicable reporting month.
+
+Validate at minimum:
+
+* required customer identifier
+* required sales rep identifier
+* duplicate customer assignments where ownership is expected to be unique
+* blank customer names
+* blank rep names
+* rows that cannot be assigned safely
+
+Preserve the full source snapshot required to reproduce the month later.
+
+---
+
+## SUBPHASE 10F — Coordinated Monthly Import
+
+Provide a transaction-like monthly import operation.
+
+The three required monthly inputs must be validated before the reporting cycle is considered ready.
+
+Conceptually:
+
+```text
+Sales upload
+Samples upload
+Account assignment upload
+        ↓
+validate all
+        ↓
+show issues
+        ↓
+commit reporting cycle
+```
+
+Do not leave the application in a misleading state where September sales were committed successfully but the September ownership snapshot silently failed.
+
+If one input fails before final commit, the user must receive a clear explanation of what was and was not persisted.
+
+---
+
+## SUBPHASE 10G — Historical Bootstrap
+
+Create a deliberate one-time bootstrap path for loading the historical data needed by the first automated report.
+
+The bootstrap may accept a wider historical period than recurring monthly ingestion.
+
+After bootstrap, the ordinary workflow should require only the newest reporting-period data.
+
+Do not require the user to re-upload the complete historical dataset every month.
+
+---
+
+## Phase 10 Exit Criteria
+
+ForgeXL can safely establish historical data once and subsequently add one reporting period at a time without duplicating or corrupting history.
+
+Stop after Phase 10.
+
+---
+
+# ============================================================
+
+# PHASE 11
+
+# Library-Backed Action Inputs and Reproducible Runs
+
+# ============================================================
+
+## Purpose
+
+Allow ordinary ForgeXL Actions to consume exact versions of persistent Data Library datasets without turning Actions themselves into storage-aware code.
+
+The Action must still receive DataFrames.
+
+---
+
+## SUBPHASE 11A — Extend Input Source Metadata
+
+Extend Action input metadata in a backwards-compatible way so an Action input can originate from either:
+
+```text
+uploaded file
+```
+
+or:
+
+```text
+Data Library dataset version
+```
+
+Existing Actions must continue to behave as they do now.
+
+Do not require changes to Exact Duplicate Remover or Product Master Builder merely because library-backed inputs now exist.
+
+---
+
+## SUBPHASE 11B — Dataset Reference Resolution
+
+Before Action execution, the runner or a dedicated input-resolution service must resolve the requested library version into a DataFrame.
+
+Conceptually:
+
+```text
+dataset reference
+        ↓
+Data Library
+        ↓
+exact immutable dataset version
+        ↓
+Polars DataFrame
+        ↓
+Action
+```
+
+Actions must not open Data Library files themselves.
+
+---
+
+## SUBPHASE 11C — Explicit Version Provenance
+
+A Run using persistent data must record the exact dataset versions used.
+
+Never record only:
+
+```text
+sales_history = current
+```
+
+Record the resolved immutable version identity.
+
+This allows the same historical report to be regenerated later against the same source state.
+
+---
+
+## SUBPHASE 11D — Preserve Determinism
+
+The existing rule remains:
+
+> Same Action version + same logical inputs = same logical output.
+
+A moving concept such as `latest` or `current` may be used during input selection, but it must be resolved to immutable version IDs before the Action executes.
+
+The Run manifest must record those resolved IDs.
+
+---
+
+## SUBPHASE 11E — Regression Tests
+
+Verify:
+
+* old upload-backed Actions still work
+* library-backed inputs resolve correctly
+* specific old versions can be selected
+* a Run records exact dataset provenance
+* changing the current library version does not change an already recorded Run's input identity
+* missing library data fails clearly
+
+---
+
+## Phase 11 Exit Criteria
+
+Persistent datasets can participate in the existing DataFrame-first Action Engine without coupling Action business logic to storage.
+
+Stop after Phase 11.
+
+---
+
+# ============================================================
+
+# PHASE 12
+
+# Rich Artifact Output Framework
+
+# ============================================================
+
+## Purpose
+
+Extend ForgeXL beyond generic result-table CSV/XLSX exports so an Action can also produce purpose-built files such as finished reports.
+
+This capability must be generic enough to support future reporting Actions.
+
+---
+
+## SUBPHASE 12A — Dataset Outputs vs Artifacts
+
+Preserve the existing concept of tabular outputs.
+
+Add a separate concept:
+
+```text
+Artifact
+```
+
+Examples:
+
+```text
+formatted XLSX workbook
+ZIP archive
+future PDF report
+```
+
+Do not pretend a finished workbook containing layout, formatting, multiple report sections, and presentation logic is merely another DataFrame.
+
+---
+
+## SUBPHASE 12B — Extend ActionResult Safely
+
+Extend the Action result contract so it may contain:
+
+```text
+tabular outputs
+artifacts
+metrics
+audit information
+```
+
+Existing Actions that return only DataFrames must remain valid.
+
+Do not require every Action to generate artifacts.
+
+---
+
+## SUBPHASE 12C — Artifact Metadata
+
+Each artifact should expose structured metadata such as:
+
+```text
+artifact ID
+label
+filename
+media type
+byte size
+artifact type
+```
+
+Do not expose local filesystem paths.
+
+Artifacts may remain in runtime memory for a Run unless persistence is explicitly required later.
+
+The persistent Data Library stores source/history data; it does not automatically become a permanent report archive.
+
+---
+
+## SUBPHASE 12D — Rich XLSX Rendering Utilities
+
+Create reusable XLSX helpers for report-quality workbooks.
+
+Support as required:
+
+* multiple worksheets
+* formatted headers
+* currency formats
+* percentage formats
+* integer/decimal formats
+* sensible date formats
+* column widths
+* row heights where necessary
+* frozen panes
+* filters
+* tables
+* conditional formatting
+* worksheet ordering
+* readable totals
+* consistent styling
+
+Do not implement business calculations in the XLSX formatting layer.
+
+Formatting should render already-calculated report data.
+
+---
+
+## SUBPHASE 12E — Multiple Artifacts Per Run
+
+One Action must be capable of producing multiple files.
+
+Example:
+
+```text
+Beth Comeaux - September 2026.xlsx
+Kevin Wardell - September 2026.xlsx
+Jennifer Jones - September 2026.xlsx
+...
+```
+
+Artifact IDs and filenames must be collision-safe and deterministic where appropriate.
+
+---
+
+## SUBPHASE 12F — Batch ZIP Export
+
+Support downloading all artifacts from a Run as one ZIP archive.
+
+The ZIP must be generated safely and must not allow artifact filenames to create nested or traversing paths unexpectedly.
+
+---
+
+## SUBPHASE 12G — Artifact API and Frontend Support
+
+Add generic frontend support for:
+
+* listing generated artifacts
+* downloading an individual artifact
+* downloading all artifacts where a batch download is available
+
+Do not hardcode sales-rep names into the frontend.
+
+---
+
+## Phase 12 Exit Criteria
+
+A test Action can generate multiple polished XLSX artifacts plus a ZIP bundle through generic ForgeXL infrastructure.
+
+Stop after Phase 12.
+
+---
+
+# ============================================================
+
+# PHASE 13
+
+# Monthly Sales Rep Report Specification and Calculation Engine
+
+# ============================================================
+
+## Purpose
+
+Port the existing manually verified monthly sales-rep reporting logic into one deterministic ForgeXL Action.
+
+Do not begin implementation by reverse-engineering vague expectations from memory.
+
+First freeze the existing report's business definitions.
+
+---
+
+## SUBPHASE 13A — Create the Report Specification
+
+Create:
+
+```text
+docs/monthly-sales-rep-report-spec.md
+```
+
+This document becomes the authoritative specification for this Action.
+
+Derive it from:
+
+* the current verified Excel monthly report
+* the existing Power Query logic
+* accepted business definitions
+* manually verified results from a completed month
+
+Document exactly:
+
+* source datasets
+* accepted schemas
+* invoice/sample rules
+* date-window rules
+* sales-rep ownership rules
+* account rules
+* company-vs-rep comparison rules
+* supplier calculations
+* percentage calculations
+* placement definitions
+* sample definitions
+* required report sections
+* sorting rules
+* displayed totals
+* treatment of credits/returns where applicable
+* treatment of missing ownership
+* treatment of zero/null values
+
+Do not invent a formula merely because it appears reasonable.
+
+If the existing report does not establish a rule clearly, document the ambiguity and resolve it before implementation.
+
+---
+
+## SUBPHASE 13B — Define the Monthly Report Action
+
+Create a registered Action conceptually named:
+
+```text
+monthly_sales_rep_report
+```
+
+Use an appropriate semantic version.
+
+Its logical inputs should be resolved from exact Data Library versions and should include the historical information required by the report specification.
+
+At minimum this will involve:
+
+```text
+sales history
+sample history
+account assignment snapshot for the reporting period
+```
+
+Additional persistent reference datasets may be added only if the report specification proves they are required.
+
+---
+
+## SUBPHASE 13C — Reporting Period Resolution
+
+The Run must have one explicit reporting period.
+
+Resolve it before calculations begin.
+
+Do not allow different sections of the same report to independently decide what "current month" means.
+
+All month-over-month, year-over-year, current-period, or prior-period calculations must derive from the same report-period context.
+
+---
+
+## SUBPHASE 13D — Dynamic Rep Roster
+
+Do not hardcode the company's sales-rep list.
+
+Determine applicable reps from the authoritative reporting-period data according to the report specification.
+
+A newly added rep should appear automatically when valid source data assigns activity/accounts to that rep.
+
+A departed rep should not remain merely because their name exists in source code.
+
+---
+
+## SUBPHASE 13E — Shared Prepared Data Model
+
+Perform reusable preparation once.
+
+Conceptually create clean internal frames such as:
+
+```text
+prepared sales
+prepared samples
+prepared account ownership
+report-period context
+```
+
+Avoid recalculating identical normalization, period, and join logic separately for every rep.
+
+Do not mutate original Data Library versions.
+
+---
+
+## SUBPHASE 13F — Report Calculation Tables
+
+Produce deterministic DataFrames for every table required by the report specification.
+
+The implementation should support the established report categories, including where applicable:
+
+```text
+rep summary
+account performance
+supplier performance
+company-vs-rep supplier comparison
+supplier share of rep sales
+product performance
+placements
+samples
+placement detail
+sample detail
+supporting validation/detail tables
+```
+
+The exact authoritative set is whatever is frozen in `monthly-sales-rep-report-spec.md`.
+
+Do not remove an existing accepted report section merely because it is inconvenient to implement.
+
+---
+
+## SUBPHASE 13G — Company and Rep Calculations
+
+Calculate company-level comparison data once where possible rather than independently rebuilding the same company totals for every rep.
+
+Rep reports may then consume:
+
+```text
+shared company metrics
++
+rep-specific metrics
+```
+
+This is important for both accuracy and performance.
+
+---
+
+## SUBPHASE 13H — Validation Before Report Generation
+
+Detect conditions that could make apparently polished reports factually unreliable.
+
+Examples include:
+
+* unrecognized sales reps
+* missing account ownership
+* duplicate account ownership
+* malformed invoice dates
+* unexpected invoice types
+* missing required monetary/quantity fields
+* reporting-period mismatch
+* unexplained source-schema changes
+* duplicate monthly source data
+* missing historical comparison period
+
+Where a condition makes the report unsafe, fail rather than producing a plausible-looking workbook.
+
+Warnings may be used only when continuing is genuinely safe.
+
+---
+
+## SUBPHASE 13I — Golden-Month Accuracy Tests
+
+Choose at least one previously completed monthly report whose values have been manually spot-checked.
+
+Create synthetic or sanitized test fixtures that reproduce representative business cases from that report.
+
+Verify exact expected results for:
+
+* rep totals
+* company totals
+* account metrics
+* supplier metrics
+* percentage calculations
+* placements
+* sample counts
+* representative detail rows
+
+Do not validate only row counts.
+
+Validate values.
+
+---
+
+## Phase 13 Exit Criteria
+
+The Action produces correct report DataFrames for every applicable rep, and automated tests prove the business calculations before any attention is paid to workbook appearance.
+
+Stop after Phase 13.
+
+---
+
+# ============================================================
+
+# PHASE 14
+
+# Batch Sales Rep Workbook Generation
+
+# ============================================================
+
+## Purpose
+
+Turn the verified report calculations into the finished Excel workbooks actually distributed or reviewed by the business.
+
+Formatting must never alter the underlying calculated values.
+
+---
+
+## SUBPHASE 14A — Workbook Structure
+
+Define the exact worksheet structure in the report specification.
+
+Each rep workbook should contain the applicable report sections already accepted by the existing monthly reporting process.
+
+Conceptually this may include:
+
+```text
+Summary
+Account Performance
+Supplier Performance
+Product / Placement Performance
+Samples
+Placement Detail
+Sample Detail
+```
+
+Use the authoritative report specification if its final worksheet names differ.
+
+---
+
+## SUBPHASE 14B — Consistent Professional Formatting
+
+Create one reusable workbook-rendering system.
+
+Apply consistent:
+
+* title/header structure
+* date/report-period labeling
+* currency formatting
+* percentage formatting
+* quantity formatting
+* column widths
+* alignment
+* frozen panes
+* filters
+* totals
+* visual hierarchy
+
+Do not create slightly different formatting logic for every rep.
+
+---
+
+## SUBPHASE 14C — One Workbook Per Rep
+
+For every applicable rep:
+
+```text
+rep calculation tables
+        ↓
+shared workbook renderer
+        ↓
+finished XLSX artifact
+```
+
+Filename convention should include at minimum:
+
+```text
+sales rep
+reporting period
+```
+
+Example:
+
+```text
+Beth Comeaux - September 2026.xlsx
+```
+
+Filenames must be sanitized safely.
+
+---
+
+## SUBPHASE 14D — Batch Artifact Generation
+
+One successful Monthly Sales Rep Report Run should produce all applicable rep workbooks.
+
+The user must not need to run the Action once per sales rep.
+
+---
+
+## SUBPHASE 14E — ZIP Bundle
+
+Generate a batch archive conceptually named:
+
+```text
+September 2026 Sales Rep Reports.zip
+```
+
+containing every successfully generated rep workbook.
+
+An individual workbook must still be downloadable separately.
+
+---
+
+## SUBPHASE 14F — Workbook Round-Trip Tests
+
+Programmatically reopen generated XLSX files.
+
+Verify:
+
+* workbook opens
+* expected worksheets exist
+* headers are correct
+* representative values equal the calculation DataFrames
+* percentages remain numeric
+* currency values remain numeric
+* workbook contains no corrupted sheet names
+* artifact filenames are correct
+
+Also manually open representative outputs in Microsoft Excel on Mac.
+
+---
+
+## Phase 14 Exit Criteria
+
+One Action Run generates every required rep workbook correctly and packages them for convenient download.
+
+Stop after Phase 14.
+
+---
+
+# ============================================================
+
+# PHASE 15
+
+# One-Step Monthly Reporting Workflow and Production Validation
+
+# ============================================================
+
+## Purpose
+
+Reduce the recurring monthly process to the smallest safe set of user actions.
+
+This phase combines the already-built Data Library, ingestion system, Action Engine, and artifact framework into the final monthly workflow.
+
+Do not move business calculations into the frontend.
+
+---
+
+## SUBPHASE 15A — Monthly Reports Workflow UI
+
+Create a dedicated ForgeXL workflow surface for monthly reporting.
+
+Conceptually:
+
+```text
+Monthly Sales Rep Reports
+
+Reporting Period
+September 2026
+
+Sales Data
+[ Upload ]
+
+Sample Data
+[ Upload ]
+
+Account Assignments
+[ Upload ]
+
+[ Validate and Generate ]
+```
+
+The frontend may orchestrate existing backend capabilities, but the backend remains authoritative for:
+
+* parsing
+* validation
+* persistence
+* reporting-period resolution
+* dataset versioning
+* report calculations
+* workbook generation
+
+---
+
+## SUBPHASE 15B — Pre-Generation Validation Summary
+
+Before final report generation, show a concise validation summary.
+
+Conceptually:
+
+```text
+Sales rows                     ✓
+Sample rows                    ✓
+Reporting period               ✓
+Sales reps detected            ✓
+Account assignments            ✓
+Historical comparison data     ✓
+
+Warnings / Errors
+...
+```
+
+Do not display a green success state merely because files uploaded successfully.
+
+Validation must reflect whether the resulting reports can be trusted.
+
+---
+
+## SUBPHASE 15C — Atomic Reporting Cycle
+
+The workflow should behave as one logical monthly reporting cycle:
+
+```text
+upload
+→ validate
+→ commit monthly source versions
+→ resolve exact versions
+→ execute report Action
+→ generate artifacts
+→ present downloads
+```
+
+The workflow must clearly distinguish:
+
+```text
+source data committed
+```
+
+from:
+
+```text
+reports successfully generated
+```
+
+If report rendering fails after a valid source commit, do not corrupt or roll back valid historical source data merely to hide the failure.
+
+Instead allow report generation to be rerun from the exact committed dataset versions.
+
+---
+
+## SUBPHASE 15D — Re-Run Without Re-Upload
+
+Once a reporting period has been committed successfully, the user must be able to regenerate its reports without uploading the source files again.
+
+Example:
+
+```text
+Reporting Period: September 2026
+[ Regenerate Reports ]
+```
+
+This is required for reproducibility and for fixing report-rendering code without altering historical company data.
+
+---
+
+## SUBPHASE 15E — Historical Report Reproduction
+
+Select an older reporting period and regenerate it using:
+
+* its historical sales state
+* its historical sample state
+* its historical account snapshot
+* the intended Action version or clearly recorded current-version behavior
+
+The system must not silently substitute today's account ownership for an older month.
+
+---
+
+## SUBPHASE 15F — End-to-End Monthly Acceptance Test
+
+Perform a complete real-data acceptance test against one known monthly reporting cycle.
+
+Steps:
+
+1. Begin with the required historical library already established.
+2. Upload one new month's sales file.
+3. Upload that month's samples file.
+4. Upload that month's account assignment file.
+5. Run validation.
+6. Review warnings/errors.
+7. Commit the reporting cycle.
+8. Generate all rep reports.
+9. Download the ZIP.
+10. Open representative rep workbooks in Excel.
+11. Compare representative totals against independently spot-checked source data.
+12. Confirm company totals.
+13. Confirm supplier totals and percentages.
+14. Confirm account ownership.
+15. Confirm representative sample/placement metrics.
+16. Restart ForgeXL.
+17. Regenerate the same month without re-uploading.
+18. Confirm the reproduced values match.
+
+---
+
+## SUBPHASE 15G — Duplicate/Correction Test
+
+Test:
+
+* uploading the exact same monthly sales file twice
+* uploading corrected sales data for an already committed month
+* uploading a different account snapshot for an already committed month
+* regenerating reports before and after an explicitly approved correction
+
+The program must make these state changes explicit.
+
+Never silently append corrected data on top of incorrect data and thereby double-count the month.
+
+---
+
+## SUBPHASE 15H — Performance Test
+
+Benchmark the real recurring workflow using synthetic datasets approximating actual company size.
+
+Measure separately:
+
+```text
+upload/parsing
+validation
+persistent commit
+historical loading
+report calculations
+XLSX generation
+ZIP generation
+total workflow
+```
+
+Optimize only after locating measured bottlenecks.
+
+Do not add a database or complex caching architecture merely because it appears theoretically faster.
+
+---
+
+## SUBPHASE 15I — Final Monthly Workflow Acceptance Criteria
+
+The expansion is successful only if the normal monthly process has become approximately:
+
+```text
+1. Open ForgeXL.
+2. Open Monthly Reports.
+3. Upload latest sales data.
+4. Upload latest sample data.
+5. Upload current account assignments.
+6. Review validation.
+7. Generate.
+8. Download reports.
+9. Spot-check.
+```
+
+The user must not need to:
+
+* append CSVs manually in Excel
+* edit Power Query source paths
+* recreate PivotTables
+* modify formulas
+* manually split reports by rep
+* manually copy company totals
+* manually calculate supplier percentages
+* manually create rep workbooks
+* manually rename each workbook
+
+---
+
+## Phase 15 Exit Criteria
+
+The recurring monthly sales-rep reporting process is fully reproducible from persistent ForgeXL data and requires only the latest reporting-period inputs.
+
+After the first historical bootstrap, previously imported history is reused automatically.
+
+A single reporting workflow produces all applicable rep workbooks.
+
+Historical reports can be regenerated accurately.
+
+Automated and manual accuracy checks pass.
+
+Only after these criteria pass should further automation such as scheduled ingestion, automatic distribution, or cloud synchronization be considered.
+
+Stop after Phase 15.
+
+---
+
+# ============================================================
+
+# POST-EXPANSION ARCHITECTURE
+
+# ============================================================
+
+After Phase 15, the intended architecture is:
+
+```text
+                         FORGEXL
+                            │
+          ┌─────────────────┴─────────────────┐
+          │                                   │
+          ▼                                   ▼
+   Ephemeral Run State                 Persistent Data Library
+       RunStore                               │
+                                              ├── Sales History
+                                              ├── Sample History
+                                              └── Account Snapshots
+                                                     │
+                                                     ▼
+                                            Version Resolution
+                                                     │
+                                                     ▼
+Browser
+   ↓
+Next.js
+   ↓
+/forge-api
+   ↓
+FastAPI
+   ↓
+Action Runner
+   ↓
+Resolved DataFrames
+   ↓
+Monthly Sales Rep Report Action
+   ↓
+Verified Result DataFrames
+   ↓
+Artifact Renderer
+   ↓
+┌────────────────────────────────────────────────────┐
+│ Beth Comeaux - September 2026.xlsx                 │
+│ Kevin Wardell - September 2026.xlsx                │
+│ Jennifer Jones - September 2026.xlsx               │
+│ ...                                                │
+│ September 2026 Sales Rep Reports.zip               │
+└────────────────────────────────────────────────────┘
+```
+
+The important architectural boundaries remain:
+
+```text
+Data Library stores durable business data.
+
+RunStore stores execution state.
+
+Parser converts files to DataFrames.
+
+Actions perform deterministic business transformations.
+
+Artifact renderers turn verified results into user-facing files.
+
+The frontend orchestrates the workflow but does not calculate business results.
+```
+
+Preserve these boundaries unless later evidence justifies changing them.
+
+
 ```
 
 ```
