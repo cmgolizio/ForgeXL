@@ -72,9 +72,20 @@ def xlsx_bytes(sheets: Mapping[str, Sequence[Sequence[object]]]) -> bytes:
 
     A sheet mapped to an empty row list is created but left blank, which is how
     the worksheet-ambiguity tests express "this sheet holds no data".
+
+    ``strings_to_formulas`` is off. xlsxwriter otherwise writes any cell whose
+    text begins with ``=`` as a *formula*, so a fixture containing the literal
+    text ``=Not A Formula`` would silently become a formula and read back as
+    its computed value. A fixture builder that converts data cannot be used to
+    prove the application never does (build plan section 16) — the same reason
+    `app.services.export` sets it for real exports. A test that wants a genuine
+    formula writes one explicitly with `write_formula`, as `test_parser.py`
+    does.
     """
     buffer = io.BytesIO()
-    workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+    workbook = xlsxwriter.Workbook(
+        buffer, {"in_memory": True, "strings_to_formulas": False}
+    )
     for name, rows in sheets.items():
         worksheet = workbook.add_worksheet(name)
         for row_index, row in enumerate(rows):
@@ -91,3 +102,35 @@ def upload(filename: str, payload: bytes) -> PendingUpload:
 def upload_file(filename: str, payload: bytes) -> tuple[str, io.BytesIO]:
     """Build the ``(filename, stream)`` pair httpx expects for a file field."""
     return (filename, io.BytesIO(payload))
+
+
+# ---------------------------------------------------------------------------
+# Comparing values across the two upload formats (Phase 6H)
+# ---------------------------------------------------------------------------
+
+
+def normalise_value(value: object) -> object:
+    """Render `value` in a form the CSV and XLSX paths can be compared in.
+
+    A whole number written to a spreadsheet comes back as a float, because
+    that is the only numeric type a workbook has: `10` uploaded as CSV parses
+    to `Int64` and the same `10` uploaded as XLSX parses to `Float64`. The
+    *value* is the same and neither path lost anything, so a test asserting an
+    expected row must not fail over the difference.
+
+    Only that difference is normalised. Text stays text, `None` stays `None`,
+    and a bool is left alone rather than being turned into a number, so a
+    genuine change of value still fails the comparison.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+def normalise_rows(
+    rows: Iterable[Sequence[object]],
+) -> list[tuple[object, ...]]:
+    """Apply :func:`normalise_value` across a table of rows."""
+    return [tuple(normalise_value(value) for value in row) for row in rows]
