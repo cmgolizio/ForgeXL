@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from typing import Any
 
 import pytest
 
@@ -348,3 +349,100 @@ def test_parsing_writes_nothing_to_the_working_directory(
 
     assert parsed.row_count == 1
     assert list(tmp_path.iterdir()) == []
+
+# ---------------------------------------------------------------------------
+# A failed worksheet probe is an engine failure, never an empty sheet
+# ---------------------------------------------------------------------------
+
+
+def _fastexcel_reader_failing_to_probe(name: str):
+    """Build a `read_excel` replacement whose probe of `name` raises.
+
+    Probing is the `header_row=None` load `_fastexcel_sheet_has_data` performs
+    to decide whether a worksheet holds anything. Everything else is delegated
+    to the real reader, so the workbook is genuine and only this one operation
+    is made to fail — which is the situation the parser must not silently read
+    as "that sheet is empty".
+    """
+    real_read_excel = parser.fastexcel.read_excel
+
+    class _FailingProbeReader:
+        def __init__(self, payload: bytes) -> None:
+            self._reader = real_read_excel(payload)
+
+        @property
+        def sheet_names(self) -> list[str]:
+            return self._reader.sheet_names
+
+        def load_sheet(self, sheet_name: str, **kwargs: Any) -> Any:
+            if kwargs.get("header_row", 0) is None and sheet_name == name:
+                raise RuntimeError(f"worksheet {sheet_name!r} could not be loaded")
+            return self._reader.load_sheet(sheet_name, **kwargs)
+
+    return _FailingProbeReader
+
+
+def test_a_worksheet_that_fails_to_probe_is_not_reported_as_an_empty_workbook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed probe reaches the engine fallback instead of becoming "empty".
+
+    The workbook's only worksheet holds data. If a failed probe were counted as
+    an empty sheet, this workbook would have no data sheet at all and would be
+    refused as "contains no data" — a statement about the user's file that is
+    simply untrue. It must reach the compatibility fallback instead, which can
+    read the sheet.
+    """
+    payload = xlsx_bytes({"Ledger": [["A"], [1]]})
+    monkeypatch.setattr(
+        parser.fastexcel, "read_excel", _fastexcel_reader_failing_to_probe("Ledger")
+    )
+
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert parsed.parser_engine == parser.ENGINE_OPENPYXL
+    assert parsed.worksheet == "Ledger"
+    assert parsed.frame.rows() == [(1,)]
+
+
+def test_a_failed_probe_never_lets_the_parser_select_a_different_worksheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Build plan section 17: a sheet that could not be read is not "no data".
+
+    Both worksheets hold data, so this workbook is ambiguous and must be
+    refused. Treating the unreadable probe as an empty sheet would leave
+    exactly one "populated" sheet and the parser would quietly transform the
+    other one instead — the silent worksheet selection section 17 forbids.
+    """
+    payload = xlsx_bytes({"Ledger": [["A"], [1]], "Notes": [["B"], [2]]})
+    monkeypatch.setattr(
+        parser.fastexcel, "read_excel", _fastexcel_reader_failing_to_probe("Ledger")
+    )
+
+    with pytest.raises(AmbiguousWorkbookError) as raised:
+        parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert set(raised.value.details["worksheets_with_data"]) == {"Ledger", "Notes"}
+
+
+def test_a_failed_probe_that_the_fallback_cannot_rescue_is_a_parse_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both engines failed, so both are named — the workbook is not "empty"."""
+    payload = xlsx_bytes({"Ledger": [["A"], [1]]})
+    monkeypatch.setattr(
+        parser.fastexcel, "read_excel", _fastexcel_reader_failing_to_probe("Ledger")
+    )
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("fallback engine unavailable")
+
+    monkeypatch.setattr(parser, "_parse_xlsx_with_openpyxl", _fail)
+
+    with pytest.raises(FileParseError) as raised:
+        parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert raised.value.details["primary_engine"] == parser.ENGINE_FASTEXCEL
+    assert raised.value.details["fallback_engine"] == parser.ENGINE_OPENPYXL
+    assert "could not be loaded" in raised.value.details["primary_reason"]

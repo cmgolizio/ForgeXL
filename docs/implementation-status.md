@@ -1,8 +1,8 @@
 # Implementation Status
 
-Last Updated: 2026-09-01
+Last Updated: 2026-09-04
 Current Phase: None
-Last Completed Phase: Phase 6F — In-Memory CSV and XLSX Export
+Last Completed Phase: Phase 6G — Same-Origin Next.js Proxy and LAN Testing
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -96,8 +96,11 @@ port from this module.
 
 **1.7 Environment files.** `.env.example` created, documenting
 `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000` for the frontend and the
-optional `FORGEXL_*` backend overrides. `.env.local` was **not** left in the
-repository: the frontend falls back to `http://127.0.0.1:8000` when the
+optional `FORGEXL_*` backend overrides.
+_(Superseded by Phase 6G: `NEXT_PUBLIC_API_BASE_URL` is gone. The only frontend
+variables are the server-side `FORGEXL_BACKEND_\*`ones the route handler reads,
+none of them`NEXT*PUBLIC*`.)_ `.env.local`was **not** left in the
+repository: the frontend falls back to`http://127.0.0.1:8000` when the
 variable is unset, so no local env file is required. A temporary `.env.local`
 was created during verification to prove the override path works, then removed.
 
@@ -119,6 +122,11 @@ that fetches `${NEXT_PUBLIC_API_BASE_URL}/health` directly from the browser
 (not proxied through Next.js) and renders "Backend Connected" or
 "Backend Unavailable", with a neutral "Checking backend…" state while the
 request is in flight. The request is aborted on unmount.
+
+> **Superseded by Phase 6G.** The browser no longer addresses FastAPI at all.
+> `BackendStatus.jsx` calls `fetchHealth()`, which requests the same-origin path
+> `/forge-api/health`; `NEXT_PUBLIC_API_BASE_URL` no longer exists anywhere in
+> the repository. The rendered states are unchanged.
 
 **1.10 Verification.** See **Tests** below. Lint, production build, backend
 import, `/health`, CORS behaviour, loopback binding and both frontend health
@@ -205,6 +213,19 @@ from `http://127.0.0.1:3000`. See **Tests** below.
 ---
 
 ### Phase 3 — Upload, Parsing, Run Execution, Storage, and Export Pipeline
+
+> **Superseded in part by Phases 6C, 6D and 6F — read this entry as history.**
+> Every statement below about writing to disk describes an architecture ForgeXL
+> no longer has. A Run creates no directory; an upload is read into memory and
+> parsed from there (6C); result frames are held by the Run (6D); CSV and XLSX
+> bytes are generated per request from those frames and released with the
+> response (6F); and no manifest is written at all, because run state lives in
+> the Run Store (6B). The `inputs/`, `working/` and `exports/` trees, the
+> Parquet working file of build plan §28 and `write_manifest()` are all gone.
+> What survives from this entry is the _rules_: a Run ID must parse as a UUID,
+> a client filename is metadata and never a name the application uses, and the
+> upload limit is enforced while receiving. The reversals are recorded in the
+> 6C/6D/6F entries and under **Deviations From Build Plan**.
 
 All sixteen sub-steps were implemented and verified.
 
@@ -372,6 +393,14 @@ knows a backend URL or an endpoint path. It exports `API_BASE_URL` (from
 trailing slashes trimmed), `fetchActions()`, `createRun()`, `fetchHealth()` and
 the `ApiError` class. Every request goes from the browser straight to FastAPI;
 nothing is proxied through a Next.js Route Handler (build plan section 5).
+
+> **Superseded by Phase 6G.** `API_BASE_URL` is now `API_BASE_PATH`, the
+> same-origin string `"/forge-api"`, and every request goes through the Route
+> Handler at that path. Build plan §5's rule was "copy the uploaded file once",
+> and it still holds: the handler streams the request body through without
+> reading or parsing it, so nothing in Node ever holds a copy of the upload.
+> What changed is that build plan 6G.3 explicitly asks for this hop — it is what
+> keeps FastAPI's address out of the browser.
 
 `src/components/backend/BackendStatus.jsx` was refactored to call
 `fetchHealth()` instead of holding its own copy of the base URL — it was the
@@ -1239,6 +1268,218 @@ as build plan section 5 requires until 6G changes it.
 
 ---
 
+### Phase 6G — Same-Origin Next.js Proxy and LAN Testing
+
+All ten items of build plan "Phase 6G" were implemented and verified. The
+browser no longer knows that FastAPI exists: every backend request is addressed
+to `/forge-api/...` on the host that served the page, and the development
+machine alone reaches `127.0.0.1:8000`.
+
+**Repository state found at the start.** The committed branch carried
+`c9abf4c "Phases 6E, 6F, and 6G complete"` and `c4a0e7e "quick fix"`, which had
+already moved the browser onto `/forge-api` (6G.1/6G.2) and added a `rewrites()`
+proxy to `next.config.mjs` (6G.3). Two defects had come with them, and both are
+fixed here: the rewrite could not carry an upload (below), and `c4a0e7e` deleted
+`outputDownloadUrl()` and `runWorkbookUrl()` from `lib/api.js` while
+`ExportButtons.jsx` still imported them. **`npm run build` did not build** —
+`ActionRunner.jsx` also imports `@/components/workbench/ExportButtons` while the
+file on disk was `ExportButton.jsx`, so module resolution failed. The file was
+renamed to the name every importer and this document already used; nothing in it
+changed but one comment.
+
+#### 6G.3/6G.4 — the rewrite could not carry an upload, and a Route Handler can
+
+The defect, measured rather than reasoned about. With the `rewrites()` proxy in
+place, a **valid 12.38 MB CSV** (12,380,066 bytes, 149,682 rows) uploaded to
+`POST /forge-api/api/runs`:
+
+    next dev   Request body exceeded 10MB for /forge-api/api/runs. Only the
+               first 10MB will be available unless configured.
+    next dev   Failed to proxy http://127.0.0.1:8000/api/runs Error: socket
+               hang up { code: 'ECONNRESET' }
+    FastAPI    starlette.requests.ClientDisconnect
+    browser    500 "Internal Server Error" after 30.06 s
+
+The cause is in Next.js itself, not in the configuration.
+`server/lib/router-utils/resolve-routes.js` attaches
+`getCloneableBody(req, config.experimental.proxyClientMaxBodySize)` to every
+request, and an external rewrite forwards `cloneBodyStream()`. That clone stops
+at the limit — **10 MiB by default** — and, as
+[the Next.js documentation states](https://nextjs.org/docs/app/api-reference/config/next-config-js/proxyClientMaxBodySize),
+"the request will **not** fail or return an error to the client": the first
+10 MiB is forwarded and the rest is dropped. FastAPI then waits for the
+remainder of a multipart body that ends mid-part.
+
+That directly contradicts two things ForgeXL already promises:
+`config.MAX_UPLOAD_BYTES` is **250 MB**, and an upload over it is answered with
+the structured `413 FILE_TOO_LARGE` of build plan 3.3. A rewrite cannot express
+either, and raising `proxyClientMaxBodySize` would not have fixed it — the clone
+is _buffered in the Node process_, so a 250 MB upload would be held in memory a
+second time before FastAPI ever saw a byte.
+
+**The fix.** `rewrites()` is gone from `next.config.mjs`. In its place:
+
+    src/app/forge-api/[...path]/route.js   Node Route Handler, GET and POST
+    src/lib/backend-origin.js              server-only; the backend's address
+
+A Route Handler is handed the request's **own** stream (`NextRequest.body`, which
+Next builds from the raw `IncomingMessage`, not from the cloneable body), so the
+handler passes it to `fetch` with `duplex: "half"` and never reads, awaits or
+parses it. Calling `request.formData()` there would have buffered the upload and
+given ForgeXL a second implementation that understands multipart bodies; it does
+not. The path is rebuilt from the captured segments, each re-encoded so a segment
+can never contribute a `/` or `?` of its own, and `request.nextUrl.search` is
+copied verbatim so the preview's `?offset=&limit=` survives. Connection-scoped
+headers are dropped in both directions — the RFC 9110 hop-by-hop set plus `host`,
+`expect` and `content-length` (the body is re-framed as a chunked upstream
+request, so the browser's framing header would contradict it). Coming back, the
+upstream status and body stream are forwarded along with `Content-Type` and
+`Content-Disposition`, which is what keeps a download a download.
+
+Measured after the change, same file, same machine: **200, 12,380,066 bytes
+received, 149,682 rows, 0.25 s**, no warning in `next dev`, no `ClientDisconnect`
+in FastAPI. A **260.3 MiB** upload through the same handler still returns the
+structured `413 FILE_TOO_LARGE` naming the 250 MB limit, in 4.6 s — the contract
+the rewrite could not express.
+
+**6G.5 stays true.** FastAPI is untouched and still binds `127.0.0.1`. With
+`next dev --hostname 0.0.0.0` running, `http://<non-loopback>:8000/health` is
+refused while `http://<non-loopback>:3000/forge-api/health` answers.
+
+**The backend address is server-only.** `src/lib/backend-origin.js` opens with
+`import "server-only"`, so importing it from a Client Component is a build
+error; it is imported by the route handler and by nothing else. It reads the
+same `FORGEXL_BACKEND_ORIGIN` / `FORGEXL_BACKEND_HOST` / `FORGEXL_BACKEND_PORT`
+variables `backend/app/config.py` reads, none of them `NEXT_PUBLIC_`. Verified
+against the production bundle: `.next/static/` contains no `127.0.0.1` and no
+`:8000`, and the only ForgeXL address in it is the same-origin `/forge-api`.
+
+**A disconnected backend reads as one sentence.** The handler answers `502` with
+a plain-text body and no `error` object, which is exactly the case
+`lib/api.js` already turns into `NETWORK_ERROR`. In a real browser, with the
+backend stopped: the indicator reads **"Backend Unavailable"** and the panel
+reads **"The ForgeXL backend did not respond. Check that it is running on the
+machine serving this page."** A request the browser itself cancelled is answered
+`499` rather than being logged as a backend failure.
+
+#### The `lib/api.js` regression from `c4a0e7e` (6G item 2)
+
+`outputDownloadUrl()` and `runWorkbookUrl()` are restored, built on
+`API_BASE_PATH` rather than the deleted `API_BASE_URL`, so every download is a
+same-origin path and **no backend URL appears anywhere in the browser**. The
+`ExportButtons.jsx` links are unchanged: plain `<a href>` navigations with no
+`download` attribute, named by the `Content-Disposition` the handler forwards.
+
+#### 6G.6/6G.7/6G.8/6G.9 — LAN acceptance
+
+**There was no second laptop.** This session ran in a single ephemeral Linux
+container, so build plan 6G.7's "select an actual XLSX file located on the second
+laptop" could not be performed as written. What _was_ done, and what it does and
+does not prove, is recorded honestly below; the two-Mac acceptance the build plan
+asks for is the user's to run and is listed under **Known Issues**.
+
+A real headless Chromium (Playwright, no test-only hooks in the application)
+drove the actual UI against `http://<non-loopback-address>:3001`, a `next start`
+production server bound to `0.0.0.0`, with FastAPI on loopback:
+
+| Build plan | Check                                     | Result                                                            |
+| ---------- | ----------------------------------------- | ----------------------------------------------------------------- |
+| 6G.6       | page served over a non-loopback address   | 200; indicator "Backend Connected"                                |
+| 6G.7       | real file control, 12.38 MB CSV           | "Exact Duplicate Remover read 149,682 rows and returned 149,682." |
+| 6G.7       | preview, then the next page               | "Showing 1–100 of 149,682" → "Showing 101–200 of 149,682"         |
+| 6G.7       | browser download, CSV                     | `forgexl-…-deduplicated-data-<stamp>.csv`, 12,380,066 bytes       |
+| 6G.7       | browser download, XLSX                    | `forgexl-…-deduplicated-data-<stamp>.xlsx`, 6,323,765 bytes       |
+| 6G.7       | downloaded workbook reopened              | worksheet `Deduplicated Data`, 149,683 rows including the header  |
+| 6G.8       | drag-and-drop of a real CSV onto the slot | "Product Master Builder read 500 rows and returned 500."          |
+| 6G.9       | missing file                              | 422 `MISSING_INPUT` — "Source File is required."                  |
+| 6G.9       | unsupported file                          | 422 `UNSUPPORTED_EXTENSION`                                       |
+| 6G.9       | malformed workbook                        | 422 `PARSE_ERROR`, both engines named                             |
+| 6G.9       | missing required columns                  | "Validation Failed", the four missing columns listed              |
+| 6G.9       | disconnected backend                      | "Backend Unavailable" + the readable `NETWORK_ERROR` sentence     |
+| 6G.9       | oversized upload (260.3 MiB)              | 413 `FILE_TOO_LARGE` — "larger than the 250 MB upload limit."     |
+| 6G.5       | FastAPI from a non-loopback address       | connection refused                                                |
+
+The downloaded CSV is **byte-identical** to the uploaded file
+(SHA-256 match), which is the whole 250 MB-class round trip through browser →
+Next.js → FastAPI → Polars → export → browser in one measurement.
+
+The browser acceptance was run against `next start` rather than `next dev`
+because in this container the only non-loopback address is `192.0.2.2`
+(TEST-NET-1, which is what the sandbox assigns — a real LAN never uses it), and
+headless Chromium's `next dev` HMR websocket to that address is answered `403`
+even with the host added to `allowedDevOrigins`, which leaves the page
+unhydrated. That is a `next dev` behaviour on this address and is unrelated to
+anything this phase changed — `allowedDevOrigins` is untouched, HMR does not
+exist in production, and the same browser hydrates normally against
+`127.0.0.1:3000` on the same dev server. Recorded as **Known Issue 63**.
+
+#### 6G.10 — no public deployment
+
+Nothing moved toward one. No hosting configuration, no tunnel, no public
+binding: `next dev`/`next start` bind `127.0.0.1` by default and `0.0.0.0` only
+under the explicit `dev:lan` script, and FastAPI never leaves loopback.
+
+#### `scripts/lan-address.mjs` — two defects (6G.6)
+
+The helper read `process.env.PORT`, while `dev:web:lan` always launches Next on
+port 3000. A `PORT=4000` that happened to exist in the shell changed nothing
+about where Next.js listens and every URL the helper printed — the one thing it
+exists to get right. It now takes the port as an **argument**, and
+`package.json` passes the same literal it passes to `next dev`:
+
+    dev:web:lan  node scripts/lan-address.mjs 3000 && next dev --hostname 0.0.0.0 --port 3000
+
+`process.env.PORT` is no longer read at all; an absent or invalid argument falls
+back to `3000`, which is that script's own port.
+
+Second, `networkInterfaces()` was uncaught. Because the helper is chained ahead
+of `next dev` with `&&`, a throw there would have **stopped the development
+server from starting** over an unprintable address. It is now wrapped, and the
+two outcomes are reported differently — "could not be read" (with instructions
+for finding the address by hand) versus "no private IPv4 address found". Both
+exit 0. All three paths were executed: a working interface list, a throwing
+`networkInterfaces()`, and this container's own result (its only non-loopback
+address, `192.0.2.2`, is correctly **not** listed — it is not RFC 1918).
+
+#### The parser's silent worksheet probe (a review finding, not a failure)
+
+`_fastexcel_sheet_has_data` caught **every** exception from
+`reader.load_sheet(name, header_row=None)` and reported the sheet as empty. A
+worksheet that genuinely holds nothing reports height and width of zero — it
+does not fail to load — so a load failure was never evidence about the sheet's
+contents, and calling it "empty" had two silent consequences:
+
+- a workbook whose only data sheet failed to probe was refused as **"contains no
+  data"**, a false statement about the user's file, and one that never reached
+  the openpyxl fallback because it is a _structural_ refusal;
+- a workbook with one other readable sheet had **that** sheet selected as the
+  unambiguous data sheet — exactly the silent worksheet selection build plan
+  section 17 forbids.
+
+Nothing is caught there now. The exception propagates into the engine fallback
+already in `_parse_xlsx`, which re-reads the workbook with openpyxl and, if that
+fails too, raises `PARSE_ERROR` naming both engines. Three tests
+(`test_parser.py`, +3 → 39) pin it, and all three **fail against the previous
+implementation**: a single-sheet workbook whose probe fails is now read by
+openpyxl instead of being called empty; a two-sheet workbook is refused as
+ambiguous instead of having the readable sheet chosen for the user; and a probe
+failure the fallback cannot rescue is reported as a parse error carrying the
+probe's own message. No existing test changed — blank worksheets report `0 × 0`
+rather than raising, so the "one data sheet beside blank sheets" case is
+unaffected.
+
+#### What Phase 6G deliberately did not do
+
+It did not touch `services/storage.py`'s dead runtime code,
+`config.DATA_DIRECTORY` / `RUNS_DIRECTORY` or the `runs_dir` fixture — build plan
+6I.1 owns those (Known Issues 21 and 39). It did not change CORS:
+`config.ALLOWED_FRONTEND_ORIGINS` still governs a direct browser call to `:8000`,
+which build plan §19 still requires even though the browser no longer makes one.
+It did not touch `test_contract_freeze.py` — 6G changes the browser-side prefix,
+not the server's routes — and it did not begin 6H.
+
+---
+
 ## Current Architecture
 
 ### Frontend
@@ -1261,7 +1502,17 @@ Frontend files:
     src/app/page.jsx               header + BackendStatus + ActionRunner
     src/app/globals.css            Tailwind import + theme tokens
     src/app/favicon.ico
-    src/lib/api.js                 the ONLY module holding a backend URL,
+    src/app/forge-api/[...path]/route.js             (6G)
+                                   the same-origin transport to FastAPI:
+                                   GET and POST, request body streamed
+                                   through unread, status/body/Content-Type/
+                                   Content-Disposition forwarded back
+    src/lib/backend-origin.js      (6G) server-only; the ONLY module holding
+                                   the backend's host and port. `import
+                                   "server-only"` makes a client import a
+                                   build error.
+    src/lib/api.js                 the only module holding a backend path;
+                                   every value in it is same-origin,
                                    including the two download URL builders
     src/lib/formatters.js          display helpers: file size, extension,
                                    counts, duration, metric and export labels,
@@ -1291,6 +1542,9 @@ Frontend files:
     src/components/workbench/ExportButtons.jsx       (6F)
                                    one link per offered format, plus the
                                    whole-Run workbook when >1 result
+                                   (renamed from ExportButton.jsx in 6G: the
+                                   file was misnamed and no importer resolved
+                                   — see Known Issue 61)
     public/.gitkeep
 
 (The 6E components were added to the repository in Phase 6E but this list was
@@ -1404,6 +1658,18 @@ variable names.
 
 ### API surface (current)
 
+Every path below is FastAPI's own, on `127.0.0.1:8000`. **The browser addresses
+none of them directly.** Since 6G it addresses each one with `/forge-api`
+prepended, on the host that served the page, and the Route Handler at
+`src/app/forge-api/[...path]/route.js` forwards it — status, body stream,
+`Content-Type` and `Content-Disposition` unchanged — so the statuses and bodies
+listed here are what the browser actually receives. The handler adds exactly two
+responses of its own, neither of them FastAPI's:
+
+    502  the backend could not be reached; a plain-text body with no `error`
+         object, which `lib/api.js` renders as its NETWORK_ERROR sentence
+    499  the browser cancelled the request before the backend answered
+
     GET  /health        ->  200 {"status": "ok"}
     GET  /api/actions   ->  200 {"actions": [ActionDefinition, ...]}
 
@@ -1497,12 +1763,21 @@ file changes, because the UI is built entirely from `GET /api/actions`.
 
 ### npm scripts
 
-    dev      concurrently -> dev:web + dev:api
-    dev:web  next dev --hostname 127.0.0.1 --port 3000
-    dev:api  bash scripts/dev-backend.sh
-    build    next build
-    start    next start --hostname 127.0.0.1 --port 3000
-    lint     eslint
+    dev          concurrently -> dev:web + dev:api
+    dev:web      next dev --hostname 127.0.0.1 --port 3000
+    dev:api      bash scripts/dev-backend.sh
+    dev:lan      concurrently -> dev:web:lan + dev:api                    (6G)
+    dev:web:lan  node scripts/lan-address.mjs 3000
+                   && next dev --hostname 0.0.0.0 --port 3000             (6G)
+    build        next build
+    start        next start --hostname 127.0.0.1 --port 3000
+    lint         eslint
+
+Only `dev:web:lan` binds `0.0.0.0`, and only Next.js. `dev:api` is unchanged in
+every script: FastAPI takes its host from `config.HOST`, which is `127.0.0.1`
+(build plan 6G.5). `scripts/lan-address.mjs` prints the LAN URLs before Next
+starts; it is informational, it takes the port as the argument the line above
+passes it, and it never exits non-zero.
 
 devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 
@@ -1512,7 +1787,7 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | ----------------------- | ------------------------------------------------------------ |
 | `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1)  |
 | `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)     |
-| `src/lib/`              | Exists (`api.js`, `formatters.js`) — added in Phase 5        |
+| `src/lib/`              | Exists (`api.js`, `formatters.js`, `backend-origin.js` — 6G) |
 | `backend/app/`          | Exists (`main.py`, `config.py`)                              |
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                             |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)     |
@@ -1520,7 +1795,7 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview) |
 | `backend/tests/`        | Exists (15 test modules and `fixtures/`)                     |
 | `data/runs/`            | Exists (`.gitkeep` only; nothing is written there — 6D)      |
-| `scripts/`              | Exists (`dev-backend.sh`)                                    |
+| `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)            |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)               |
 | `.env.example`          | Exists                                                       |
 | `.env.local`            | Not present — not required (frontend default fallback)       |
@@ -1528,8 +1803,22 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-6d-dataframe-0dfm70
-    Last commit:    70c41b1  "phase 6C fix"
+    Current branch: claude/phase-6g-proxy-api-fixes-0f4uvk
+    Branched from:  25d432a  "Document post-POC product expansion plan for ForgeXL"
+
+Phase 6G's changes are committed to
+`claude/phase-6g-proxy-api-fixes-0f4uvk`. The commit covers `next.config.mjs`
+(the rewrite removed), the two new frontend modules
+(`src/app/forge-api/[...path]/route.js`, `src/lib/backend-origin.js`),
+`src/lib/api.js`, `src/components/workbench/ExportButton.jsx` →
+`ExportButtons.jsx`, `src/components/backend/BackendStatus.jsx`,
+`scripts/lan-address.mjs`, one line of `package.json`, `.env.example`,
+`backend/app/services/parser.py`, `backend/app/api/runs.py`,
+`backend/tests/test_parser.py` and this file. `package-lock.json` and
+`backend/requirements.txt` are untouched — no dependency was added —
+and so is `test_contract_freeze.py`. `data/runs/` holds only `.gitkeep`.
+
+(The paragraphs below record earlier sessions' own view of the tree.)
 
 Phase 6D's changes were committed and pushed to
 `claude/forgexl-phase-6d-dataframe-0dfm70` at the end of the session. The commit
@@ -1594,6 +1883,133 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6G)
+
+Environment note: this session also started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist and were recreated by
+following the documented setup exactly. No dependency was added:
+`backend/requirements.txt`, `package.json` and `package-lock.json` are unchanged
+except for the one `dev:web:lan` script line.
+
+    cd backend && .venv/bin/python -m pytest   ->  641 passed, 2 warnings
+
+The 6F baseline of **638 passed** was reproduced before any edit, together with
+the other two integrity checks (backend modules under `backend/`, no duplicate
+test-module checksums).
+
+| Module           |  6F |  6G | Change                                             |
+| ---------------- | --: | --: | -------------------------------------------------- |
+| `test_parser.py` |  36 |  39 | **+3** — a failed worksheet probe is never "empty" |
+| every other      | 602 | 602 | unchanged                                          |
+| **Total**        | 638 | 641 | **+3**                                             |
+
+**Nothing was weakened to pass, and no existing test changed.** The three new
+tests were each run against the previous implementation first and all three
+**failed**, which is what makes them evidence rather than description:
+
+    test_a_worksheet_that_fails_to_probe_is_not_reported_as_an_empty_workbook
+    test_a_failed_probe_never_lets_the_parser_select_a_different_worksheet
+    test_a_failed_probe_that_the_fallback_cannot_rescue_is_a_parse_error
+
+They monkeypatch `fastexcel.read_excel` with a thin wrapper around the **real**
+reader whose `header_row=None` probe of one named sheet raises; everything else
+about the workbook is genuine, so only the one operation under test fails.
+
+The proxy itself has no backend test, deliberately: it is a Next.js Route
+Handler and the backend cannot see it. It is covered by the HTTP and browser
+verifications below. A committed frontend suite is Phase 6H's (Deviation 22).
+
+### Type checking (Phase 6G)
+
+    npx pyright   ->  0 errors, 0 warnings, 0 informations
+
+Pyright rejected a first draft of the probe wrapper that typed `**kwargs` as
+`object`, against `fastexcel`'s precisely-typed `load_sheet` overloads. It was
+not suppressed and no `# type: ignore` was added: the wrapper forwards `Any`,
+which is what a pass-through of someone else's signature actually is.
+
+### Frontend static checks (Phase 6G)
+
+    npx eslint     ->  clean, 0 problems
+    npm run build  ->  Compiled successfully
+                       routes:  ○ /   ○ /_not-found   ƒ /forge-api/[...path]
+
+`npm run build` **failed before this session's first edit** — see Known Issue 61.
+The `ƒ` marks the proxy as server-rendered on demand, which is what
+`export const dynamic = "force-dynamic"` asks for; a cached proxy would be a bug.
+
+**No backend address in the browser bundle.** After the build:
+
+    grep -r "127.0.0.1" .next/static/   ->  no matches
+    grep -r ":8000"     .next/static/   ->  no matches
+    grep -ho "/forge-api" .next/static/ ->  1 occurrence
+
+The five occurrences of the bare digit string `8000` are hex constants
+(`0x8000000`) inside React's bundled internals, and the one occurrence of
+`localhost` is a string literal inside a bundled URL parser — neither is
+ForgeXL's. The only ForgeXL address in the browser is the same-origin path.
+
+### Phase 6G end-to-end verification over real HTTP
+
+Backend on `127.0.0.1:8000`, `next dev` on `127.0.0.1:3000`, both started the
+documented way. Every check below was executed; none is inferred.
+
+| Build plan | Check                                           | Result                                                                       |
+| ---------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| 6G.2/6G.3  | `GET /forge-api/health`                         | `{"status": "ok"}`                                                           |
+| 6G.4       | 12.38 MB CSV upload (12,380,066 bytes)          | 200 in 0.25 s; backend recorded **12,380,066 bytes, 149,682 rows**           |
+| 6G.4       | same upload through the old `rewrites()` proxy  | **truncated at 10 MiB**, 30.06 s hang, 500, `ClientDisconnect` — the defect  |
+| 6G.4       | query string survives the hop                   | `?offset=200&limit=3` → offset 200, limit 3, row 201 correct                 |
+| 3.3        | 260.3 MiB upload                                | **413 `FILE_TOO_LARGE`**, "larger than the 250 MB upload limit", 4.6 s       |
+| 6F.6       | CSV download headers                            | `content-type: text/csv; charset=utf-8` + the full `content-disposition`     |
+| 6F.6       | XLSX download headers                           | the spreadsheet media type + the full `content-disposition`                  |
+| 6F.1       | downloaded CSV vs uploaded file                 | **SHA-256 identical**, 12,380,066 bytes                                      |
+| 6F.2       | downloaded workbook reopened with openpyxl      | sheet `Deduplicated Data`, 149,683 rows, accented values intact              |
+| 6F.4       | whole-Run workbook                              | 200, 6,323,765 bytes                                                         |
+| 6G.9       | missing file / unsupported file / bad workbook  | 422 `MISSING_INPUT` / `UNSUPPORTED_EXTENSION` / `PARSE_ERROR`                |
+| 6G.9       | missing columns / unknown Action / no action_id | 422 `MISSING_COLUMNS` / 404 `UNKNOWN_ACTION` / 400 `INVALID_REQUEST`         |
+| 3.15       | `?limit=9999`                                   | 400 `INVALID_REQUEST`, "limit may not exceed 500."                           |
+| 6G.9       | backend stopped, `GET /forge-api/health`        | **502**, `text/plain`, "The ForgeXL backend could not be reached."           |
+| 6G.9       | backend stopped, 12.38 MB `POST`                | 502 in 0.015 s — refused at the connection, not after buffering the body     |
+| —          | `PUT /forge-api/health`                         | 405 — only GET and POST are exported                                         |
+| 6G.5       | `http://<non-loopback>:8000/health`             | connection refused                                                           |
+| 6G.6       | `http://<non-loopback>:3000/forge-api/health`   | `{"status": "ok"}`; 12.38 MB upload over the same address: 200, 149,682 rows |
+
+Every structured error body arrived **byte-identical** to FastAPI's own — the
+handler forwards the status and the stream and adds nothing.
+
+### Phase 6G browser verification (real headless Chromium)
+
+Playwright driving Chromium against `http://<non-loopback-address>:3001`
+(`next start --hostname 0.0.0.0`), FastAPI on loopback. No test-only hook exists
+in the application; every step used the real controls. See the Phase 6G entry
+above for why a production server, and for what this does and does not prove
+about the two-laptop acceptance.
+
+    title                       Local Data Workbench
+    backend indicator           Backend Connected
+    file control, 12.38 MB CSV  Exact Duplicate Remover read 149,682 rows
+                                and returned 149,682.
+    workbench state             success
+    preview                     Showing 1–100 of 149,682
+    preview, next page          Showing 101–200 of 149,682
+    download (CSV)              forgexl-exact-duplicate-remover-
+                                deduplicated-data-<stamp>.csv   12,380,066 bytes
+    download (XLSX)             forgexl-exact-duplicate-remover-
+                                deduplicated-data-<stamp>.xlsx   6,323,765 bytes
+    drag-and-drop, real CSV     Product Master Builder read 500 rows and
+                                returned 500.
+    validation failure          Validation Failed — "The uploaded file is
+                                missing required columns." + the four names
+    workbench state             validation_error
+    backend stopped             Backend Unavailable / "The ForgeXL backend did
+                                not respond. Check that it is running on the
+                                machine serving this page."
+    uncaught page errors        none
+
+The only console entry is the browser's own note that a resource returned 422 —
+which is the validation case succeeding.
 
 ### Backend test suite (Phase 6F)
 
@@ -3599,8 +4015,54 @@ them. The file was restored and re-verified clean.
     "History 1" beside it. It is valid, understandable enough, and loses no
     data; a better rename is not worth a special case for a label neither real
     Action uses.
+61. **`npm run build` was broken on `main` before Phase 6G, and had been since
+    the components were written.** `ActionRunner.jsx` imports
+    `@/components/workbench/ExportButtons`; the file on disk was
+    `ExportButton.jsx`. Not a case difference — a missing letter — so it failed
+    on every filesystem, and `next build` reported `Module not found` rather
+    than producing a bundle. This document has referred to the file as
+    `ExportButtons.jsx` since the Phase 6F entry, so the file was renamed to
+    that name rather than the import being changed. Resolved; recorded because
+    it means no build since Phase 6F's session had actually succeeded.
+62. **The proxy forwards exactly two response headers, and re-frames the
+    request.** Coming back, only `Content-Type` and `Content-Disposition` are
+    copied from FastAPI — enough for every response ForgeXL sends today, but a
+    header a future endpoint adds (an `ETag`, a `Cache-Control`) has to be added
+    to `FORWARDED_RESPONSE_HEADERS` or it will not reach the browser. Going out,
+    `content-length` is dropped and the upstream request is chunked, so FastAPI
+    no longer learns the body's size from a header; nothing depends on that —
+    `storage.read_upload` counts the bytes it actually receives rather than
+    trusting a header, which is why the 250 MB limit still holds exactly.
+    Both are deliberate; both are the kind of thing a later endpoint could trip
+    over quietly.
+63. **`next dev`'s HMR websocket is refused with 403 from this container's only
+    non-loopback address.** That address is `192.0.2.2` (TEST-NET-1, assigned
+    by the sandbox; a real LAN never uses it). Headless Chromium's
+    `ws://192.0.2.2:3000/_next/hmr` handshake is answered 403 and the page then
+    never hydrates, while the same browser against `127.0.0.1:3000` on the same
+    dev server hydrates normally, and a `curl` websocket handshake carrying the
+    same `Origin` is answered `101`. Adding the host to `allowedDevOrigins`
+    — by the `FORGEXL_DEV_ALLOWED_ORIGINS` variable and by editing the list
+    directly — did not change it, so the cause is not that allowlist and has not
+    been identified. It is dev-only (there is no HMR in a production build),
+    it is specific to this address, and it is unrelated to anything Phase 6G
+    changed. The browser acceptance was therefore run against `next start`.
+    **A real second Mac on a real 192.168.x LAN would not hit this**, but that
+    has not been demonstrated — see Known Issue 64.
+64. **The two-machine acceptance of build plan 6G.7-6G.9 has not been performed
+    on real hardware.** This session had one ephemeral Linux container and no
+    second laptop. What was done — a real headless Chromium, driving the real
+    UI, over a real non-loopback address, uploading a real 12.38 MB file from a
+    real filesystem, downloading and reopening the result — exercises the whole
+    path the second laptop uses, but it does not prove the two things only a
+    second machine can: that a Mac's own file picker and Finder drag-and-drop
+    behave the same, and that the exported workbook opens correctly **in
+    Microsoft Excel**. Both remain the user's to run, on the two Macs, before
+    6G is called accepted on the target hardware. Nothing in the code is
+    expected to change if it fails; the finding would be a UX or Excel-
+    compatibility one.
 
-None of the above blocks Phase 6G.
+None of the above blocks Phase 6H.
 
 ---
 
@@ -3971,6 +4433,33 @@ failed` as an example and says explicitly: "Use existing equivalent status
     worksheets in one workbook). The four Polars workbook defaults are
     reproduced explicitly in `export.WORKBOOK_OPTIONS` — see Known Issue 58.
 
+43. **`/forge-api/*` is a Route Handler, not a `rewrites()` entry (Phase 6G).**
+    Build plan 6G.3 says "configure a Next.js rewrite/proxy" and sketches
+    `/forge-api/:path* → http://127.0.0.1:8000/:path*`. A `rewrites()` entry
+    produces exactly that mapping and was what the repository shipped — but it
+    cannot carry an upload. Next.js forwards a _buffered clone_ of the request
+    body for an external rewrite, capped at `proxyClientMaxBodySize` (10 MiB by
+    default), and past the cap it forwards a truncated body rather than
+    refusing the request. Measured: a valid 12.38 MB CSV hung for 30 s and
+    ended in `ClientDisconnect`. ForgeXL's own limit is 250 MB with a
+    structured 413, so the sketch had to give way to the requirement. The
+    mapping 6G.3 asks for is unchanged; only the mechanism differs, and the
+    Route Handler satisfies 6G.4 more strictly than the rewrite did — it never
+    buffers the body at all.
+
+44. **Two modules and one route §10 does not sketch (Phase 6G):**
+    `src/app/forge-api/[...path]/route.js` and `src/lib/backend-origin.js`.
+    §10 predates the same-origin architecture of Phase 6; 6G.3 requires the
+    forwarding and Phase 6 rule 9 requires the backend's address to stay off
+    the browser, which is what the second module (`import "server-only"`)
+    enforces.
+
+45. **`scripts/lan-address.mjs` takes its port as an argument (Phase 6G).** It
+    read `process.env.PORT`, which `next dev` does not consult when `--port` is
+    given, so a stray `PORT` in the shell made it print URLs that answer
+    nothing. `package.json` now passes the same literal to both commands on the
+    one line, which is the only arrangement in which they cannot drift.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -3979,6 +4468,10 @@ loader, no dynamic execution from disk, no heavyweight upload or component
 library. Uploads are not proxied through Next.js — the browser calls FastAPI
 directly, as §5 requires, which Phase 5 confirmed by watching the requests the
 real browser actually made.
+_(Superseded by Phase 6G: uploads now pass through the Next.js Route Handler at
+`/forge-api/*`, as build plan 6G.3 requires. §5's actual rule — copy the file
+once — is unaffected: the handler streams the body through and never reads it,
+so there is still exactly one copy and one parse, both in Python.)_
 
 Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and
 native browser APIs (`fetch`, `FormData`, `File`, `DataTransfer`). `package.json`
@@ -3991,65 +4484,59 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 6G — Same-Origin Next.js Proxy and LAN Testing**
+**Phase 6H — Synthetic Spreadsheet Fixtures and End-to-End Regression Tests**
 
-Not started. Nothing for it was scaffolded, stubbed or prepared during
-Phase 6F: `next.config.mjs` is untouched, no `/forge-api` path exists anywhere,
-`lib/api.js` still resolves `NEXT_PUBLIC_API_BASE_URL` to
-`http://127.0.0.1:8000`, and both servers still bind to `127.0.0.1`.
+**Not started.** Nothing for it was scaffolded, stubbed or prepared during
+Phase 6G. `backend/tests/fixtures/` still holds only the two hand-written
+Phase 4 row sets; there is no fixture generator, no regression suite and no
+committed frontend test of any kind.
 
-**Where 6G starts from — the one thing 6F did for it.** Every backend URL and
-every endpoint path in the frontend lives in `src/lib/api.js` and nowhere else.
-6F kept that rule while adding downloads: `outputDownloadUrl()` and
-`runWorkbookUrl()` build their URLs there, and `ExportButtons.jsx` calls them
-rather than composing a path of its own. Confirmed by grep — no other frontend
-file contains `8000` or `http://`, and the only two occurrences of `/api/`
-outside `lib/api.js` are inside doc comments (`ActionSelector.jsx`,
-`ActionRunner.jsx`) naming the endpoint the options come from, not building a
-URL. So 6G's first two items should be a change to one module plus two comment
-updates.
+**Where 6H starts from.** The backend suite is **641 passed**, `npx pyright` is
+clean, `npx eslint` is clean and `npm run build` succeeds (it did not before
+6G — Known Issue 61). The verification this project has relied on since Phase 3
+— real-HTTP checks and a real headless Chromium — lives in the session
+scratchpad and is rewritten every session (Deviation 22). **6H is where that
+becomes a committed suite**, and this session produced four things worth
+committing rather than re-deriving:
 
-**What Phase 6G owns**
+- a **fixture generator** for a workbook/CSV of arbitrary size; the 12.38 MB
+  CSV that proves the proxy carries a real upload was generated, not stored,
+  and a 260 MiB one proves the 413;
+- the **Playwright script** that drove the file control, drag-and-drop, paging,
+  both downloads and the validation panel through the real UI;
+- the **byte-identity check** (upload SHA-256 == downloaded CSV SHA-256), which
+  is the cheapest possible whole-pipeline assertion;
+- the **workbook reopen** check, which already exists inside
+  `test_export_download.py` and should be reused rather than rewritten.
 
-- **6G.1/6G.2/6G.3.** Move the browser onto `/forge-api/*` and add the Next.js
-  rewrite to FastAPI. `API_BASE_URL` becomes the same-origin prefix; the
-  `NEXT_PUBLIC_API_BASE_URL` variable and its `.env.example` entry need a
-  decision (the browser must not need it; the rewrite target still does).
-- **6G.4.** The rewrite must not transform the body. Uploads are up to 250 MB
-  and downloads are whole spreadsheets, so this is the item to actually
-  measure, not assume — a rewrite that buffers either direction would undo
-  build plan §5's "copy the file once" rule.
-- **6G.5/6G.6.** FastAPI stays on `127.0.0.1`; only `next dev` is exposed to
-  the LAN. `config.HOST` already defaults to `127.0.0.1` and is overridable, so
-  no backend change should be required — verify rather than edit.
-- **6G.7/6G.8/6G.9.** Test the real file picker, drag-and-drop and error
-  handling from a second machine. **Note for that session:** this container has
-  no second laptop. The honest options are to drive a real browser against the
-  LAN address from the same machine and say so, or to record the item as
-  unverifiable here and defer it to the user's own hardware. Do not report a
-  second-laptop test that did not happen.
-- **6G.10.** No public deployment. Nothing in the repository moves toward one.
+**What Phase 6H owns**
 
-**What 6G must not disturb**
+- **6H.1/6H.2.** Programmatic, deterministic fixtures. `tests/helpers.py`
+  already has `csv_bytes()` and `xlsx_bytes()`; 6H needs representative and
+  _large_ ones, and a decision about whether a multi-megabyte fixture is
+  generated per run (slow, deterministic) or cached (fast, another artifact).
+- **6H.3 onward.** The end-to-end regression tests themselves. Note that the
+  proxy now sits between the browser and FastAPI: a test that exercises
+  `TestClient` alone no longer covers the path a user takes. Deciding whether
+  the committed suite drives Next.js too — and what starts it — is 6H's first
+  real design question.
 
-- **The download links are plain `<a href>` navigations, not fetches.** They
-  work today because the response carries `Content-Disposition: attachment`.
-  Under a same-origin rewrite they must keep working; re-verify a real download
-  in a real browser, not only the JSON endpoints.
-- **CORS.** Once the browser is same-origin with Next.js, the CORS allowlist in
-  `config.ALLOWED_FRONTEND_ORIGINS` stops being what permits the request. Do
-  not delete it — build plan §19 still requires FastAPI to refuse unexpected
-  origins, and a direct browser call to `:8000` must still be governed.
-- **`test_contract_freeze.py`.** 6G changes the _browser-side_ prefix, not the
-  server routes. The module's `FROZEN_ROUTES` should need no edit; if it does,
-  something has changed that 6G was not asked to change.
+**What 6H must not disturb**
+
+- **The proxy streams the body and must keep streaming it.** Any change that
+  reads `request.body` in `src/app/forge-api/[...path]/route.js` — a log line, a
+  size check, a `formData()` call — silently reintroduces the defect 6G fixed.
+  The regression test for it is the one worth writing first: upload something
+  larger than 10 MiB and assert the backend recorded every byte.
+- **`test_contract_freeze.py`.** 6H adds tests; it does not change the API.
+  If `FROZEN_ROUTES` needs an edit, something has changed that 6H was not
+  asked to change.
+- **The `server-only` import in `src/lib/backend-origin.js`.** It is what makes
+  a backend address in the browser bundle a build error rather than a review
+  finding.
 
 **What later phases still own**
 
-- **6H** — synthetic fixtures and end-to-end regression tests. Note that the
-  browser and HTTP verifications this project relies on live in the session
-  scratchpad and are re-written every session (Deviation 22); 6H is where that
-  becomes a committed suite.
 - **6I.1** — removing the dead runtime code in `services/storage.py`
   (`create_run()`, `RunPaths`, `run_paths()`, `runs_directory()`,
   `delete_run_directory()`), `config.DATA_DIRECTORY` / `RUNS_DIRECTORY`, the
@@ -4057,20 +4544,34 @@ updates.
   The `runs_dir` fixture in `tests/conftest.py` exists now only so tests can
   assert the directory stays **empty**; it goes with them. Known Issues 21 and 39.
 - **Phase 7J** — result frames still accumulate in `InMemoryRunStore` for the
-  life of the process (Known Issue 40). 6F added no retention of its own:
-  exports are generated per request and released.
+  life of the process (Known Issue 40). 6G added no retention of its own: the
+  proxy holds no buffer and no cache.
+- **Phase 8.2** — `README.md` is still the Create Next App default (Known Issue
+  4). It is now also the only place a new reader would look for `npm run
+dev:lan`, which is how the second laptop gets a URL at all.
 
-**Before writing any code, verify the repository is intact.** Two things this
-session found are worth repeating as checks:
+**The two-Mac acceptance is still outstanding (Known Issue 64).** Build plan
+6G.7 says "select an actual XLSX file located on the second laptop" and 6G.7's
+last step is "open the workbook in Excel". Neither happened: this session had
+one Linux container and no Excel. Everything in between was exercised against a
+real browser over a real non-loopback address, and the exported workbook was
+reopened with the application's own engine — but a Mac file picker, Finder
+drag-and-drop and Microsoft Excel are the user's to confirm. Nothing in the code
+is expected to change if they do; a failure there would be a UX or
+Excel-compatibility finding, not a proxy one.
+
+**Before writing any code, verify the repository is intact.**
 
     git branch -r                                    # is the last phase on an unmerged branch?
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
     md5sum backend/tests/*.py | awk '{print $1}' | sort | uniq -d
     cd backend && .venv/bin/python -m pytest
+    npm run build
 
 The first must show whether a completed phase is sitting on a branch `main` does
-not contain (Known Issue 54 — it was, this session). The second must show the
+not contain (Known Issue 54 — it has been, twice). The second must show the
 backend modules under `backend/`. The third must print nothing. The fourth must
-report **638 passed** before any new work begins.
+report **641 passed**. The fifth is new to this list because it was the check
+nobody ran: it must **succeed** before any new work begins.
 
-Do not begin Phase 6H.
+Do not begin Phase 6I.

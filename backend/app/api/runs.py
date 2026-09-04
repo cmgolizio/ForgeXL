@@ -4,8 +4,13 @@ This module is the HTTP boundary and nothing more: it reads the request,
 translates it into the vocabulary the services use, and renders what comes
 back. All pipeline logic lives in :mod:`app.services.runner`.
 
-Uploads arrive here directly from the browser. They are never proxied through
-Next.js and never copied through an intermediate service (build plan section 5).
+Uploads reach this module through the Next.js same-origin transport at
+`/forge-api/*` (build plan 6G.3): the browser never addresses FastAPI, so a
+second laptop on the LAN needs nothing but a browser. That hop is transport
+only — the Route Handler streams the request body straight through without
+reading or parsing it (6G.4) — so the file is still transferred once and is
+still copied through no intermediate service that understands it (build plan
+section 5). The bytes this endpoint receives are the bytes the browser sent.
 
 Since Phase 6D nothing here touches the filesystem. A Run holds its result
 tables in memory, so the preview slices one of those frames and a download
@@ -58,6 +63,12 @@ async def create_run(request: Request) -> RunManifest:
     field per Action input slot, named with that slot's ID. Files are submitted
     under their slot names rather than as one anonymous list, so an Action with
     several inputs needs no special handling (build plan 3.12).
+
+    The multipart body is parsed here and nowhere else. Nothing upstream reads
+    it: the same-origin transport in front of this endpoint forwards the stream
+    untouched, which is why an upload up to ``config.MAX_UPLOAD_BYTES`` arrives
+    whole and an oversized one is refused *here*, with the structured 413 of
+    build plan 3.3, rather than being silently truncated on the way in.
 
     The Run executes synchronously; the POC deliberately has no job queue.
     """

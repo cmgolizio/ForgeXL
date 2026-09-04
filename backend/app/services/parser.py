@@ -190,6 +190,12 @@ def _parse_xlsx_with_fastexcel(payload: bytes) -> ParsedFile:
 
     fastexcel accepts ``bytes`` but rejects a file-like buffer, so the payload
     is handed over unwrapped (build plan 6C.7).
+
+    Every worksheet is probed before one is chosen, and a probe that fails is
+    an engine failure like any other: it propagates out of this function and
+    into :func:`_parse_xlsx`, which retries the whole workbook with the
+    compatibility fallback. A worksheet this engine cannot open is never
+    counted as an empty one — see :func:`_fastexcel_sheet_has_data`.
     """
     reader = fastexcel.read_excel(payload)
     worksheet = _select_data_worksheet(
@@ -209,12 +215,21 @@ def _fastexcel_sheet_has_data(reader: fastexcel.ExcelReader, name: str) -> bool:
     ``header_row=None`` counts every row, so a sheet holding only a header row
     still counts as a data sheet — a header-only upload is a legitimate dataset
     with zero rows, not an empty sheet.
+
+    A worksheet that genuinely holds nothing reports a height and width of
+    zero; it does not fail to load. So a load failure here is not evidence
+    about the sheet's contents, and reporting one as "empty" would be a guess —
+    a guess with two silent consequences: a workbook whose only data sheet
+    failed to open would be refused as containing no data, and a workbook with
+    one readable sheet beside it would have that other sheet selected as if it
+    were unambiguous. Neither is true, and neither is visible to the user.
+
+    So nothing is caught here. The exception propagates into the engine
+    fallback in :func:`_parse_xlsx`, which reads the workbook again with
+    openpyxl and, if that fails too, reports a parse error naming both engines
+    (build plan 3.5 and section 6.2).
     """
-    try:
-        sheet = reader.load_sheet(name, header_row=None)
-    except Exception:
-        # A sheet that will not load cannot be the one unambiguous data sheet.
-        return False
+    sheet = reader.load_sheet(name, header_row=None)
     return sheet.total_height > 0 and sheet.width > 0
 
 

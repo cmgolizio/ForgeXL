@@ -8,11 +8,12 @@ import { formatExportLabel } from "@/lib/formatters";
  * an Action offering a format this file has never heard of still gets a working
  * button. Nothing here is Action-specific, and nothing branches on an Action ID.
  *
- * These are plain links, not fetches. Following one is an ordinary navigation:
- * the file goes straight from the backend to the user's downloads folder, the
- * page never holds a second copy of the result, and the backend's
- * `Content-Disposition` names the file (build plan 6F.6) — which is why no
- * `download` attribute appears here.
+ * These are plain links, not fetches. Following one is an ordinary navigation
+ * to a same-origin path, which the Route Handler at `/forge-api/*` streams
+ * through from FastAPI (build plan 6G.3): the page never holds a second copy of
+ * the result, nothing is buffered on the way, and the backend's
+ * `Content-Disposition` — forwarded unchanged — names the file (build plan
+ * 6F.6), which is why no `download` attribute appears here.
  *
  * When a Run produced more than one table, a further link fetches all of them
  * as one workbook, a worksheet each (build plan 6F.4). A single-table Run does

@@ -2,13 +2,19 @@
  * The single place the browser talks to the ForgeXL backend (build plan 5.1).
  *
  * Every request is **same-origin**: it is addressed to `/forge-api/...` on
- * whatever host served the page, and the Next.js server rewrites it to FastAPI
- * (build plan 6G.2/6G.3). The browser therefore never learns the backend's
- * address or port, which is what lets a second laptop on the LAN use ForgeXL
- * with nothing but a browser (Phase 6 architectural rules 7-9).
+ * whatever host served the page, and the Route Handler at
+ * `src/app/forge-api/[...path]/route.js` forwards it to FastAPI (build plan
+ * 6G.2/6G.3). The browser therefore never learns the backend's address or port,
+ * which is what lets a second laptop on the LAN use ForgeXL with nothing but a
+ * browser (Phase 6 architectural rules 7-9).
  *
- * Next.js proxies the bytes and nothing else — no request body is parsed on
- * the way through (6G.4), so an upload is still read exactly once, by Polars.
+ * That handler is transport and nothing more (6G.4): it streams the request
+ * body straight through without reading or parsing it, so no spreadsheet is
+ * ever parsed in Node — the only implementation that understands a CSV or an
+ * XLSX is the Python one, and Polars parses the upload there. (The backend does
+ * read the uploaded bytes into memory before parsing them, so it can enforce
+ * its 250 MB limit while receiving rather than after; the *file* is still
+ * transferred once and parsed once.)
  *
  * No backend path appears anywhere else in the frontend. This module is
  * browser-only by design: it uses `fetch` and `FormData` and imports no Node
@@ -18,10 +24,10 @@
 /**
  * Same-origin namespace every backend request is addressed to.
  *
- * Paired with the rewrite in `next.config.mjs`, which strips this prefix and
- * forwards the rest to FastAPI. It is a path, not a URL: there is deliberately
- * no environment variable, because a same-origin request has no host to
- * configure and a configurable one could be pointed off-origin.
+ * Paired with the Route Handler mounted at that path, which strips this prefix
+ * and forwards the rest to FastAPI. It is a path, not a URL: there is
+ * deliberately no environment variable, because a same-origin request has no
+ * host to configure and a configurable one could be pointed off-origin.
  */
 export const API_BASE_PATH = "/forge-api";
 
@@ -114,6 +120,35 @@ export async function fetchPreview({
   );
 }
 
+/**
+ * The address one result table is downloaded from (build plan 6F.1, 6F.2).
+ *
+ * A URL rather than a request: the browser follows it as an ordinary
+ * navigation, so the file is streamed straight to the user's downloads folder
+ * and never becomes a copy of the result held in page memory. The backend
+ * names the file through `Content-Disposition` (build plan 6F.6) — forwarded
+ * unchanged by the same-origin handler — which is also why no `download`
+ * attribute is needed at the link.
+ */
+export function outputDownloadUrl({ runId, outputId, format }) {
+  return (
+    `${API_BASE_PATH}/api/runs/${encodeURIComponent(runId)}` +
+    `/outputs/${encodeURIComponent(outputId)}` +
+    `/download/${encodeURIComponent(format)}`
+  );
+}
+
+/**
+ * The address a Run's complete workbook is downloaded from (build plan 6F.4).
+ *
+ * Every result table of the Run, one worksheet each. Only meaningful for an
+ * Action that produced more than one table; the caller decides when to offer
+ * it.
+ */
+export function runWorkbookUrl({ runId }) {
+  return `${API_BASE_PATH}/api/runs/${encodeURIComponent(runId)}/download/xlsx`;
+}
+
 /** Report whether the backend answers `GET /health`. */
 export async function fetchHealth({ signal } = {}) {
   const payload = await request("/health", { signal });
@@ -179,7 +214,7 @@ async function errorFrom(response) {
   }
 
   // A 5xx that does not carry the backend's own error object never reached a
-  // working FastAPI: the same-origin proxy answers 500 with a plain body when
+  // working FastAPI: the same-origin handler answers 502 with a plain body when
   // it cannot connect (build plan 6G.9, "disconnected backend"). Every error
   // FastAPI raises deliberately — including a failed Action, which is also
   // 500 — arrives structured and is reported in its own words instead.
