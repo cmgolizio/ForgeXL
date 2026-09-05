@@ -18,6 +18,7 @@ what they claim to be, so the generator is tested before it is trusted:
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
@@ -30,11 +31,28 @@ from tests.helpers import normalise_rows
 CATALOGUE_IDS = [table.name for table in fx.CATALOGUE]
 WORKBOOK_IDS = [workbook.name for workbook in fx.WORKBOOKS]
 
+
+def test_workbook_bytes_do_not_change_when_the_clock_changes(monkeypatch) -> None:
+    import xlsxwriter.core
+
+    class Clock(datetime):
+        year_now = 2025
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls(cls.year_now, 1, 1, tzinfo=tz or timezone.utc)
+
+    monkeypatch.setattr(xlsxwriter.core, "datetime", Clock)
+    monkeypatch.setattr(fx, "datetime", Clock)
+    first = fx.SIMPLE_TABLE.as_xlsx()
+    Clock.year_now = 2026
+    assert fx.SIMPLE_TABLE.as_xlsx() == first
+
 #: The catalogue minus the one fixture whose values are format-dependent.
 #:
 #: `MIXED_VALUES` holds numbers and text in one column, and a column has one
-#: type: the CSV reader makes the whole column text, and the XLSX reader makes
-#: it numeric. Neither result equals the Python literals the fixture is written
+#: type: both readers preserve mixed values by making the whole column text.
+#: Neither result equals the Python literals the fixture is written
 #: from, so the sweeps below would be asserting the wrong thing for it. It is
 #: covered explicitly instead, one test per format, further down.
 HOMOGENEOUS = tuple(table for table in fx.CATALOGUE if table is not fx.MIXED_VALUES)
@@ -150,19 +168,6 @@ def test_a_mixed_column_uploaded_as_csv_keeps_every_value_as_text() -> None:
     assert parsed.frame["Value"].to_list() == ["10", "n/a", "2.5", None, "-3", "0"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect: the preferred XLSX engine (fastexcel/calamine) types a "
-        "mixed column numerically and turns every non-numeric cell into a "
-        "null, so the text 'n/a' is destroyed rather than reported. That "
-        "contradicts build plan section 3.3 ('never silently substitute "
-        "missing data'). Recorded in docs/implementation-status.md; the fix "
-        "is a parser decision this phase was not asked to make. This test "
-        "states the correct behaviour, and is strict so that fixing the "
-        "parser fails the suite until the marker is removed."
-    ),
-)
 def test_a_mixed_column_uploaded_as_xlsx_keeps_every_value() -> None:
     """The XLSX path must not silently blank a cell it cannot type.
 
@@ -174,6 +179,8 @@ def test_a_mixed_column_uploaded_as_xlsx_keeps_every_value() -> None:
 
     values = parsed.frame["Value"].to_list()
     assert values[1] is not None, "the text 'n/a' was silently dropped"
+    assert values == ["10", "n/a", "2.5", None, "-3", "0"]
+    assert parsed.parser_engine == parser.ENGINE_OPENPYXL
 
 
 def test_the_mixed_column_fixture_really_does_store_text_in_the_workbook() -> None:

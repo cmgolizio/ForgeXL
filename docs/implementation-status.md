@@ -1,6 +1,6 @@
 # Implementation Status
 
-Last Updated: 2026-09-04
+Last Updated: 2026-09-05
 Current Phase: None
 Last Completed Phase: Phase 6H — Synthetic Spreadsheet Fixtures and End-to-End
 Regression Tests
@@ -21,6 +21,102 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Pre-6I Blocker Repairs — 2026-09-05
+
+**Scope:** the user explicitly deferred Phase 6I and authorised fixing the
+verified blockers, then committing and pushing a separate branch. Phase 6H
+remains the last completed phase. **Phase 6I and Phase 7 are not started.**
+The repository was verified as `cmgolizio/ForgeXL`, based on main commit
+`b833db01475d72ab1f6fbdf6e03b04d82c439ee6`. Both authoritative documents were
+read completely before the repair work; the existing application and test
+contracts were inspected. Historical entries below describe their own phases.
+
+**Repairs**
+
+- **Memory-only HTTP upload intake.** The baseline wrote a 1,100,006-byte
+  upload through `tempfile.TemporaryFile` once; disabling that filesystem call
+  made the request fail with HTTP 500. `api/upload_form.py` now bounds each
+  file while parsing the incoming multipart stream, before Starlette queues
+  bytes for writing. Its per-request spool threshold equals the configured
+  limit, so no accepted upload can roll onto disk. Oversized files retain
+  `FILE_TOO_LARGE` / HTTP 413. An intake rejection occurs before a Run exists;
+  the runner's own size check and failed-Run recording remain for direct
+  service callers. Buffers close on success, rejection, truncation and
+  disconnect. Duplicate fields are rejected rather than silently overwritten;
+  malformed or incomplete forms return structured `INVALID_REQUEST` / 400.
+- **Responsive backend during a Run.** The endpoint awaits the existing
+  synchronous runner in Starlette's thread pool, allowing health and preview
+  requests to proceed while an Action runs. There is no background job API,
+  queue, or change to the response contract.
+- **XLSX preservation (Known Issue 65).** Strict full-column inference plus a
+  targeted null-position check detects the pinned reader's silent loss. The
+  existing openpyxl fallback preserves mixed columns as text and records a
+  visible warning. Numeric-only columns remain numeric. Both real Actions,
+  preview, CSV and XLSX export preserve the repaired values.
+- **Deterministic spreadsheet fixtures.** An actual regression run failed the
+  byte-equality test across a clock tick because XLSX core metadata used the
+  current time. Fixture workbooks now carry a fixed creation timestamp. A
+  clock-change regression verifies that workbook bytes remain identical.
+
+**Files created**
+
+- `backend/app/api/upload_form.py`
+- `backend/tests/test_upload_form.py`
+- `backend/tests/test_mixed_xlsx_round_trip.py`
+
+**Files modified**
+
+- `backend/app/api/runs.py`
+- `backend/app/services/parser.py`
+- `backend/app/services/runner.py`
+- `backend/tests/fixtures/spreadsheets.py`
+- `backend/tests/test_parser.py`
+- `backend/tests/test_spreadsheet_fixtures.py`
+- `docs/implementation-status.md`
+
+**Files deleted:** none. No dependency manifests, frontend files, build-plan
+sections, or deferred filesystem cleanup were changed.
+
+**Verification**
+
+| Check | Result |
+| --- | --- |
+| Baseline `cd backend && .venv/bin/python -m pytest` | 1,011 passed, 1 xfailed, 2 upstream warnings |
+| Final backend suite | 1,039 passed, no failures/skips/xfails; 2 existing upstream warnings |
+| `npx --yes pyright` | 0 errors, 0 warnings, 0 informations |
+| `npm run lint` | Exit 0; no ESLint findings |
+| `NEXT_TELEMETRY_DISABLED=1 npm run build` | Exit 0; `/`, `/_not-found`, dynamic `/forge-api/[...path]` built |
+| `git diff --check` | Exit 0 |
+| Real Next production server -> uvicorn, with `tempfile.TemporaryFile` replaced by a failure | 12,297,013-byte CSV accepted; 3,000 input rows -> 1 expected unique row; preview and CSV/XLSX downloads passed |
+| Live proxy size rejection, temporary verification limit 16 MiB | 16 MiB + 1 byte returned structured 413 / `FILE_TOO_LARGE`; repository default stays 250 MiB |
+| Live proxy malformed/truncated requests | Structured 400 / `INVALID_REQUEST`; backend remained healthy |
+| Live mixed-XLSX request and reopened export | All six values preserved, `openpyxl` recorded, mixed-type warning present |
+| Chromium 149 via Playwright, real page and file input | Mixed XLSX upload -> visible warning and `n/a` preview -> clicked XLSX download -> independently reopened with all six values intact |
+| Chromium large upload | 12,297,013-byte file selected and run; 3,000 -> 1 rows; clicked CSV download matched exact expected bytes |
+| Browser errors/network and visual inspection | No page errors; all API requests used the page's `/forge-api` origin; warning and preview were readable |
+
+The two warnings originate in Starlette's test client: its deprecated httpx
+integration and its use of the deprecated AnyIO BlockingPortal alias. Neither
+was hidden or suppressed. Fresh local dependencies were installed for this
+verification; no repository dependency was changed. The npm runner's unknown
+`http-proxy` environment-setting warning was avoided by unsetting only that
+unsupported npm setting for lint/type-check invocations. Browser verification
+used temporary tooling outside the repository: the browser CLI could not
+start, so the existing Playwright runtime drove Chromium instead. Verification
+servers and the browser were stopped afterwards.
+
+**Limits and phase boundaries:** a second physical Mac, Finder/native picker
+behaviour and Microsoft Excel acceptance remain unverified (Known Issue 64).
+The nullable-column text check and mixed-workbook fallback cost additional
+XLSX parsing work; no Phase 7 performance claim or benchmark is made. Aggregate
+Run Store retention remains Phase 7 work. The multipart adapter uses
+Starlette's parser callbacks/state and must retain its regressions across
+future dependency upgrades. These repairs introduce no architectural deviation
+from the build plan. They implement its existing accuracy and in-memory
+requirements under the user's explicit instruction to resolve blockers now.
+
+---
 
 ### Phase 0 — Repository Audit and Build Contract
 
@@ -4449,55 +4545,26 @@ them. The file was restored and re-verified clean.
 
 **Added in Phase 6H:**
 
-65. **An Excel upload silently destroys a column that mixes numbers and text.**
-    The one open correctness defect this phase found, and the reason a fixture
-    for "mixed numeric/text values" was worth building.
+65. **Resolved before Phase 6I: mixed numeric/text XLSX values were silently
+    lost.** The old preferred read turned `[10, "n/a", 2.5, None, -3, 0]`
+    into `[10.0, None, 2.5, None, -3.0, 0.0]`. The user explicitly authorised
+    blocker repairs on 2026-09-05 and deferred Phase 6I to the next session.
 
-    A column holding `10`, `n/a`, `2.5`, blank, `-3`, `0` — what a spreadsheet
-    contains the moment someone types "n/a" into a numeric column — reads back
-    differently depending on the upload format:
+    The preferred engine now uses strict, full-column inference. Because the
+    pinned fastexcel version can still null literal `n/a` under those settings,
+    nullable columns are checked against an explicit text read of the same
+    worksheet. A newly blanked cell triggers the existing openpyxl fallback;
+    genuine blanks do not. Homogeneous columns keep their native types.
+    Incompatible cell types in the fallback become text, with a visible
+    `MIXED_COLUMN_TYPES` validation/audit warning naming the affected columns.
+    The manifest records `openpyxl` when that engine produced the input frame.
 
-        as CSV    ["10", "n/a", "2.5", None, "-3", "0"]    nothing lost
-        as XLSX   [10.0,  None,  2.5,  None, -3.0, 0.0]    "n/a" destroyed
-
-    fastexcel/calamine, the preferred engine, types the column `f64` and turns
-    every non-numeric cell into a null. **No error, no warning, no entry in the
-    manifest** — the value is in the user's file and not in ForgeXL's result.
-    That contradicts build plan section 3.3 on two counts: "never silently
-    substitute missing data" and "never silently convert invalid data into
-    valid-looking data".
-
-    Three things were established before recording it rather than fixing it:
-    - **The workbook genuinely stores text.** openpyxl reads the same bytes and
-      returns `"n/a"` intact, so this is the reader and not the fixture
-      builder. A test asserts exactly that, so the finding cannot later be
-      dismissed as a fixture bug.
-    - **The compatibility fallback does not have the defect.** The two engines
-      disagree about the same file, which also means an engine switch is a
-      real option.
-    - **No fastexcel setting avoids it.** `dtype_coercion="strict"` and
-      `schema_sample_rows=None` were both measured and both still coerce.
-      `dtypes="string"` preserves everything but makes _every_ numeric column
-      text.
-
-    **Nothing in the parser was changed.** The three candidate fixes are a
-    second read per workbook to detect the loss (roughly doubling XLSX parse
-    cost, which build plan 7H owns), forcing all columns to string (a
-    behaviour change on every XLSX upload, affecting preview column kinds and
-    export formatting), or a per-workbook engine switch. Choosing between
-    _refuse the upload_, _warn in the manifest_ and _fall back to openpyxl_ is
-    a product decision rather than an implementation detail, and build plan 6H
-    asks for fixtures and regression tests, not a parser redesign.
-
-    So the correct behaviour is stated as a test carrying
-    `@pytest.mark.xfail(strict=True)`
-    (`test_spreadsheet_fixtures.py::test_a_mixed_column_uploaded_as_xlsx_keeps_every_value`).
-    Today it xfails and the suite is green; the day the parser is fixed it
-    XPASSes and, because the marker is strict, **fails the suite** until the
-    marker is removed — verified by pointing `_parse_xlsx` at the openpyxl
-    implementation and watching it fail. **This needs a decision from the
-    user**; it is not resolved, and it should not be closed by deleting the
-    test.
+    The original regression remains, its strict xfail marker is removed, and
+    its assertions now check **all six values**, not just one non-null cell.
+    Additional tests cover null-like strings, text after row 1,000, mixed
+    booleans/numbers, fallback failure, and both real Actions through preview
+    and CSV/XLSX downloads. No test was weakened. The suite has no xfails.
+    See **Pre-6I Blocker Repairs** for verification and remaining limitations.
 
 66. **The `/forge-api` proxy still has no committed regression test.** Build
     plan 6H's eight required items are all about spreadsheet fixtures and
@@ -4552,9 +4619,10 @@ them. The file was restored and re-verified clean.
     evidence for that layer, and they still live in the session scratchpad
     (Deviation 22).
 
-None of Known Issues 1-64 blocks Phase 6I. **Known Issue 65 is the exception
-that needs an answer** — it is an accuracy defect in shipping code, not a
-testing gap, and Phase 6I is a cleanup phase that will not encounter it.
+Known Issue 65 is now resolved by the user-authorised pre-6I repairs. No
+remaining code blocker was found in this repair pass. Known Issue 64 remains
+an outstanding target-hardware acceptance check; the other deferred work
+keeps its existing phase ownership.
 
 ---
 
@@ -5035,11 +5103,12 @@ Phase 6H. `services/storage.py` still holds its dead runtime code,
 documented in `.env.example`, `data/runs/` still exists with its `.gitkeep`,
 and `docs/` still has no architecture document.
 
-**Where 6I starts from.** The backend suite is **1,011 passed + 1 xfailed**,
-`npx pyright` is clean, `npx eslint` is clean and `npm run build` succeeds.
-Phase 6H changed no application code, so the runtime 6I inherits is exactly the
-one 6G left — but it is now covered by a regression suite that runs from
-`pytest` alone, which is what makes 6I's deletions safe to make.
+**Where 6I starts from.** The backend suite is **1,039 passed, zero xfails**,
+with two existing upstream deprecation warnings. Python type checks and
+ESLint are clean; the production build succeeds. The user-authorised
+**Pre-6I Blocker Repairs** below the Completed heading fixed upload intake,
+XLSX value preservation, and fixture determinism without executing Phase 6I.
+The historical Phase 6H sections retain their original test counts.
 
 **What Phase 6I owns** (build plan 6I.1-6I.9)
 
@@ -5081,17 +5150,14 @@ one 6G left — but it is now covered by a regression suite that runs from
 - **`test_contract_freeze.py` is byte-identical to its 6F state** and 6I has no
   reason to change it. If `FROZEN_ROUTES` needs an edit during a _cleanup_
   phase, something has changed that 6I was not asked to change.
-- **The strict xfail must not be deleted to tidy the suite** (Known Issue 65).
-  It is tracking an unfixed accuracy defect in the parser. Removing it removes
-  the only thing that will notice when the defect is fixed — or that it never
-  was.
+- **Keep the mixed-XLSX regression and the upload-intake tests.** Known Issue
+  65 is fixed and its assertions are now ordinary passing tests. In particular,
+  a small TestClient upload cannot by itself prove that a large multipart
+  upload stays in memory; retain the temporary-file failure spy and the
+  streaming limit/disconnect checks.
 
 **What later phases still own**
 
-- **Known Issue 65** — the XLSX mixed-column defect. It is an accuracy problem
-  in shipping code, it needs a product decision (refuse / warn / switch
-  engines), and it belongs with build plan 7B ("Data Edge Cases") and 7F
-  ("Workbook Cases") unless the user wants it sooner.
 - **Phase 7A** — whether the committed suite should drive Next.js at all
   (Deviation 22, Known Issues 66 and 69). 6H deliberately did not, so the proxy
   and the real-HTTP layer are still verified by scratchpad scripts rewritten
@@ -5122,8 +5188,7 @@ things testable without a second machine.
 The first must show whether a completed phase is sitting on a branch `main`
 does not contain (Known Issue 54 — it has been, twice). The second must show
 the backend modules under `backend/`. The third must print nothing. The fourth
-must report **1011 passed, 1 xfailed**. The fifth must succeed. All five passed
-at the start of Phase 6H, which is the first time in this project that has been
-true.
+must report **1039 passed, zero xfails** at this repair baseline. The fifth
+must succeed. Recheck the current branch and test counts when later work lands.
 
 Do not begin Phase 7.

@@ -28,9 +28,11 @@ from datetime import datetime
 
 import polars as pl
 from fastapi import APIRouter, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from app.actions import registry
+from app.api.upload_form import read_run_form
 from app.errors import (
     InvalidRequestError,
     MissingArtifactError,
@@ -72,7 +74,7 @@ async def create_run(request: Request) -> RunManifest:
 
     The Run executes synchronously; the POC deliberately has no job queue.
     """
-    async with request.form() as form:
+    async with read_run_form(request) as form:
         raw_action_id = form.get(ACTION_ID_FIELD)
         if not isinstance(raw_action_id, str) or not raw_action_id.strip():
             raise InvalidRequestError(
@@ -95,7 +97,10 @@ async def create_run(request: Request) -> RunManifest:
         # Runs inside the form context: the uploaded streams stay open until
         # the runner has read them into memory (build plan 6C.3). Nothing the
         # user uploads is written to the server's filesystem.
-        return execute_run(action, uploads).manifest
+        # Keep the response synchronous while allowing health/preview requests
+        # to proceed during CPU-bound parsing and Action execution.
+        outcome = await run_in_threadpool(execute_run, action, uploads)
+        return outcome.manifest
 
 
 @router.get("/runs/{run_id}", response_model=RunManifest)

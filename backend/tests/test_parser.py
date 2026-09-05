@@ -24,6 +24,49 @@ from app.services import parser
 from tests.helpers import csv_bytes, xlsx_bytes
 
 
+@pytest.mark.parametrize("text", ["n/a", "N/A", "NA", "NULL", "unknown", "001", "  n/a  "])
+def test_mixed_xlsx_values_survive_including_null_like_text(text: str) -> None:
+    payload = xlsx_bytes({"Data": [["Value", "Number"], [10, 1], [text, 2], [None, 3]]})
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+    assert parsed.frame["Value"].to_list() == ["10", text, None]
+    assert parsed.frame["Number"].to_list() == [1, 2, 3]
+    assert parsed.frame["Number"].dtype.is_numeric()
+
+
+def test_text_beyond_the_old_xlsx_sampling_window_is_preserved() -> None:
+    payload = xlsx_bytes({"Data": [["Value"], *[[10]] * 1_100, ["late text"]]})
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+    assert parsed.frame["Value"].to_list() == ["10"] * 1_100 + ["late text"]
+    assert parsed.parser_engine == parser.ENGINE_OPENPYXL
+
+
+def test_mixed_boolean_and_numeric_xlsx_cells_are_not_collapsed() -> None:
+    payload = xlsx_bytes({"Data": [["Value"], [True], [1], [False], [0]]})
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+    assert parsed.frame["Value"].to_list() == ["True", "1", "False", "0"]
+
+
+def test_genuine_numeric_blanks_keep_the_preferred_engine() -> None:
+    payload = xlsx_bytes({"Data": [["Value", "Row"], [10, 1], [None, 2], [2.5, 3]]})
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+    assert parsed.frame["Value"].to_list() == [10, None, 2.5]
+    assert parsed.frame["Value"].dtype.is_numeric()
+    assert parsed.parser_engine == parser.ENGINE_FASTEXCEL
+
+
+def test_cell_loss_with_an_unavailable_fallback_is_a_parse_error(monkeypatch) -> None:
+    payload = xlsx_bytes({"Data": [["Value"], [10], ["n/a"]]})
+
+    def fail(_payload):
+        raise RuntimeError("Fallback unavailable")
+
+    monkeypatch.setattr(parser, "_parse_xlsx_with_openpyxl", fail)
+    with pytest.raises(FileParseError) as raised:
+        parser.parse_tabular_bytes(payload, ".xlsx")
+    assert "discard cell values" in raised.value.details["primary_reason"]
+    assert "Fallback unavailable" in raised.value.details["fallback_reason"]
+
+
 # ---------------------------------------------------------------------------
 # 3.4 Dispatch and supported extensions
 # ---------------------------------------------------------------------------

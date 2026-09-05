@@ -15,8 +15,9 @@ Accuracy rules this module follows:
 * **Nothing is guessed silently.** A parse failure is reported as a parse
   failure. The module never retries with progressively stranger delimiters or
   settings in the hope that one sticks (build plan 3.5).
-* **Nothing is reinterpreted.** Values are read as the parser reads them; no
-  date coercion, trimming or normalisation is applied on top
+* **No value is silently discarded or normalised.** Mixed Excel cell types
+  are preserved as text, with the affected columns reported to the runner
+  for a visible warning. No trimming or date repair is applied
   (build plan section 3.3).
 * **No engine switch is hidden.** If the preferred Excel engine fails and the
   compatibility fallback succeeds, the fallback is what gets recorded
@@ -71,6 +72,9 @@ class ParsedFile:
 
     #: Worksheet the rows came from; ``None`` for CSV.
     worksheet: str | None = None
+
+    #: Columns preserved as text because their Excel cells have incompatible types.
+    mixed_columns: tuple[str, ...] = ()
 
     @property
     def row_count(self) -> int:
@@ -154,7 +158,7 @@ def _parse_xlsx(payload: bytes) -> ParsedFile:
     """Read a single-data-sheet XLSX workbook from memory.
 
     fastexcel (calamine) is the preferred engine. If it cannot open the
-    workbook at all, openpyxl is tried as the compatibility fallback and
+    workbook accurately, openpyxl is tried as the compatibility fallback and
     whichever engine succeeded is what the manifest records.
 
     A refusal about the workbook's *structure* — no data sheet, or several —
@@ -201,9 +205,28 @@ def _parse_xlsx_with_fastexcel(payload: bytes) -> ParsedFile:
     worksheet = _select_data_worksheet(
         {name: _fastexcel_sheet_has_data(reader, name) for name in reader.sheet_names}
     )
-    sheet = reader.load_sheet(worksheet, header_row=0)
+    sheet = reader.load_sheet(
+        worksheet, header_row=0, schema_sample_rows=None, dtype_coercion="strict"
+    )
+    frame = sheet.to_polars()
+    # Even strict coercion in the pinned reader can treat literal text such as
+    # "n/a" as null in a numeric column. Compare null positions with an explicit
+    # text read of just the nullable columns. Real blanks stay null in both;
+    # any newly blanked value makes this an engine failure, invoking the
+    # existing, recorded openpyxl fallback. No all-string frame reaches an
+    # Action through this check, and non-nullable sheets need no second read.
+    nullable = [column.name for column in frame if column.null_count()]
+    if nullable:
+        source_text = reader.load_sheet(
+            worksheet, header_row=0, use_columns=nullable, dtypes="string"
+        ).to_polars()
+        if source_text.height != frame.height or any(
+            (frame[name].is_null() & source_text[name].is_not_null()).any()
+            for name in nullable
+        ):
+            raise ValueError("The preferred XLSX reader would discard cell values.")
     return ParsedFile(
-        frame=sheet.to_polars(),
+        frame=frame,
         parser_engine=ENGINE_FASTEXCEL,
         worksheet=worksheet,
     )
@@ -249,6 +272,7 @@ def _parse_xlsx_with_openpyxl(payload: bytes) -> ParsedFile:
     workbook = openpyxl.load_workbook(
         io.BytesIO(payload), read_only=True, data_only=True, keep_links=False
     )
+    mixed_columns: list[str] = []
     try:
         worksheet_name = _select_data_worksheet(
             {
@@ -257,13 +281,17 @@ def _parse_xlsx_with_openpyxl(payload: bytes) -> ParsedFile:
             }
         )
         frame = _frame_from_rows(
-            workbook[worksheet_name].iter_rows(values_only=True)
+            workbook[worksheet_name].iter_rows(values_only=True),
+            mixed_columns=mixed_columns,
         )
     finally:
         workbook.close()
 
     return ParsedFile(
-        frame=frame, parser_engine=ENGINE_OPENPYXL, worksheet=worksheet_name
+        frame=frame,
+        parser_engine=ENGINE_OPENPYXL,
+        worksheet=worksheet_name,
+        mixed_columns=tuple(mixed_columns),
     )
 
 
@@ -281,7 +309,9 @@ def _openpyxl_sheet_has_data(worksheet: Any) -> bool:
     return any(True for _ in worksheet.iter_rows(max_row=1, values_only=True))
 
 
-def _frame_from_rows(rows: Iterable[tuple[Any, ...]]) -> pl.DataFrame:
+def _frame_from_rows(
+    rows: Iterable[tuple[Any, ...]], *, mixed_columns: list[str] | None = None
+) -> pl.DataFrame:
     """Build a dataframe from openpyxl's row tuples, first row as the header."""
     iterator: Iterator[tuple[Any, ...]] = iter(rows)
     try:
@@ -302,6 +332,23 @@ def _frame_from_rows(rows: Iterable[tuple[Any, ...]]) -> pl.DataFrame:
         # Pad short rows so every record matches the header width.
         values.extend([None] * (len(column_names) - len(values)))
         data_rows.append(values)
+
+    # One Polars column has one type. Preserve incompatible Excel cell types
+    # as text instead of letting construction coerce booleans into numbers or
+    # discard strings. Integers and floats remain one numeric family.
+    for index in range(len(column_names)):
+        kinds = {
+            "number" if type(row[index]) in (int, float) else type(row[index])
+            for row in data_rows
+            if row[index] is not None
+        }
+        if len(kinds) > 1:
+            if mixed_columns is not None:
+                mixed_columns.append(column_names[index])
+            for row in data_rows:
+                value = row[index]
+                if value is not None:
+                    row[index] = str(value)
 
     return pl.DataFrame(
         data_rows or None,
