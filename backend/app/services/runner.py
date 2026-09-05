@@ -149,6 +149,20 @@ def execute_run(
         loaded, input_issues = _read_and_check_slots(action, uploads)
         parsed, parse_issues = _parse_inputs(action, loaded)
         issues = [*input_issues, *parse_issues]
+        warnings += tuple(
+            ValidationIssue(
+                code="MIXED_COLUMN_TYPES",
+                message=(
+                    "Excel columns with mixed cell types were preserved as text: "
+                    + ", ".join(item.mixed_columns)
+                    + "."
+                ),
+                slot_id=slot_id,
+                details={"columns": list(item.mixed_columns)},
+            )
+            for slot_id, item in parsed.items()
+            if item.mixed_columns
+        )
 
         input_records = tuple(_input_metadata(loaded, parsed))
         # The uploaded bytes have served their purpose: everything downstream

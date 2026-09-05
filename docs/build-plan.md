@@ -1636,25 +1636,7 @@ This gives future AI threads durable project context.
 
 # 34. Estimated Build Effort
 
-These estimates represent active AI-assisted development effort and are not guarantees.
-
-    Phase 0     0.5–1 hour
-    Phase 1     1–3 hours
-    Phase 2     2–4 hours
-    Phase 3     3–5 hours
-    Phase 4     2–4 hours
-    Phase 5     3–5 hours
-    Phase 6     2–4 hours
-    Phase 7     3–6 hours
-    Phase 8     1–2 hours
-
-Estimated total:
-
-    approximately 18–34 active development hours
-
-A human-only implementation may take materially longer.
-
-Accuracy and validation are more important than hitting these estimates.
+Accuracy and validation are the most important traits while completing the phases within this build-plan.
 
 ---
 
@@ -4974,7 +4956,6 @@ Favor:
 
 The POC succeeds if the user can drop in raw data, choose a trusted Action, run it, understand what happened, and confidently use the result.
 
-
 # ============================================================
 
 # POST-POC PRODUCT EXPANSION
@@ -5043,27 +5024,27 @@ The original POC intentionally prohibited several capabilities that are now requ
 
 This section explicitly authorizes:
 
-* a persistent local Data Library
-* saved reference datasets
-* versioned historical datasets
-* persistent monthly account snapshots
-* richer generated Excel artifacts
-* multiple generated files from one Run
-* ZIP/batch downloads
-* a dedicated recurring-workflow UI built on top of the generic ForgeXL backend architecture
+- a persistent local Data Library
+- saved reference datasets
+- versioned historical datasets
+- persistent monthly account snapshots
+- richer generated Excel artifacts
+- multiple generated files from one Run
+- ZIP/batch downloads
+- a dedicated recurring-workflow UI built on top of the generic ForgeXL backend architecture
 
 This does **not** automatically authorize:
 
-* cloud storage
-* remote SaaS databases
-* authentication
-* multi-user support
-* public deployment
-* AI-generated business rules
-* fuzzy matching
-* scheduled jobs
-* automatic email distribution
-* external analytics or telemetry
+- cloud storage
+- remote SaaS databases
+- authentication
+- multi-user support
+- public deployment
+- AI-generated business rules
+- fuzzy matching
+- scheduled jobs
+- automatic email distribution
+- external analytics or telemetry
 
 ForgeXL remains local-first unless a later build-plan update explicitly changes that requirement.
 
@@ -5270,13 +5251,13 @@ Regenerating the September report later must use the September ownership snapsho
 
 Automated tests must prove:
 
-* a dataset version survives backend restart
-* dataset metadata survives backend restart
-* multiple versions of one logical dataset can coexist
-* an older version can be loaded explicitly
-* replacing a period does not silently destroy the previous version
-* account snapshots remain independently retrievable
-* invalid/corrupt commits do not leave partially valid persistent state
+- a dataset version survives backend restart
+- dataset metadata survives backend restart
+- multiple versions of one logical dataset can coexist
+- an older version can be loaded explicitly
+- replacing a period does not silently destroy the previous version
+- account snapshots remain independently retrievable
+- invalid/corrupt commits do not leave partially valid persistent state
 
 ---
 
@@ -5348,12 +5329,12 @@ Validate applicable dates contained inside the dataset.
 
 The program must detect situations such as:
 
-* wrong month uploaded
-* file spanning an unexpected period
-* empty reporting period
-* future-dated rows
-* duplicate monthly upload
-* mismatched periods between related files
+- wrong month uploaded
+- file spanning an unexpected period
+- empty reporting period
+- future-dated rows
+- duplicate monthly upload
+- mismatched periods between related files
 
 Where automatic determination is genuinely ambiguous, require explicit user selection rather than guessing.
 
@@ -5394,12 +5375,12 @@ Import the current sales-rep/account assignment list as the snapshot for the app
 
 Validate at minimum:
 
-* required customer identifier
-* required sales rep identifier
-* duplicate customer assignments where ownership is expected to be unique
-* blank customer names
-* blank rep names
-* rows that cannot be assigned safely
+- required customer identifier
+- required sales rep identifier
+- duplicate customer assignments where ownership is expected to be unique
+- blank customer names
+- blank rep names
+- rows that cannot be assigned safely
 
 Preserve the full source snapshot required to reproduce the month later.
 
@@ -5541,12 +5522,12 @@ The Run manifest must record those resolved IDs.
 
 Verify:
 
-* old upload-backed Actions still work
-* library-backed inputs resolve correctly
-* specific old versions can be selected
-* a Run records exact dataset provenance
-* changing the current library version does not change an already recorded Run's input identity
-* missing library data fails clearly
+- old upload-backed Actions still work
+- library-backed inputs resolve correctly
+- specific old versions can be selected
+- a Run records exact dataset provenance
+- changing the current library version does not change an already recorded Run's input identity
+- missing library data fails clearly
 
 ---
 
@@ -5640,21 +5621,21 @@ Create reusable XLSX helpers for report-quality workbooks.
 
 Support as required:
 
-* multiple worksheets
-* formatted headers
-* currency formats
-* percentage formats
-* integer/decimal formats
-* sensible date formats
-* column widths
-* row heights where necessary
-* frozen panes
-* filters
-* tables
-* conditional formatting
-* worksheet ordering
-* readable totals
-* consistent styling
+- multiple worksheets
+- formatted headers
+- currency formats
+- percentage formats
+- integer/decimal formats
+- sensible date formats
+- column widths
+- row heights where necessary
+- frozen panes
+- filters
+- tables
+- conditional formatting
+- worksheet ordering
+- readable totals
+- consistent styling
 
 Do not implement business calculations in the XLSX formatting layer.
 
@@ -5691,9 +5672,9 @@ The ZIP must be generated safely and must not allow artifact filenames to create
 
 Add generic frontend support for:
 
-* listing generated artifacts
-* downloading an individual artifact
-* downloading all artifacts where a batch download is available
+- listing generated artifacts
+- downloading an individual artifact
+- downloading all artifacts where a batch download is available
 
 Do not hardcode sales-rep names into the frontend.
 
@@ -5737,30 +5718,30 @@ This document becomes the authoritative specification for this Action.
 
 Derive it from:
 
-* the current verified Excel monthly report
-* the existing Power Query logic
-* accepted business definitions
-* manually verified results from a completed month
+- the current verified Excel monthly report
+- the existing Power Query logic
+- accepted business definitions
+- manually verified results from a completed month
 
 Document exactly:
 
-* source datasets
-* accepted schemas
-* invoice/sample rules
-* date-window rules
-* sales-rep ownership rules
-* account rules
-* company-vs-rep comparison rules
-* supplier calculations
-* percentage calculations
-* placement definitions
-* sample definitions
-* required report sections
-* sorting rules
-* displayed totals
-* treatment of credits/returns where applicable
-* treatment of missing ownership
-* treatment of zero/null values
+- source datasets
+- accepted schemas
+- invoice/sample rules
+- date-window rules
+- sales-rep ownership rules
+- account rules
+- company-vs-rep comparison rules
+- supplier calculations
+- percentage calculations
+- placement definitions
+- sample definitions
+- required report sections
+- sorting rules
+- displayed totals
+- treatment of credits/returns where applicable
+- treatment of missing ownership
+- treatment of zero/null values
 
 Do not invent a formula merely because it appears reasonable.
 
@@ -5883,16 +5864,16 @@ Detect conditions that could make apparently polished reports factually unreliab
 
 Examples include:
 
-* unrecognized sales reps
-* missing account ownership
-* duplicate account ownership
-* malformed invoice dates
-* unexpected invoice types
-* missing required monetary/quantity fields
-* reporting-period mismatch
-* unexplained source-schema changes
-* duplicate monthly source data
-* missing historical comparison period
+- unrecognized sales reps
+- missing account ownership
+- duplicate account ownership
+- malformed invoice dates
+- unexpected invoice types
+- missing required monetary/quantity fields
+- reporting-period mismatch
+- unexplained source-schema changes
+- duplicate monthly source data
+- missing historical comparison period
 
 Where a condition makes the report unsafe, fail rather than producing a plausible-looking workbook.
 
@@ -5908,14 +5889,14 @@ Create synthetic or sanitized test fixtures that reproduce representative busine
 
 Verify exact expected results for:
 
-* rep totals
-* company totals
-* account metrics
-* supplier metrics
-* percentage calculations
-* placements
-* sample counts
-* representative detail rows
+- rep totals
+- company totals
+- account metrics
+- supplier metrics
+- percentage calculations
+- placements
+- sample counts
+- representative detail rows
 
 Do not validate only row counts.
 
@@ -5975,17 +5956,17 @@ Create one reusable workbook-rendering system.
 
 Apply consistent:
 
-* title/header structure
-* date/report-period labeling
-* currency formatting
-* percentage formatting
-* quantity formatting
-* column widths
-* alignment
-* frozen panes
-* filters
-* totals
-* visual hierarchy
+- title/header structure
+- date/report-period labeling
+- currency formatting
+- percentage formatting
+- quantity formatting
+- column widths
+- alignment
+- frozen panes
+- filters
+- totals
+- visual hierarchy
 
 Do not create slightly different formatting logic for every rep.
 
@@ -6048,14 +6029,14 @@ Programmatically reopen generated XLSX files.
 
 Verify:
 
-* workbook opens
-* expected worksheets exist
-* headers are correct
-* representative values equal the calculation DataFrames
-* percentages remain numeric
-* currency values remain numeric
-* workbook contains no corrupted sheet names
-* artifact filenames are correct
+- workbook opens
+- expected worksheets exist
+- headers are correct
+- representative values equal the calculation DataFrames
+- percentages remain numeric
+- currency values remain numeric
+- workbook contains no corrupted sheet names
+- artifact filenames are correct
 
 Also manually open representative outputs in Microsoft Excel on Mac.
 
@@ -6113,13 +6094,13 @@ Account Assignments
 
 The frontend may orchestrate existing backend capabilities, but the backend remains authoritative for:
 
-* parsing
-* validation
-* persistence
-* reporting-period resolution
-* dataset versioning
-* report calculations
-* workbook generation
+- parsing
+- validation
+- persistence
+- reporting-period resolution
+- dataset versioning
+- report calculations
+- workbook generation
 
 ---
 
@@ -6198,10 +6179,10 @@ This is required for reproducibility and for fixing report-rendering code withou
 
 Select an older reporting period and regenerate it using:
 
-* its historical sales state
-* its historical sample state
-* its historical account snapshot
-* the intended Action version or clearly recorded current-version behavior
+- its historical sales state
+- its historical sample state
+- its historical account snapshot
+- the intended Action version or clearly recorded current-version behavior
 
 The system must not silently substitute today's account ownership for an older month.
 
@@ -6238,10 +6219,10 @@ Steps:
 
 Test:
 
-* uploading the exact same monthly sales file twice
-* uploading corrected sales data for an already committed month
-* uploading a different account snapshot for an already committed month
-* regenerating reports before and after an explicitly approved correction
+- uploading the exact same monthly sales file twice
+- uploading corrected sales data for an already committed month
+- uploading a different account snapshot for an already committed month
+- regenerating reports before and after an explicitly approved correction
 
 The program must make these state changes explicit.
 
@@ -6290,15 +6271,15 @@ The expansion is successful only if the normal monthly process has become approx
 
 The user must not need to:
 
-* append CSVs manually in Excel
-* edit Power Query source paths
-* recreate PivotTables
-* modify formulas
-* manually split reports by rep
-* manually copy company totals
-* manually calculate supplier percentages
-* manually create rep workbooks
-* manually rename each workbook
+- append CSVs manually in Excel
+- edit Power Query source paths
+- recreate PivotTables
+- modify formulas
+- manually split reports by rep
+- manually copy company totals
+- manually calculate supplier percentages
+- manually create rep workbooks
+- manually rename each workbook
 
 ---
 
@@ -6388,7 +6369,6 @@ The frontend orchestrates the workflow but does not calculate business results.
 ```
 
 Preserve these boundaries unless later evidence justifies changing them.
-
 
 ```
 

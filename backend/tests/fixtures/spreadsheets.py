@@ -39,6 +39,7 @@ import csv
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import xlsxwriter
@@ -74,6 +75,8 @@ def _write_workbook(sheets: Sequence[tuple[str, Rows]]) -> bytes:
     """
     buffer = io.BytesIO()
     workbook = xlsxwriter.Workbook(buffer, _WORKBOOK_OPTIONS)
+    # Core workbook metadata otherwise embeds the wall clock in every fixture.
+    workbook.set_properties({"created": datetime(2000, 1, 1, tzinfo=timezone.utc)})
     for name, rows in sheets:
         worksheet = workbook.add_worksheet(name)
         for row_index, row in enumerate(rows):
