@@ -1,24 +1,23 @@
-"""Upload intake, run directories and safe filenames.
+"""Upload intake and safe filenames.
 
-Covers build plan 3.1 (storage service), 3.2 (safe filenames), 3.3 (upload
-limit) and 6C.3-6C.4 (uploads read into memory).
+Covers build plan 3.2 (safe filenames), 3.3 (the upload limit) and 6C.3-6C.4
+(uploads read into memory).
 
-Two things have left this module as Phase 6 has progressed:
+Everything filesystem-shaped has now left this module:
 
 * A Run's *state* moved to :mod:`app.services.run_store` in Phase 6B.
 * An uploaded spreadsheet stopped reaching the disk in Phase 6C. An upload is
-  now read into memory and handed on as bytes; nothing is written and nothing
-  is reopened. What remains on disk is only the generated artifacts, until
-  Phase 6D/6F produce those in memory too.
+  read into memory and handed on as bytes; nothing is written and nothing is
+  reopened.
+* Result frames stayed in memory from Phase 6D, and CSV/XLSX bytes have been
+  generated per request since Phase 6F, so no Run produced a file either.
+* Phase 6I removed what that left behind: the run-directory tree, the
+  path-building helpers and the directory-deletion helper. This module builds
+  no path at all, and the backend has no configured data directory (build plan
+  6I.1).
 
-Two rules still shape this module:
+One rule still shapes it, and it is the reason the module still exists:
 
-* **The API never supplies a filesystem path.** Callers pass logical IDs — a
-  Run ID, an output ID — and this module derives every path from the
-  configured runs directory. A Run ID is accepted only after it parses as a
-  UUID, and output IDs only after they match a strict token pattern, so no
-  client-supplied value can escape the runs directory. Since 6C a slot ID
-  contributes to no path at all.
 * **An uploaded filename is metadata, never a path.** The bytes are held under
   a generated name; the name the browser sent is recorded in the manifest and
   used nowhere else (build plan section 16).
@@ -27,28 +26,20 @@ Two rules still shape this module:
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from app import config
-from app.errors import UnknownRunError, UploadTooLargeError
+from app.errors import UploadTooLargeError
 
-# Run identity belongs to the Run itself, not to the filesystem. Imported
-# rather than redefined so there is exactly one Run ID convention.
-from app.models.run import new_run_id, parse_run_id
-
-#: Slot and output IDs are declared by trusted Action code, but they are still
-#: checked before they contribute to a path: no dots, separators or spaces, so
-#: no ID can traverse out of its Run directory.
+#: Output IDs are declared by trusted Action code, but an extension derived
+#: from a client filename is still checked against this before it is used to
+#: build the generated name below.
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 #: Every upload is known by this base name; only the extension varies.
 STORED_UPLOAD_STEM = "source"
-
-_WORKING_DIRNAME = "working"
-_EXPORTS_DIRNAME = "exports"
 
 #: Read uploads in 1 MiB chunks so the limit is enforced during the read
 #: rather than after the whole file has been accumulated.
@@ -88,93 +79,6 @@ class LoadedUpload:
     def size_bytes(self) -> int:
         """Bytes actually received, counted rather than trusted from a header."""
         return len(self.payload)
-
-
-@dataclass(frozen=True)
-class RunPaths:
-    """Every path belonging to one Run, derived from its ID.
-
-    Instances are created by :func:`create_run` or :func:`run_paths`; nothing
-    else should build these paths by hand.
-    """
-
-    run_id: str
-    root: Path
-
-    @property
-    def working(self) -> Path:
-        return self.root / _WORKING_DIRNAME
-
-    @property
-    def exports(self) -> Path:
-        return self.root / _EXPORTS_DIRNAME
-
-    def working_artifact(self, output_id: str) -> Path:
-        """Internal Parquet representation of one output (build plan 28)."""
-        return self.working / f"{_safe_id(output_id, 'output')}.parquet"
-
-    def export_artifact(self, output_id: str, export_format: str) -> Path:
-        """User-facing export of one output, e.g. ``exports/product_master.csv``."""
-        return self.exports / (
-            f"{_safe_id(output_id, 'output')}.{_safe_id(export_format, 'format')}"
-        )
-
-
-def _safe_id(value: str, label: str) -> str:
-    """Return `value` unchanged, or raise if it could not be part of a path."""
-    if not SAFE_ID_PATTERN.fullmatch(value):
-        raise ValueError(f"Unsafe {label} id: {value!r}")
-    return value
-
-
-def runs_directory() -> Path:
-    """Root directory holding one subdirectory per Run.
-
-    Read through a function rather than captured at import time so tests can
-    redirect it and never touch the real ``data/runs``.
-    """
-    return config.RUNS_DIRECTORY
-
-
-def run_paths(run_id: str) -> RunPaths:
-    """Return the paths for `run_id` without creating anything."""
-    validated = parse_run_id(run_id)
-    return RunPaths(run_id=validated, root=runs_directory() / validated)
-
-
-def create_run(run_id: str | None = None) -> RunPaths:
-    """Create the directory tree for a new Run and return its paths.
-
-    Builds ``working/`` and ``exports/`` up front so later stages never have to
-    decide whether a directory exists. There is no ``inputs/`` directory since
-    Phase 6C: uploads are read into memory and never written.
-    """
-    paths = run_paths(run_id or new_run_id())
-    for directory in (paths.root, paths.working, paths.exports):
-        directory.mkdir(parents=True, exist_ok=True)
-    return paths
-
-
-def delete_run_directory(run_id: str) -> bool:
-    """Remove a Run's directory and everything in it, if it exists.
-
-    Called when a Run is deleted, so releasing a Run's runtime state also
-    releases the files it still keeps on disk (build plan 6B.6). Returns True
-    if a directory was removed.
-
-    Only a validated Run ID reaches this, and the directory is confirmed to be
-    a direct child of the runs directory before anything is removed: nothing
-    outside ``data/runs/<run-id>/`` can ever be deleted here. This function
-    disappears once Phase 6C/6F stop writing Run files at all.
-    """
-    try:
-        root = run_paths(run_id).root
-    except UnknownRunError:
-        return False
-    if not root.is_dir() or root.parent != runs_directory():
-        return False
-    shutil.rmtree(root)
-    return True
 
 
 def extension_of(filename: str) -> str:

@@ -209,9 +209,9 @@ def test_a_malformed_run_id_returns_404(run_client, malformed: str) -> None:
 
 
 def test_a_traversal_shaped_run_id_cannot_read_another_file(
-    run_client, runs_dir: Path
+    run_client, quarantine: Path
 ) -> None:
-    (runs_dir.parent / "secret.json").write_text('{"secret": true}', encoding="utf-8")
+    (quarantine.parent / "secret.json").write_text('{"secret": true}', encoding="utf-8")
 
     response = run_client.get("/api/runs/..%2Fsecret")
 
@@ -570,7 +570,7 @@ def test_a_preview_whose_result_has_been_released_returns_404(
 
 
 def test_a_download_is_generated_from_the_result_not_a_file(
-    run_client, runs_dir: Path
+    run_client, quarantine: Path
 ) -> None:
     """Build plan 6D: no ``exports/`` directory is required to download."""
     run_id = _start_run(run_client).json()["run_id"]
@@ -580,7 +580,7 @@ def test_a_download_is_generated_from_the_result_not_a_file(
 
     assert csv_response.status_code == 200
     assert xlsx_response.status_code == 200
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -589,9 +589,7 @@ def test_a_download_is_generated_from_the_result_not_a_file(
 # ---------------------------------------------------------------------------
 
 
-def test_a_run_writes_nothing_to_the_filesystem(
-    run_client, runs_dir: Path
-) -> None:
+def test_a_run_writes_nothing_to_the_filesystem(run_client, quarantine: Path) -> None:
     """Build plan 6C.3 and 6D: a Run needs no directory of any kind.
 
     Until Phase 6D this asserted the three generated artifacts and no more.
@@ -600,8 +598,8 @@ def test_a_run_writes_nothing_to_the_filesystem(
     """
     run_id = _start_run(run_client).json()["run_id"]
 
-    assert list(runs_dir.rglob("*")) == []
-    assert not (runs_dir / run_id).exists()
+    assert list(quarantine.rglob("*")) == []
+    assert not (quarantine / run_id).exists()
 
 
 def test_the_uploaded_source_is_recorded_under_a_generated_name(
@@ -618,7 +616,7 @@ def test_the_uploaded_source_is_recorded_under_a_generated_name(
 
 
 def test_a_hostile_upload_filename_writes_nothing_anywhere(
-    run_client, runs_dir: Path
+    run_client, quarantine: Path
 ) -> None:
     response = run_client.post(
         "/api/runs",
@@ -628,9 +626,9 @@ def test_a_hostile_upload_filename_writes_nothing_anywhere(
     run_id = response.json()["run_id"]
 
     assert response.status_code == 200
-    assert not (runs_dir.parent / "escaped.csv").exists()
+    assert not (quarantine.parent / "escaped.csv").exists()
     # There is no longer any file written from the upload at all.
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
     # The generated name is what the application used...
     assert response.json()["inputs"][0]["stored_filename"] == "source.csv"
     # ...and the name is still recorded as metadata.

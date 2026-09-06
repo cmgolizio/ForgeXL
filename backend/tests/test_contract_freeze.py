@@ -12,8 +12,8 @@ migration rather than only before it:
   writes a manifest, reads a Parquet file or asks for a path. Every assertion
   is about metadata, dataframes, schema shapes, error codes or HTTP routes, so
   this module must keep passing unchanged after uploads, results and exports
-  move into memory. It never uses the ``runs_dir`` / ``run_paths`` fixtures,
-  which disappear with the on-disk model.
+  move into memory. It never used the ``runs_dir`` / ``run_paths`` fixtures,
+  which disappeared with the on-disk model in Phase 6I.
 
 * **It pins contracts, not implementations.** The values asserted here are
   recorded in ``docs/phase-6a-compatibility-audit.md`` §4. Changing one is a
@@ -35,11 +35,20 @@ three schema field lists and the manifest version constant.
 of 6F.4. It is an addition and not a change: every route, method and shape
 already listed is untouched.
 
+*Phase 6I* removes ``config.DATA_DIRECTORY`` / ``config.RUNS_DIRECTORY``
+(6I.1), which one test here monkeypatched at a nonexistent path to prove an
+Action could execute with no filesystem underneath it. There is no longer a
+setting to point anywhere, so that test watches an empty working directory
+instead. **No frozen value changed**: not a route, an error code, a metric
+key, a schema field or a limit. The probe moved because what it probed was
+deleted; had `FROZEN_ROUTES` or any contract needed an edit during a cleanup
+phase, that would have meant 6I changed something it was not asked to.
+
 Everything else in this module — the Action inventory, the error table, the
 metric keys, the preview limits, the determinism checks — is untouched across
-both amendments and still passing. Each amended entry says below exactly what
-changed and why, so the change stays a recorded decision rather than a quiet
-edit.
+all three amendments and still passing. Each amended entry says below exactly
+what changed and why, so the change stays a recorded decision rather than a
+quiet edit.
 """
 
 from __future__ import annotations
@@ -348,9 +357,8 @@ FORBIDDEN_ACTION_CALLS: frozenset[str] = frozenset({"open", "exec", "eval"})
 def api_client():
     """A client bound to the real application.
 
-    Deliberately independent of the ``runs_dir`` fixture: nothing this module
-    requests touches storage, so the freeze survives the on-disk model being
-    removed.
+    Nothing this module requests touches storage, which is why the freeze
+    survived the on-disk model being removed in Phase 6I.
     """
     with TestClient(app) as client:
         yield client
@@ -717,24 +725,23 @@ def test_no_action_module_opens_or_executes_anything(
 
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
 def test_an_action_executes_with_no_filesystem_available(
-    entry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    entry, quarantine: Path
 ) -> None:
-    """Execute with the data directory pointed somewhere that does not exist.
+    """Execute inside an empty directory, with nowhere else to write.
 
     This is the behavioural half of the classification: if an Action needed a
     Run directory, an input file or an export path, it could not complete here.
-    """
-    missing = tmp_path / "definitely-not-created"
-    monkeypatch.setattr(config, "DATA_DIRECTORY", missing)
-    monkeypatch.setattr(config, "RUNS_DIRECTORY", missing / "runs")
-    monkeypatch.chdir(tmp_path)
 
+    Until Phase 6I this also pointed ``config.DATA_DIRECTORY`` at a path that
+    did not exist. That setting is gone (6I.1) and the Action has no configured
+    location at all, so the working directory is what is watched now.
+    """
     action = _action(entry["id"])
     (slot,) = action.inputs
     result = action.run({slot.id: _frame_for(action)})
 
     assert set(result.outputs) == {output["id"] for output in entry["outputs"]}
-    assert not missing.exists()
+    assert list(quarantine.iterdir()) == []
 
 
 def test_the_action_run_signature_takes_named_frames() -> None:

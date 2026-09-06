@@ -8,8 +8,6 @@ transformation shows up as a failure rather than as a quietly different result.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import polars as pl
 import pytest
 
@@ -206,7 +204,7 @@ def test_a_null_is_not_treated_as_an_empty_string(action) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
+def test_a_csv_upload_produces_the_expected_run(action) -> None:
     payload = csv_bytes(fixture.HEADER, fixture.ROWS)
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.csv", payload)})
@@ -233,9 +231,7 @@ def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
     assert written.rows() == list(fixture.EXPECTED_ROWS)
 
 
-def test_an_xlsx_upload_produces_the_same_rows_as_the_csv(
-    runs_dir: Path, action
-) -> None:
+def test_an_xlsx_upload_produces_the_same_rows_as_the_csv(action) -> None:
     payload = xlsx_bytes({"Data": [fixture.HEADER, *fixture.ROWS]})
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.xlsx", payload)})

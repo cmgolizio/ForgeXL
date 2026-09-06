@@ -248,7 +248,7 @@ def test_differing_vintage_volume_and_selection_each_make_a_distinct_product(
 # ---------------------------------------------------------------------------
 
 
-def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
+def test_a_csv_upload_produces_the_expected_run(action) -> None:
     payload = csv_bytes(fixture.HEADER, fixture.ROWS)
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.csv", payload)})
@@ -278,9 +278,7 @@ def test_a_csv_upload_produces_the_expected_run(runs_dir: Path, action) -> None:
     assert written.rows() == list(fixture.EXPECTED_ROWS)
 
 
-def test_an_xlsx_upload_produces_the_same_product_master(
-    runs_dir: Path, action
-) -> None:
+def test_an_xlsx_upload_produces_the_same_product_master(action) -> None:
     payload = xlsx_bytes({"Sales": [fixture.HEADER, *fixture.ROWS]})
 
     outcome = execute_run(action, {INPUT_SLOT_ID: upload("sales.xlsx", payload)})
@@ -303,7 +301,7 @@ def test_an_xlsx_upload_produces_the_same_product_master(
 # ---------------------------------------------------------------------------
 
 
-def _assert_failed_cleanly(runs_dir: Path, expected_code: str) -> None:
+def _assert_failed_cleanly(quarantine: Path, expected_code: str) -> None:
     """Assert exactly one Run exists, that it failed for `expected_code`, and
     that it left no result of any kind behind (build plan 6D.8)."""
     (run,) = run_store.list_runs()
@@ -316,10 +314,10 @@ def _assert_failed_cleanly(runs_dir: Path, expected_code: str) -> None:
     assert manifest.outputs == ()
 
     assert run.result is None, "a failed Run kept a partially valid result"
-    assert list(runs_dir.rglob("*")) == [], "a failed Run wrote to the filesystem"
+    assert list(quarantine.rglob("*")) == [], "a failed Run wrote to the filesystem"
 
 
-def test_a_missing_sku_column_fails_the_run(runs_dir: Path, action) -> None:
+def test_a_missing_sku_column_fails_the_run(quarantine: Path, action) -> None:
     payload = csv_bytes(_header_without("SKU"), _rows_without("SKU"))
 
     with pytest.raises(RunValidationError) as raised:
@@ -328,10 +326,10 @@ def test_a_missing_sku_column_fails_the_run(runs_dir: Path, action) -> None:
     assert raised.value.code == "MISSING_COLUMNS"
     assert raised.value.http_status == 422
     assert raised.value.details["missing_columns"] == ["SKU"]
-    _assert_failed_cleanly(runs_dir, "MISSING_COLUMNS")
+    _assert_failed_cleanly(quarantine, "MISSING_COLUMNS")
 
 
-def test_a_misspelled_supplier_column_fails_the_run(runs_dir: Path, action) -> None:
+def test_a_misspelled_supplier_column_fails_the_run(quarantine: Path, action) -> None:
     """`Suplier` is not silently accepted as `Supplier` (build plan 3.7)."""
     payload = csv_bytes(_header_renaming("Supplier", "Suplier"), fixture.ROWS)
 
@@ -343,7 +341,7 @@ def test_a_misspelled_supplier_column_fails_the_run(runs_dir: Path, action) -> N
     # The report names what was actually in the file, so the user can see the
     # near miss rather than being told only that something is absent.
     assert "Suplier" in raised.value.details["found_columns"]
-    _assert_failed_cleanly(runs_dir, "MISSING_COLUMNS")
+    _assert_failed_cleanly(quarantine, "MISSING_COLUMNS")
 
 
 @pytest.mark.parametrize(
@@ -358,7 +356,7 @@ def test_a_misspelled_supplier_column_fails_the_run(runs_dir: Path, action) -> N
     ],
 )
 def test_every_required_column_is_matched_exactly(
-    runs_dir: Path, action, column: str, misspelling: str
+    action, column: str, misspelling: str
 ) -> None:
     payload = csv_bytes(_header_renaming(column, misspelling), fixture.ROWS)
 
@@ -369,7 +367,7 @@ def test_every_required_column_is_matched_exactly(
 
 
 def test_a_file_with_a_header_but_no_rows_fails_the_run(
-    runs_dir: Path, action
+    quarantine: Path, action
 ) -> None:
     payload = csv_bytes(fixture.HEADER, [])
 
@@ -378,10 +376,10 @@ def test_a_file_with_a_header_but_no_rows_fails_the_run(
 
     assert raised.value.code == "EMPTY_DATASET"
     assert raised.value.http_status == 422
-    _assert_failed_cleanly(runs_dir, "EMPTY_DATASET")
+    _assert_failed_cleanly(quarantine, "EMPTY_DATASET")
 
 
-def test_a_completely_empty_file_fails_the_run(runs_dir: Path, action) -> None:
+def test_a_completely_empty_file_fails_the_run(quarantine: Path, action) -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(action, {INPUT_SLOT_ID: upload("sales.csv", b"")})
 
@@ -389,12 +387,12 @@ def test_a_completely_empty_file_fails_the_run(runs_dir: Path, action) -> None:
     # than as a generic parse failure (build plan 6C.9).
     assert raised.value.code == "EMPTY_FILE"
     assert raised.value.http_status == 422
-    _assert_failed_cleanly(runs_dir, "EMPTY_FILE")
+    _assert_failed_cleanly(quarantine, "EMPTY_FILE")
 
 
 @pytest.mark.parametrize("filename", ["sales.xls", "sales.xlsm", "sales.json"])
 def test_an_unsupported_extension_fails_the_run(
-    runs_dir: Path, action, filename: str
+    quarantine: Path, action, filename: str
 ) -> None:
     payload = csv_bytes(fixture.HEADER, fixture.ROWS)
 
@@ -403,12 +401,12 @@ def test_an_unsupported_extension_fails_the_run(
 
     assert raised.value.code == "UNSUPPORTED_EXTENSION"
     assert raised.value.http_status == 422
-    _assert_failed_cleanly(runs_dir, "UNSUPPORTED_EXTENSION")
+    _assert_failed_cleanly(quarantine, "UNSUPPORTED_EXTENSION")
 
 
-def test_a_missing_sales_file_fails_the_run(runs_dir: Path, action) -> None:
+def test_a_missing_sales_file_fails_the_run(quarantine: Path, action) -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(action, {})
 
     assert raised.value.code == "MISSING_INPUT"
-    _assert_failed_cleanly(runs_dir, "MISSING_INPUT")
+    _assert_failed_cleanly(quarantine, "MISSING_INPUT")

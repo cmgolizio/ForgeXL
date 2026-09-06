@@ -14,7 +14,8 @@ The manifest round-trip, unknown-Run and malformed-ID cases that
 `tests/test_storage.py` used to prove against ``manifest.json`` are proved here
 against the store that replaced it.
 
-Deliberately filesystem-free — nothing here uses the `runs_dir` fixture.
+Deliberately filesystem-free. One test watches the `quarantine` directory to
+prove a Run's whole lifecycle leaves nothing behind; nothing here builds a path.
 """
 
 from __future__ import annotations
@@ -402,15 +403,17 @@ def test_v1_run_state_does_not_survive_the_process() -> None:
 
 
 def test_no_run_state_reaches_the_filesystem(
-    store: InMemoryRunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    store: InMemoryRunStore, quarantine: Path
 ) -> None:
-    from app import config
+    """The full lifecycle of a Run leaves nothing behind.
 
-    monkeypatch.setattr(config, "DATA_DIRECTORY", tmp_path / "nowhere")
-    monkeypatch.setattr(config, "RUNS_DIRECTORY", tmp_path / "nowhere" / "runs")
-
+    Until Phase 6I this pointed ``config.DATA_DIRECTORY`` at a path that did
+    not exist and asserted it stayed that way. That setting is gone (6I.1), so
+    the store now runs inside an empty working directory instead — the last
+    place a stray write could land.
+    """
     run = store.create_run(_run())
     store.update_run(run.with_changes(status=RunStatus.SUCCEEDED))
     store.delete_run(run.run_id)
 
-    assert not (tmp_path / "nowhere").exists()
+    assert list(quarantine.iterdir()) == []

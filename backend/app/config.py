@@ -18,21 +18,19 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+#
+# There is deliberately only one, and it is not a data directory. ForgeXL V1
+# processes spreadsheets entirely in memory: an upload is never written, a
+# result is held as a DataFrame, and CSV/XLSX bytes are generated per request
+# (build plan Phase 6 architectural rules 1-3). Phase 6I removed the
+# ``DATA_DIRECTORY`` / ``RUNS_DIRECTORY`` settings along with the last of the
+# on-disk model, so the backend now has no configured place to write at all.
+# A future ``PersistentRunStore`` would reintroduce a setting of its own; see
+# ``docs/architecture.md``.
 
 # backend/app/config.py -> backend/app -> backend -> repository root
+#: Used only to point ``uvicorn --reload`` at the backend source tree.
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
-
-_data_directory_override = os.environ.get("FORGEXL_DATA_DIRECTORY")
-
-#: Root directory for all locally generated application data.
-DATA_DIRECTORY: Path = (
-    Path(_data_directory_override).expanduser().resolve()
-    if _data_directory_override
-    else PROJECT_ROOT / "data"
-)
-
-#: One subdirectory per Run is created here.
-RUNS_DIRECTORY: Path = DATA_DIRECTORY / "runs"
 
 # ---------------------------------------------------------------------------
 # Server

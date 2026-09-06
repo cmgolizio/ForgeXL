@@ -126,7 +126,7 @@ def test_the_source_frame_is_not_modified(frame: pl.DataFrame) -> None:
 
 
 def test_previewing_reads_nothing_from_disk(
-    tmp_path: Path, runs_dir: Path, frame: pl.DataFrame, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, quarantine: Path, frame: pl.DataFrame, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Build plan 6D.7: the retained frame is the source, not a written file."""
     empty = tmp_path / "cwd"
@@ -137,7 +137,7 @@ def test_previewing_reads_nothing_from_disk(
 
     assert page.rows == [[0, "row-0"]]
     assert list(empty.iterdir()) == []
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
 
 # ---------------------------------------------------------------------------
 # Column schema (build plan 6E.4)

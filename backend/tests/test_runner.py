@@ -125,7 +125,7 @@ class _Forgetful(Action):
 # ---------------------------------------------------------------------------
 
 
-def test_a_successful_run_is_recorded_in_the_run_store(runs_dir: Path) -> None:
+def test_a_successful_run_is_recorded_in_the_run_store() -> None:
     action = make_action("passthrough")
 
     outcome = execute_run(action, {"source_file": upload("sales.csv", _sales_csv())})
@@ -138,7 +138,7 @@ def test_a_successful_run_is_recorded_in_the_run_store(runs_dir: Path) -> None:
     )
 
 
-def test_a_run_is_recorded_before_it_finishes(runs_dir: Path) -> None:
+def test_a_run_is_recorded_before_it_finishes() -> None:
     """A Run exists from the moment it starts, so an interruption is visible."""
 
     class _Watching(Action):
@@ -164,7 +164,7 @@ def test_a_run_is_recorded_before_it_finishes(runs_dir: Path) -> None:
     assert action.seen == [RunStatus.RUNNING]
 
 
-def test_the_manifest_records_the_run_end_to_end(runs_dir: Path) -> None:
+def test_the_manifest_records_the_run_end_to_end() -> None:
     outcome = execute_run(
         make_action("passthrough", version="2.1.0"),
         {"source_file": upload("Q3 sales.csv", _sales_csv())},
@@ -193,7 +193,7 @@ def test_the_manifest_records_the_run_end_to_end(runs_dir: Path) -> None:
     assert recorded_output.formats == ("csv", "xlsx")
 
 
-def test_the_manifest_never_contains_dataframe_rows(runs_dir: Path) -> None:
+def test_the_manifest_never_contains_dataframe_rows() -> None:
     """Build plan section 23: no actual rows belong in the manifest."""
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
@@ -203,21 +203,19 @@ def test_the_manifest_never_contains_dataframe_rows(runs_dir: Path) -> None:
     assert "Acme" not in text
 
 
-def test_the_manifest_exposes_no_filesystem_paths(runs_dir: Path) -> None:
+def test_the_manifest_exposes_no_filesystem_paths(quarantine: Path) -> None:
     """Build plan section 11: the browser gets logical IDs, never local paths."""
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
     )
 
     text = outcome.manifest.model_dump_json()
-    assert str(runs_dir) not in text
+    assert str(quarantine) not in text
     assert "/tmp/" not in text
     assert "data/runs" not in text
 
 
-def test_action_metrics_are_copied_into_the_manifest_verbatim(
-    runs_dir: Path,
-) -> None:
+def test_action_metrics_are_copied_into_the_manifest_verbatim() -> None:
     class _Counting(Action):
         id = "counting"
         version = "1.0.0"
@@ -244,7 +242,7 @@ def test_action_metrics_are_copied_into_the_manifest_verbatim(
     assert outcome.manifest.metrics == {"input_rows": 2, "duplicates_removed": 7}
 
 
-def test_an_xlsx_input_records_its_worksheet_and_engine(runs_dir: Path) -> None:
+def test_an_xlsx_input_records_its_worksheet_and_engine() -> None:
     payload = xlsx_bytes({"Sales": [SALES_HEADER, *SALES_ROWS]})
 
     outcome = execute_run(
@@ -257,7 +255,7 @@ def test_an_xlsx_input_records_its_worksheet_and_engine(runs_dir: Path) -> None:
     assert recorded_input.parser_engine == "fastexcel-calamine"
 
 
-def test_an_action_with_several_input_slots_receives_each_one(runs_dir: Path) -> None:
+def test_an_action_with_several_input_slots_receives_each_one() -> None:
     """The pipeline is generic: multi-input Actions need no special handling."""
     outcome = execute_run(
         _TwoInputs(),
@@ -274,7 +272,7 @@ def test_an_action_with_several_input_slots_receives_each_one(runs_dir: Path) ->
     assert outcome.manifest.outputs[0].row_count == 4
 
 
-def test_each_slot_keeps_its_own_data(runs_dir: Path) -> None:
+def test_each_slot_keeps_its_own_data() -> None:
     """Build plan 6C.1: an upload stays bound to the slot it was sent for."""
 
     class _Recording(Action):
@@ -314,24 +312,24 @@ def test_each_slot_keeps_its_own_data(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_successful_run_writes_no_uploaded_file(runs_dir: Path) -> None:
+def test_a_successful_run_writes_no_uploaded_file(quarantine: Path) -> None:
     execute_run(
         make_action("passthrough"), {"source_file": upload("sales.csv", _sales_csv())}
     )
 
-    written = [path for path in runs_dir.rglob("*") if path.is_file()]
+    written = [path for path in quarantine.rglob("*") if path.is_file()]
     assert not any(path.name.startswith("source.") for path in written)
     assert not any(part == "inputs" for path in written for part in path.parts)
 
 
-def test_an_unsupported_upload_is_never_read_or_written(runs_dir: Path) -> None:
+def test_an_unsupported_upload_is_never_read_or_written(quarantine: Path) -> None:
     with pytest.raises(RunValidationError):
         execute_run(
             make_action("passthrough"),
             {"source_file": upload("data.json", b'{"a": 1}')},
         )
 
-    assert [path for path in runs_dir.rglob("*") if path.is_file()] == []
+    assert [path for path in quarantine.rglob("*") if path.is_file()] == []
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +337,7 @@ def test_an_unsupported_upload_is_never_read_or_written(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_missing_required_input_fails_the_run(runs_dir: Path) -> None:
+def test_a_missing_required_input_fails_the_run() -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(make_action("passthrough"), {})
 
@@ -347,7 +345,7 @@ def test_a_missing_required_input_fails_the_run(runs_dir: Path) -> None:
     assert raised.value.http_status == 422
 
 
-def test_an_unsupported_extension_fails_the_run(runs_dir: Path) -> None:
+def test_an_unsupported_extension_fails_the_run() -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(
             make_action("passthrough"),
@@ -357,7 +355,7 @@ def test_an_unsupported_extension_fails_the_run(runs_dir: Path) -> None:
     assert raised.value.code == "UNSUPPORTED_EXTENSION"
 
 
-def test_missing_required_columns_fail_the_run(runs_dir: Path) -> None:
+def test_missing_required_columns_fail_the_run() -> None:
     action = make_action(
         "schema_action", required_columns=("SKU", "Supplier", "Volume")
     )
@@ -369,7 +367,7 @@ def test_missing_required_columns_fail_the_run(runs_dir: Path) -> None:
     assert raised.value.details["missing_columns"] == ["Volume"]
 
 
-def test_column_comparison_is_exact(runs_dir: Path) -> None:
+def test_column_comparison_is_exact() -> None:
     """Build plan 3.7: 'Sales Person' is not 'Salesperson'."""
     action = make_action("schema_action", required_columns=("Salesperson",))
     payload = csv_bytes(["Sales Person"], [["Ann"]])
@@ -381,7 +379,7 @@ def test_column_comparison_is_exact(runs_dir: Path) -> None:
     assert raised.value.details["found_columns"] == ["Sales Person"]
 
 
-def test_column_comparison_is_case_sensitive(runs_dir: Path) -> None:
+def test_column_comparison_is_case_sensitive() -> None:
     action = make_action("schema_action", required_columns=("SKU",))
     payload = csv_bytes(["Sku"], [["A1"]])
 
@@ -391,7 +389,7 @@ def test_column_comparison_is_case_sensitive(runs_dir: Path) -> None:
     assert raised.value.details["missing_columns"] == ["SKU"]
 
 
-def test_a_dataset_with_no_rows_fails_the_run(runs_dir: Path) -> None:
+def test_a_dataset_with_no_rows_fails_the_run() -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(
             make_action("passthrough"),
@@ -401,7 +399,7 @@ def test_a_dataset_with_no_rows_fails_the_run(runs_dir: Path) -> None:
     assert raised.value.code == "EMPTY_DATASET"
 
 
-def test_a_zero_byte_upload_fails_as_an_empty_file(runs_dir: Path) -> None:
+def test_a_zero_byte_upload_fails_as_an_empty_file() -> None:
     """Build plan 6C.4/6C.9: empty is its own case, not a parse failure."""
     with pytest.raises(RunValidationError) as raised:
         execute_run(make_action("passthrough"), {"source_file": upload("s.csv", b"")})
@@ -409,9 +407,7 @@ def test_a_zero_byte_upload_fails_as_an_empty_file(runs_dir: Path) -> None:
     assert raised.value.code == "EMPTY_FILE"
 
 
-def test_an_empty_file_and_a_header_only_file_report_different_codes(
-    runs_dir: Path,
-) -> None:
+def test_an_empty_file_and_a_header_only_file_report_different_codes() -> None:
     with pytest.raises(RunValidationError) as empty:
         execute_run(make_action("passthrough"), {"source_file": upload("s.csv", b"")})
     with pytest.raises(RunValidationError) as header_only:
@@ -424,7 +420,7 @@ def test_an_empty_file_and_a_header_only_file_report_different_codes(
     assert header_only.value.code == "EMPTY_DATASET"
 
 
-def test_an_unparseable_file_fails_the_run(runs_dir: Path) -> None:
+def test_an_unparseable_file_fails_the_run() -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(
             make_action("passthrough"),
@@ -434,7 +430,7 @@ def test_an_unparseable_file_fails_the_run(runs_dir: Path) -> None:
     assert raised.value.code == "PARSE_ERROR"
 
 
-def test_several_validation_failures_are_reported_together(runs_dir: Path) -> None:
+def test_several_validation_failures_are_reported_together() -> None:
     with pytest.raises(RunValidationError) as raised:
         execute_run(_TwoInputs(), {})
 
@@ -443,9 +439,7 @@ def test_several_validation_failures_are_reported_together(runs_dir: Path) -> No
     assert len(raised.value.details["issues"]) == 2
 
 
-def test_problems_in_different_slots_are_collected_in_one_response(
-    runs_dir: Path,
-) -> None:
+def test_problems_in_different_slots_are_collected_in_one_response() -> None:
     """Build plan 6C.4: one request reports every slot problem at once."""
     with pytest.raises(RunValidationError) as raised:
         execute_run(
@@ -460,7 +454,7 @@ def test_problems_in_different_slots_are_collected_in_one_response(
     assert codes == {"UNSUPPORTED_EXTENSION", "EMPTY_FILE"}
 
 
-def test_an_optional_slot_may_be_omitted(runs_dir: Path) -> None:
+def test_an_optional_slot_may_be_omitted() -> None:
     class _OptionalSecond(Action):
         id = "optional_second"
         version = "1.0.0"
@@ -486,7 +480,7 @@ def test_an_optional_slot_may_be_omitted(runs_dir: Path) -> None:
     assert [item.slot_id for item in outcome.manifest.inputs] == ["first"]
 
 
-def test_an_unexpected_slot_warns_without_failing_the_run(runs_dir: Path) -> None:
+def test_an_unexpected_slot_warns_without_failing_the_run() -> None:
     """Build plan section 6.2: a warning is not an error."""
     outcome = execute_run(
         make_action("passthrough"),
@@ -503,7 +497,7 @@ def test_an_unexpected_slot_warns_without_failing_the_run(runs_dir: Path) -> Non
     assert warning.details["unexpected_slot_ids"] == ["mystery_file"]
 
 
-def test_an_unexpected_slot_is_reported_even_on_a_failed_run(runs_dir: Path) -> None:
+def test_an_unexpected_slot_is_reported_even_on_a_failed_run() -> None:
     action = make_action("schema_action", required_columns=("Volume",))
 
     with pytest.raises(RunValidationError):
@@ -524,9 +518,7 @@ def test_an_unexpected_slot_is_reported_even_on_a_failed_run(runs_dir: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_an_oversized_upload_fails_the_run(
-    runs_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_oversized_upload_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 8)
 
     with pytest.raises(UploadTooLargeError) as raised:
@@ -543,7 +535,7 @@ def test_an_oversized_upload_fails_the_run(
 # ---------------------------------------------------------------------------
 
 
-def test_a_failed_run_keeps_its_record(runs_dir: Path) -> None:
+def test_a_failed_run_keeps_its_record() -> None:
     action = make_action("schema_action", required_columns=("Volume",))
 
     with pytest.raises(RunValidationError):
@@ -557,7 +549,7 @@ def test_a_failed_run_keeps_its_record(runs_dir: Path) -> None:
     assert run.completed_at is not None
 
 
-def test_a_failed_run_records_every_validation_error(runs_dir: Path) -> None:
+def test_a_failed_run_records_every_validation_error() -> None:
     action = make_action("schema_action", required_columns=("Volume", "Producer"))
 
     with pytest.raises(RunValidationError):
@@ -569,7 +561,7 @@ def test_a_failed_run_records_every_validation_error(runs_dir: Path) -> None:
     assert issue.details["missing_columns"] == ["Volume", "Producer"]
 
 
-def test_a_failed_run_still_records_what_was_uploaded(runs_dir: Path) -> None:
+def test_a_failed_run_still_records_what_was_uploaded() -> None:
     action = make_action("schema_action", required_columns=("Volume",))
 
     with pytest.raises(RunValidationError):
@@ -581,7 +573,7 @@ def test_a_failed_run_still_records_what_was_uploaded(runs_dir: Path) -> None:
     assert recorded_input.file_size_bytes == len(_sales_csv())
 
 
-def test_a_failed_run_produces_no_outputs(runs_dir: Path) -> None:
+def test_a_failed_run_produces_no_outputs() -> None:
     action = make_action("schema_action", required_columns=("Volume",))
 
     with pytest.raises(RunValidationError):
@@ -590,9 +582,7 @@ def test_a_failed_run_produces_no_outputs(runs_dir: Path) -> None:
     assert _only_run().outputs == ()
 
 
-def test_a_file_that_failed_to_parse_is_still_recorded_as_an_input(
-    runs_dir: Path,
-) -> None:
+def test_a_file_that_failed_to_parse_is_still_recorded_as_an_input() -> None:
     """A failed Run should show what was uploaded, not an empty inputs list."""
     with pytest.raises(RunValidationError):
         execute_run(
@@ -606,9 +596,7 @@ def test_a_file_that_failed_to_parse_is_still_recorded_as_an_input(
     assert recorded_input.parser_engine is None
 
 
-def test_an_action_that_raises_is_reported_without_a_traceback(
-    runs_dir: Path,
-) -> None:
+def test_an_action_that_raises_is_reported_without_a_traceback() -> None:
     with pytest.raises(ActionExecutionError) as raised:
         execute_run(_Exploding(), {"source_file": upload("s.csv", _sales_csv())})
 
@@ -621,9 +609,7 @@ def test_an_action_that_raises_is_reported_without_a_traceback(
     assert "secret internal detail" not in run.error.message
 
 
-def test_an_action_that_omits_a_declared_output_fails_the_run(
-    runs_dir: Path,
-) -> None:
+def test_an_action_that_omits_a_declared_output_fails_the_run() -> None:
     with pytest.raises(ActionExecutionError):
         execute_run(_Forgetful(), {"source_file": upload("s.csv", _sales_csv())})
 
@@ -635,7 +621,7 @@ def test_an_action_that_omits_a_declared_output_fails_the_run(
 # ---------------------------------------------------------------------------
 
 
-def test_an_action_validate_hook_can_fail_the_run(runs_dir: Path) -> None:
+def test_an_action_validate_hook_can_fail_the_run() -> None:
     class _Picky(Action):
         id = "picky"
         version = "1.0.0"
@@ -662,7 +648,7 @@ def test_an_action_validate_hook_can_fail_the_run(runs_dir: Path) -> None:
     assert raised.value.code == "TOO_PICKY"
 
 
-def test_the_validate_hook_receives_the_parsed_frames(runs_dir: Path) -> None:
+def test_the_validate_hook_receives_the_parsed_frames() -> None:
     class _Inspecting(Action):
         id = "inspecting"
         version = "1.0.0"
@@ -696,7 +682,7 @@ def test_the_validate_hook_receives_the_parsed_frames(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_deleting_a_run_forgets_it(runs_dir: Path) -> None:
+def test_deleting_a_run_forgets_it() -> None:
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
     )
@@ -705,13 +691,13 @@ def test_deleting_a_run_forgets_it(runs_dir: Path) -> None:
     assert run_store.list_runs() == []
 
 
-def test_deleting_an_unknown_run_reports_false(runs_dir: Path) -> None:
+def test_deleting_an_unknown_run_reports_false() -> None:
     from app.models.run import new_run_id
 
     assert delete_run(new_run_id()) is False
 
 
-def test_deleting_one_run_leaves_the_others(runs_dir: Path) -> None:
+def test_deleting_one_run_leaves_the_others() -> None:
     kept = execute_run(
         make_action("passthrough"), {"source_file": upload("a.csv", _sales_csv())}
     )
@@ -728,7 +714,7 @@ def test_deleting_one_run_leaves_the_others(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_successful_run_keeps_its_result_frame(runs_dir: Path) -> None:
+def test_a_successful_run_keeps_its_result_frame() -> None:
     """Build plan 6D.7: the result stays a DataFrame, not an intermediate file."""
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
@@ -741,7 +727,7 @@ def test_a_successful_run_keeps_its_result_frame(runs_dir: Path) -> None:
     assert result.primary.rows() == [("A1", 2019, "Acme"), ("A2", 2020, "Acme")]
 
 
-def test_the_retained_frame_is_the_one_the_action_returned(runs_dir: Path) -> None:
+def test_the_retained_frame_is_the_one_the_action_returned() -> None:
     """Nothing is round-tripped through a file, so nothing is re-materialised."""
 
     class _Identifiable(Action):
@@ -768,7 +754,7 @@ def test_the_retained_frame_is_the_one_the_action_returned(runs_dir: Path) -> No
     assert outcome.result.primary is action.produced
 
 
-def test_the_result_travels_with_the_run_in_the_store(runs_dir: Path) -> None:
+def test_the_result_travels_with_the_run_in_the_store() -> None:
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
     )
@@ -782,9 +768,7 @@ def test_the_result_travels_with_the_run_in_the_store(runs_dir: Path) -> None:
     ]
 
 
-def test_an_action_with_two_outputs_produces_two_result_tables(
-    runs_dir: Path,
-) -> None:
+def test_an_action_with_two_outputs_produces_two_result_tables() -> None:
     """Build plan 6D.5: an Action may return a primary and secondary results."""
 
     class _TwoOutputs(Action):
@@ -820,9 +804,7 @@ def test_an_action_with_two_outputs_produces_two_result_tables(
     assert result.secondary["rejected"].rows() == [("A2", 2020, "Acme")]
 
 
-def test_each_declared_output_is_described_from_its_own_frame(
-    runs_dir: Path,
-) -> None:
+def test_each_declared_output_is_described_from_its_own_frame() -> None:
     class _Uneven(Action):
         id = "uneven"
         version = "1.0.0"
@@ -855,22 +837,17 @@ def test_each_declared_output_is_described_from_its_own_frame(
     assert (narrow.row_count, narrow.column_count, narrow.columns) == (1, 1, ("SKU",))
 
 
-def test_the_pipeline_needs_no_run_directory_at_all(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_pipeline_needs_no_run_directory_at_all(quarantine: Path) -> None:
     """Build plan 6D completion criteria, as an assertion.
 
-    The data directory is pointed somewhere that does not exist and the process
-    working directory at an empty one: a pipeline that still required
+    The whole pipeline runs inside an empty directory: one that still required
     ``inputs/``, ``working/`` or ``exports/`` could not complete here.
-    """
-    missing = tmp_path / "definitely-not-created"
-    empty = tmp_path / "cwd"
-    empty.mkdir()
-    monkeypatch.setattr(config, "DATA_DIRECTORY", missing)
-    monkeypatch.setattr(config, "RUNS_DIRECTORY", missing / "runs")
-    monkeypatch.chdir(empty)
 
+    Until Phase 6I this also pointed ``config.DATA_DIRECTORY`` at a path that
+    did not exist. There is no such setting any more (6I.1) — the backend has
+    nowhere configured to write — so the working directory is the last place a
+    stray write could land, and it is what this now watches.
+    """
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
     )
@@ -878,19 +855,29 @@ def test_the_pipeline_needs_no_run_directory_at_all(
     assert outcome.manifest.status is RunStatus.SUCCEEDED
     assert outcome.result is not None
     assert outcome.result.primary.height == 2
-    assert not missing.exists()
-    assert list(empty.iterdir()) == []
+    assert list(quarantine.iterdir()) == []
 
 
-def test_a_successful_run_writes_nothing_anywhere(runs_dir: Path) -> None:
+def test_the_backend_has_no_data_directory_setting_left() -> None:
+    """Build plan 6I.1: the on-disk model is gone from configuration too.
+
+    A regression guard for the removal itself. Reintroducing either constant
+    would mean something is once again deciding where a Run writes.
+    """
+    assert not hasattr(config, "DATA_DIRECTORY")
+    assert not hasattr(config, "RUNS_DIRECTORY")
+    assert not (config.PROJECT_ROOT / "data").exists()
+
+
+def test_a_successful_run_writes_nothing_anywhere(quarantine: Path) -> None:
     execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
     )
 
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
 
 
-def test_the_run_outcome_no_longer_carries_a_directory(runs_dir: Path) -> None:
+def test_the_run_outcome_no_longer_carries_a_directory() -> None:
     """A Run has no filesystem location to hand back."""
     outcome = execute_run(
         make_action("passthrough"), {"source_file": upload("s.csv", _sales_csv())}
@@ -904,7 +891,7 @@ def test_the_run_outcome_no_longer_carries_a_directory(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_failed_validation_leaves_no_result(runs_dir: Path) -> None:
+def test_a_failed_validation_leaves_no_result() -> None:
     action = make_action("schema_action", required_columns=("Volume",))
 
     with pytest.raises(RunValidationError):
@@ -913,16 +900,14 @@ def test_a_failed_validation_leaves_no_result(runs_dir: Path) -> None:
     assert _only_run().result is None
 
 
-def test_an_action_that_raises_leaves_no_result(runs_dir: Path) -> None:
+def test_an_action_that_raises_leaves_no_result() -> None:
     with pytest.raises(ActionExecutionError):
         execute_run(_Exploding(), {"source_file": upload("s.csv", _sales_csv())})
 
     assert _only_run().result is None
 
 
-def test_an_action_that_produces_only_some_of_its_outputs_leaves_no_result(
-    runs_dir: Path,
-) -> None:
+def test_an_action_that_produces_only_some_of_its_outputs_leaves_no_result() -> None:
     """The half-finished tables must not survive as a usable result."""
 
     class _HalfDone(Action):
@@ -952,9 +937,7 @@ def test_an_action_that_produces_only_some_of_its_outputs_leaves_no_result(
     assert failed.outputs == ()
 
 
-def test_finalizing_a_failure_clears_any_result_already_recorded(
-    runs_dir: Path,
-) -> None:
+def test_finalizing_a_failure_clears_any_result_already_recorded() -> None:
     """Build plan 6D.8, at the one place the guarantee is made.
 
     Today the pipeline cannot reach a failure after a result has been recorded,
@@ -1009,7 +992,7 @@ def test_finalizing_a_failure_clears_any_result_already_recorded(
     assert run_store.get_run(recorded.run_id).result is None
 
 
-def test_deleting_a_run_releases_its_result_frames(runs_dir: Path) -> None:
+def test_deleting_a_run_releases_its_result_frames() -> None:
     """Build plan 6D.8: abandoned processing must be able to release memory."""
     import gc
     import weakref

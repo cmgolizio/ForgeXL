@@ -6,7 +6,7 @@ value that is derived rather than mutated, the public manifest is produced
 faithfully from it, and — since Phase 6D — the result tables it carries are
 one primary plus any secondaries, never rows in the manifest.
 
-Deliberately filesystem-free — nothing here uses the `runs_dir` fixture.
+Deliberately filesystem-free — nothing here builds, reads or writes a path.
 """
 
 from __future__ import annotations

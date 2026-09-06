@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -332,7 +333,7 @@ def test_the_fallback_engine_is_used_and_recorded_when_the_primary_fails(
 
 
 def test_the_fallback_reads_the_same_bytes_without_a_temporary_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch, quarantine: Path
 ) -> None:
     """Build plan 6C.7: the workbook is not written out to be reopened."""
     payload = xlsx_bytes({"Data": [["A"], [1]]})
@@ -341,12 +342,11 @@ def test_the_fallback_reads_the_same_bytes_without_a_temporary_file(
         raise RuntimeError("preferred engine unavailable")
 
     monkeypatch.setattr(parser.fastexcel, "read_excel", _fail)
-    monkeypatch.chdir(tmp_path)
 
     parsed = parser.parse_tabular_bytes(payload, ".xlsx")
 
     assert parsed.parser_engine == parser.ENGINE_OPENPYXL
-    assert list(tmp_path.iterdir()) == []
+    assert list(quarantine.iterdir()) == []
 
 
 def test_worksheet_ambiguity_is_not_retried_with_the_fallback(
@@ -384,14 +384,12 @@ def test_worksheet_ambiguity_is_not_retried_with_the_fallback(
     ids=["csv", "xlsx"],
 )
 def test_parsing_writes_nothing_to_the_working_directory(
-    extension: str, builder, monkeypatch: pytest.MonkeyPatch, tmp_path
+    extension: str, builder, quarantine: Path
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-
     parsed = parser.parse_tabular_bytes(builder(), extension)
 
     assert parsed.row_count == 1
-    assert list(tmp_path.iterdir()) == []
+    assert list(quarantine.iterdir()) == []
 
 # ---------------------------------------------------------------------------
 # A failed worksheet probe is an engine failure, never an empty sheet

@@ -51,9 +51,12 @@ next-env.d.ts
 !.env.example
 .env.local
 
-# run artifacts (preserved uploads, internal working files, exports)
-data/runs/*
-!data/runs/.gitkeep
+# run artifacts
+# There are none. ForgeXL V1 keeps uploads, results and exports in memory and
+# writes nothing, so Phase 6I removed the `data/runs/` tree these rules used to
+# protect. Left as a rule so a directory reintroduced by accident is not
+# committed; see docs/architecture.md.
+data/
 
 # python backend
 backend/.venv/

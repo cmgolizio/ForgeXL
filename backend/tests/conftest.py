@@ -1,8 +1,14 @@
 """Fixtures shared by the backend pipeline tests.
 
-Every test that touches storage runs against its own temporary runs directory,
-so the suite never reads or writes the real ``data/runs``. Every test also gets
-its own Run Store, so run state never leaks from one test into the next.
+Every test gets its own Run Store, so run state never leaks from one test into
+the next.
+
+Until Phase 6I this module also owned a ``runs_dir`` fixture that redirected
+``config.RUNS_DIRECTORY`` at a temporary directory, so the suite could never
+touch the real ``data/runs``, and a ``run_paths`` fixture that created a Run
+directory. Both settings and both directories are gone: the backend has no
+configured place to write (build plan 6I.1). :func:`quarantine` replaced them
+and guards the one place a stray write could still land.
 """
 
 from __future__ import annotations
@@ -12,29 +18,40 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config
 from app.actions import registry as registry_module
 from app.actions.base import Action
 from app.actions.registry import ActionRegistry
 from app.main import app
 from app.services import run_store as run_store_module
-from app.services import storage
 from app.services.run_store import InMemoryRunStore
 
 
-@pytest.fixture
-def runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the runs directory at the one place storage reads it."""
-    directory = tmp_path / "runs"
+@pytest.fixture(autouse=True)
+def quarantine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty directory the test runs inside, which must stay empty.
+
+    This is the replacement for the ``runs_dir`` redirect. Since Phase 6I the
+    backend reads no data-directory setting, so there is no configured path
+    left to point somewhere harmless — which is the point. What remains is a
+    *relative* path resolved against the process working directory, so the
+    working directory is pointed at this empty one and a test that cares
+    asserts it is still empty afterwards.
+
+    Autouse, because that is what the fixture it replaces was doing. Over a
+    hundred tests declared ``runs_dir`` without ever reading it, purely to buy
+    the redirect; dropping the parameter from all of them would have quietly
+    removed that protection. Requesting it by name still returns this same
+    directory, for the tests that assert on it.
+
+    The other two places a stray write could land are covered elsewhere and
+    deliberately not duplicated here: the OS temporary directory, by the
+    ``tempfile`` spies in ``test_export.py`` and ``test_upload_form.py``, and
+    an absolute path written into the source, by ``test_contract_freeze.py``.
+    """
+    directory = tmp_path / "quarantine"
     directory.mkdir()
-    monkeypatch.setattr(config, "RUNS_DIRECTORY", directory)
+    monkeypatch.chdir(directory)
     return directory
-
-
-@pytest.fixture
-def run_paths(runs_dir: Path) -> storage.RunPaths:
-    """A created, empty Run directory."""
-    return storage.create_run()
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +87,7 @@ def registered_actions(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def client(runs_dir: Path):
-    """A client bound to the real application, on an isolated runs directory."""
+def client(quarantine: Path):
+    """A client bound to the real application, inside an empty directory."""
     with TestClient(app) as test_client:
         yield test_client

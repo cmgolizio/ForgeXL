@@ -9,7 +9,6 @@ of it leaks into the user's data (build plan 6E.6).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 
 import polars as pl
 import pytest
@@ -119,28 +118,28 @@ def _run(action: Action, payload: bytes | None = None):
 # ---------------------------------------------------------------------------
 
 
-def test_a_result_reports_the_rows_the_run_received(runs_dir: Path) -> None:
+def test_a_result_reports_the_rows_the_run_received() -> None:
     (output,) = _run(_SelectTwo()).manifest.outputs
 
     assert output.input_row_count == 3
     assert output.row_count == 2
 
 
-def test_a_result_reports_the_columns_it_dropped(runs_dir: Path) -> None:
+def test_a_result_reports_the_columns_it_dropped() -> None:
     (output,) = _run(_SelectTwo()).manifest.outputs
 
     assert output.columns_removed == ("Supplier", "Customer")
     assert output.columns_added == ()
 
 
-def test_a_result_reports_a_column_the_action_created(runs_dir: Path) -> None:
+def test_a_result_reports_a_column_the_action_created() -> None:
     (output,) = _run(_AddsAColumn()).manifest.outputs
 
     assert output.columns_added == ("Flag",)
     assert output.columns_removed == ()
 
 
-def test_a_result_reports_its_schema_with_types(runs_dir: Path) -> None:
+def test_a_result_reports_its_schema_with_types() -> None:
     (output,) = _run(_SelectTwo()).manifest.outputs
 
     assert [(c.name, c.kind) for c in output.column_schema] == [
@@ -149,14 +148,14 @@ def test_a_result_reports_its_schema_with_types(runs_dir: Path) -> None:
     ]
 
 
-def test_the_schema_names_match_the_reported_columns(runs_dir: Path) -> None:
+def test_the_schema_names_match_the_reported_columns() -> None:
     """`columns` and `column_schema` describe the same table, in one order."""
     (output,) = _run(_SelectTwo()).manifest.outputs
 
     assert tuple(c.name for c in output.column_schema) == output.columns
 
 
-def test_every_declared_result_table_is_described(runs_dir: Path) -> None:
+def test_every_declared_result_table_is_described() -> None:
     outputs = _run(_TwoTables()).manifest.outputs
 
     assert [output.id for output in outputs] == ["kept", "dropped"]
@@ -164,9 +163,7 @@ def test_every_declared_result_table_is_described(runs_dir: Path) -> None:
     assert [output.row_count for output in outputs] == [2, 1]
 
 
-def test_the_metadata_is_measured_from_the_frame_not_from_the_metrics(
-    runs_dir: Path,
-) -> None:
+def test_the_metadata_is_measured_from_the_frame_not_from_the_metrics() -> None:
     """An Action that reports a wrong count cannot make the metadata wrong."""
 
     class _Liar(_SelectTwo):
@@ -190,7 +187,7 @@ def test_the_metadata_is_measured_from_the_frame_not_from_the_metrics(
 # ---------------------------------------------------------------------------
 
 
-def test_the_audit_names_the_action_that_executed(runs_dir: Path) -> None:
+def test_the_audit_names_the_action_that_executed() -> None:
     audit = _run(_SelectTwo()).manifest.audit
 
     assert audit.action.id == "select_two"
@@ -199,7 +196,7 @@ def test_the_audit_names_the_action_that_executed(runs_dir: Path) -> None:
     assert audit.status is RunStatus.SUCCEEDED
 
 
-def test_the_audit_lists_the_inputs_that_were_used(runs_dir: Path) -> None:
+def test_the_audit_lists_the_inputs_that_were_used() -> None:
     (used,) = _run(_SelectTwo()).manifest.audit.inputs
 
     assert used.slot_id == "source_file"
@@ -208,20 +205,18 @@ def test_the_audit_lists_the_inputs_that_were_used(runs_dir: Path) -> None:
     assert used.column_count == 4
 
 
-def test_the_audit_reports_rows_received_and_returned(runs_dir: Path) -> None:
+def test_the_audit_reports_rows_received_and_returned() -> None:
     audit = _run(_SelectTwo()).manifest.audit
 
     assert audit.rows_received == 3
     assert audit.rows_returned == 2
 
 
-def test_the_audit_reports_the_effect_the_action_stated(runs_dir: Path) -> None:
+def test_the_audit_reports_the_effect_the_action_stated() -> None:
     assert _run(_SelectTwo()).manifest.audit.rows_affected == 1
 
 
-def test_an_action_that_states_no_effect_reports_null_not_a_guess(
-    runs_dir: Path,
-) -> None:
+def test_an_action_that_states_no_effect_reports_null_not_a_guess() -> None:
     """Build plan section 3.3: an unstated figure is never inferred."""
     audit = _run(_AddsAColumn()).manifest.audit
 
@@ -230,7 +225,7 @@ def test_an_action_that_states_no_effect_reports_null_not_a_guess(
     assert audit.rows_returned == 3
 
 
-def test_rows_returned_is_the_primary_table_not_a_total(runs_dir: Path) -> None:
+def test_rows_returned_is_the_primary_table_not_a_total() -> None:
     audit = _run(_TwoTables()).manifest.audit
 
     assert audit.primary_result_id == "kept"
@@ -241,18 +236,18 @@ def test_rows_returned_is_the_primary_table_not_a_total(runs_dir: Path) -> None:
     ]
 
 
-def test_the_audit_carries_the_actions_own_metrics(runs_dir: Path) -> None:
+def test_the_audit_carries_the_actions_own_metrics() -> None:
     assert _run(_SelectTwo()).manifest.audit.metrics == {"kept": 2}
 
 
-def test_the_audit_reports_the_execution_duration(runs_dir: Path) -> None:
+def test_the_audit_reports_the_execution_duration() -> None:
     manifest = _run(_SelectTwo()).manifest
 
     assert manifest.audit.duration_ms == manifest.duration_ms
     assert manifest.audit.duration_ms is not None
 
 
-def test_the_audit_carries_the_validation_warnings(runs_dir: Path) -> None:
+def test_the_audit_carries_the_validation_warnings() -> None:
     outcome = execute_run(
         _SelectTwo(),
         {
@@ -265,7 +260,7 @@ def test_the_audit_carries_the_validation_warnings(runs_dir: Path) -> None:
     assert warning.code == "UNEXPECTED_INPUT"
 
 
-def test_a_failed_run_still_explains_itself(runs_dir: Path) -> None:
+def test_a_failed_run_still_explains_itself() -> None:
     """Build plan 3.9: a failure keeps its evidence, and the audit shows it."""
     strict = make_action("strict", required_columns=("Volume",))
 
@@ -283,7 +278,7 @@ def test_a_failed_run_still_explains_itself(runs_dir: Path) -> None:
     assert audit.errors[0].code == "MISSING_COLUMNS"
 
 
-def test_a_running_run_reports_the_state_it_is_actually_in(runs_dir: Path) -> None:
+def test_a_running_run_reports_the_state_it_is_actually_in() -> None:
     """A Run explains itself from the moment it exists, not only at the end."""
     from app.models.run import Run
     from app.models.schemas import ActionReference
@@ -297,7 +292,7 @@ def test_a_running_run_reports_the_state_it_is_actually_in(runs_dir: Path) -> No
     assert audit.results == ()
 
 
-def test_the_audit_agrees_with_the_manifest_it_sits_in(runs_dir: Path) -> None:
+def test_the_audit_agrees_with_the_manifest_it_sits_in() -> None:
     """Derived, not recorded: the two can never drift apart."""
     manifest = _run(_SelectTwo()).manifest
 
@@ -316,7 +311,7 @@ def test_the_audit_agrees_with_the_manifest_it_sits_in(runs_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_audit_value_is_added_to_the_result_table(runs_dir: Path) -> None:
+def test_no_audit_value_is_added_to_the_result_table() -> None:
     outcome = _run(_SelectTwo())
     assert outcome.result is not None
 
@@ -334,9 +329,7 @@ def test_no_audit_value_is_added_to_the_result_table(runs_dir: Path) -> None:
         assert forbidden not in frame.columns
 
 
-def test_the_result_table_is_exactly_what_the_action_returned(
-    runs_dir: Path,
-) -> None:
+def test_the_result_table_is_exactly_what_the_action_returned() -> None:
     outcome = _run(_SelectTwo())
     assert outcome.result is not None
 
@@ -345,7 +338,7 @@ def test_the_result_table_is_exactly_what_the_action_returned(
     assert outcome.result.primary.equals(expected)
 
 
-def test_describing_a_result_does_not_alter_it(runs_dir: Path) -> None:
+def test_describing_a_result_does_not_alter_it() -> None:
     """Building metadata reads the frame; it must never rewrite it."""
     action = _SelectTwo()
     source = pl.read_csv(_sales_csv())

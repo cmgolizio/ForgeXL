@@ -19,8 +19,8 @@ and 6F.6, the release rule of 6F.7 and the no-server-paths rule of 6F.8.
 
 Every workbook is reopened from the response bytes with the application's own
 Excel engine, so an export ForgeXL could not itself ingest fails here. Nothing
-is written to disk at any point, and the ``runs_dir`` fixture is asserted empty
-to prove it.
+is written to disk at any point, and the ``quarantine`` directory is asserted
+empty to prove it.
 """
 
 from __future__ import annotations
@@ -445,7 +445,7 @@ def test_a_hostile_upload_filename_never_reaches_the_download_name(
 
 
 def test_downloading_writes_nothing_to_the_filesystem(
-    split_client, runs_dir: Path
+    split_client, quarantine: Path
 ) -> None:
     run = _run(split_client)
 
@@ -453,7 +453,7 @@ def test_downloading_writes_nothing_to_the_filesystem(
     split_client.get(f"/api/runs/{run['run_id']}/outputs/kept_rows/download/xlsx")
     split_client.get(f"/api/runs/{run['run_id']}/download/xlsx")
 
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
 
 
 def test_a_run_holds_no_rendered_export_after_a_download(split_client) -> None:

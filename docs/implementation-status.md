@@ -2,8 +2,13 @@
 
 Last Updated: 2026-09-05
 Current Phase: None
-Last Completed Phase: Phase 6H — Synthetic Spreadsheet Fixtures and End-to-End
-Regression Tests
+Last Completed Phase: Phase 6I — Cleanup, Regression Review, and Architecture
+Documentation. **Phase 6 is complete.** Phase 7 is not started.
+
+> **Architecture document.** `docs/architecture.md` was created in Phase 6I
+> (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
+> persistence behaviour and the extension point for future persistence. This
+> file remains the phase-by-phase record.
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -21,6 +26,198 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 6I — Cleanup, Regression Review, and Architecture Documentation
+
+**Phase 6 is complete.** Both authoritative documents were read in full and the
+repository was inspected before anything was edited. The session began in a
+**fresh ephemeral container**: `backend/.venv/` and `node_modules/` did not
+exist and were recreated by following the documented setup exactly. No
+undocumented step was needed and no dependency was added or changed.
+
+#### Two repository defects found and repaired first
+
+The five integrity checks the Phase 6H entry prescribes were run before any
+6I work. Two failed, both traceable to the pre-6I repair commit `8bfe29f`,
+and both were filename mistakes rather than content mistakes:
+
+- **`backend/app/api/upload-form.py` was named with a hyphen.** `runs.py` and
+  `test_upload_form.py` both import `app.api.upload_form`, and a hyphen is not
+  a legal Python module name, so the whole backend failed at import:
+  `ModuleNotFoundError: No module named 'app.api.upload_form'` — **0 of 1,039
+  tests ran**, and `python -m app.main` could not start either. Repaired with
+  `git mv` to `upload_form.py`; no content was edited. The suite then reported
+  the documented **1,039 passed** baseline exactly.
+- **`backend/tests/test_mixed_xlsv_round_trip.py` was misspelled** (`xlsv` for
+  `xlsx`). Harmless — pytest collects it by glob and nothing imports it — but
+  the Pre-6I entry records the file as `test_mixed_xlsx_round_trip.py`, so the
+  file was renamed to match its own documentation.
+
+This is the same family as Known Issues 10, 31, 32, 37 and 38 — committed
+state that cannot import or cannot run — and it is that family's **sixth**
+recorded instance. It is the first time the cause has been a character in a
+filename rather than a misplaced or stale file, which is why the four
+structural checks in place at the time all passed and only running the suite
+revealed it. The check list at the end of this document has been reordered
+accordingly.
+
+`.vscode/settings.json` is entirely commented out and has been since commit
+`679fff4`. It is a user-authored editor preference file, it breaks nothing, and
+6I.9 forbids unrelated cleanup, so it was left alone.
+
+**6I.1 — obsolete runtime filesystem code removed.** Exactly what Known Issues
+21 and 39 named, and nothing else:
+
+| Removed                                                                                                                                                                                                                                                                                                | From                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| `RunPaths` (with `working`, `exports`, `working_artifact`, `export_artifact`), `_safe_id`, `runs_directory`, `run_paths`, `create_run`, `delete_run_directory`, `_WORKING_DIRNAME`, `_EXPORTS_DIRNAME`, and the `shutil` / `UnknownRunError` / `new_run_id` / `parse_run_id` imports they alone needed | `services/storage.py`   |
+| `DATA_DIRECTORY`, `RUNS_DIRECTORY`, `_data_directory_override`                                                                                                                                                                                                                                         | `config.py`             |
+| the `FORGEXL_DATA_DIRECTORY` block                                                                                                                                                                                                                                                                     | `.env.example`          |
+| `data/runs/.gitkeep` and the `data/` tree                                                                                                                                                                                                                                                              | repository              |
+| the `runs_dir` and `run_paths` fixtures                                                                                                                                                                                                                                                                | `tests/conftest.py`     |
+| 21 tests covering the removed code                                                                                                                                                                                                                                                                     | `tests/test_storage.py` |
+
+`storage.py` went from 273 to 177 lines and now builds no path at all. What it
+keeps is the rule that justified it existing: `extension_of`,
+`stored_filename_for`, `display_filename` and `read_upload` — a client filename
+is metadata, never a path. `PROJECT_ROOT` stays in `config.py` because
+`main.py` points `uvicorn --reload` at the backend source tree with it.
+
+The 21 removed `test_storage.py` tests were all coverage of deleted code, with
+one exception worth stating: its `parse_run_id` rejection battery was a
+**duplicate** of the one in `test_run_model.py`, asserting the identical
+parametrised list against the same function through a re-export. Removing the
+copy loses no coverage; the originals still run.
+
+**The `runs_dir` fixture was replaced, not just deleted.** Over a hundred tests
+declared `runs_dir: Path` without ever reading it, purely to buy the
+`config.RUNS_DIRECTORY` redirect that kept the suite away from the real
+`data/runs`. There is no such setting to redirect any more — which is the point
+— but silently dropping the parameter from all of them would have removed that
+protection. `conftest.quarantine` replaces it: an empty temporary directory the
+test runs inside, **autouse**, so every test in the suite now gets the
+isolation only some used to. The ~20 tests that made a real assertion
+(`assert list(runs_dir.rglob("*")) == []`) assert against it by name instead.
+The other two places a stray write could land were already covered and are not
+duplicated: the OS temporary directory by the `tempfile` spies in
+`test_export.py` and `test_upload_form.py`, and an absolute path written into
+the source by `test_contract_freeze.py`.
+
+Three tests pointed `config.DATA_DIRECTORY` at a nonexistent path to prove
+nothing was written there. With the setting gone they watch the working
+directory instead — a **stronger** probe, since the backend now has nowhere
+configured at all. One new test, `test_the_backend_has_no_data_directory_
+setting_left`, pins the removal itself so it cannot be quietly undone.
+
+**`test_contract_freeze.py` needed one change, and it is not a contract
+change.** The Next Phase note said 6I had no reason to touch it. One test in it
+monkeypatched `config.DATA_DIRECTORY`, so the removal forced the same probe
+substitution as above. **No frozen value moved**: not a route, an error code, a
+metric key, a schema field or a limit. `FROZEN_ROUTES` is byte-identical. The
+module docstring records the amendment as the previous two are recorded.
+
+**6I.2 — the Phase 6A audit re-run.** Every search that document's §1
+prescribes was re-run against `backend/app` and `src`. Results:
+
+| Search                                                                                                                                  | Result                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| directory/artifact concepts (`data/`, `runs/`, `inputs/`, `working/`, `exports/`, `manifest.json`, `tmp/`)                              | Only docstrings recording history, URL route paths, and frontend URL paths. No filesystem use.                                                                         |
+| path/IO concepts (`open(`, `mkdir`, `unlink`, `rmtree`, `shutil`, `tempfile`, `FileResponse`, `is_file`, `is_dir`, `write_*`, `read_*`) | **None in `backend/app`.** The only `Path` use left is string manipulation — `PurePosixPath(...).name` in `extension_of` and `display_filename` — plus `PROJECT_ROOT`. |
+| persistent-infrastructure imports (`sqlite3`, `sqlalchemy`, `psycopg`, `redis`, `pymongo`, `supabase`, `boto3`, `duckdb`, `alembic`)    | None.                                                                                                                                                                  |
+| any file or path use inside `actions/`                                                                                                  | None. The only hits are `accepted_extensions=(".csv", ".xlsx")` — metadata, not I/O.                                                                                   |
+
+No Action requires a server-local input or output path. The audit comes back
+empty, which is what 6A wrote that document for.
+
+**6I.3 — frontend networking.** No browser request names a backend address.
+The two grep hits are prose: an illustrative arrow in the Route Handler's
+docstring, and the phrase "`NEXT_PUBLIC_`" inside a comment explaining why
+there is no such variable. `src/lib/api.js` addresses `/forge-api` only, and
+`src/lib/backend-origin.js` — the one module holding the host and port — is
+`import "server-only"` and is imported by the Route Handler alone. This was
+also confirmed **behaviourally**: in the browser verification below, every
+request Chromium issued went to the page's own origin.
+
+**6I.4 — cleanup behaviour verified.** Against a real 300,000-row / 20.4 MB
+CSV through the real pipeline: the Action succeeded, the store held a
+300,000 × 6 result frame (20.3 MB by Polars' own estimate, RSS 116 → 296 MB), a
+`weakref` confirmed the store was the only thing keeping it alive, and
+`delete_run()` made it unreachable after one `gc.collect()`. `get_run` then
+raised `UnknownRunError` / `UNKNOWN_RUN` / HTTP 404 and the store held zero
+runs. Peak RSS does not fall — the allocator keeps the arena — which is why the
+`weakref` and not a memory figure is the evidence.
+
+**6I.5 — restart behaviour verified**, against real uvicorn and a real
+`next start`, through the real `/forge-api` proxy. A Run was created, previewed
+and downloaded (CSV and XLSX, correct `Content-Disposition` filenames, accents
+intact). FastAPI was then killed and restarted with the frontend left running.
+Every route naming the pre-restart Run — retrieval, preview, per-output CSV,
+per-output XLSX and the whole-Run workbook — returned a clean structured
+`UNKNOWN_RUN` / HTTP 404. `/health` answered immediately, and a fresh Run on
+the restarted backend succeeded normally. Nothing was written to the repository
+at any point during the exercise.
+
+The same was then driven through a **real headless Chromium** against the real
+UI: a file selected through the real file input, "Run Successful" and three
+preview rows rendered, then FastAPI restarted underneath the open results page.
+The stale page's download attempt returned the structured 404; the page showed
+no `[object Object]`, no traceback, and kept rendering its result, which is
+correct — that result lives in the browser, not on the server. Lost V1 run
+history is treated as history that is gone, not as corruption.
+
+**6I.6/6I.7/6I.8 — `docs/architecture.md` created.** It documents the final
+request path, what each layer owns, the processing boundary, the Run lifecycle,
+the safety rules the architecture enforces, and how to add an Action. §5 states
+the V1 persistence behaviour in the words build plan 6I.7 requires. §6 records
+`PersistentRunStore` / `ObjectStorage` / database-backed history as the
+extension point, names the seam (`app.services.run_store.RUN_STORE`), lists
+what such an implementation would **not** have to change, and says explicitly
+that none of it is implemented and none should be built yet.
+
+**6I.9 — full regression suite run.** 1,019 passed, no failures, no skips, no
+xfails. See **Tests**.
+
+**Files created**
+
+- `docs/architecture.md`
+
+**Files modified**
+
+- `backend/app/config.py`
+- `backend/app/services/storage.py`
+- `backend/tests/conftest.py`
+- `backend/tests/test_audit.py`
+- `backend/tests/test_contract_freeze.py`
+- `backend/tests/test_exact_duplicate_remover.py`
+- `backend/tests/test_export.py`
+- `backend/tests/test_export_download.py`
+- `backend/tests/test_parser.py`
+- `backend/tests/test_preview.py`
+- `backend/tests/test_product_master_builder.py`
+- `backend/tests/test_run_model.py`
+- `backend/tests/test_run_store.py`
+- `backend/tests/test_runner.py`
+- `backend/tests/test_runs_api.py`
+- `backend/tests/test_storage.py`
+- `.env.example`
+- `.gitignore`
+- `docs/implementation-status.md`
+
+**Files renamed**
+
+- `backend/app/api/upload-form.py` → `backend/app/api/upload_form.py` (repair)
+- `backend/tests/test_mixed_xlsv_round_trip.py` →
+  `backend/tests/test_mixed_xlsx_round_trip.py` (repair)
+
+**Files deleted**
+
+- `data/runs/.gitkeep`, and the `data/` tree with it
+
+`package.json`, `package-lock.json` and `backend/requirements.txt` are
+untouched — 6I added no dependency. Nothing under `src/` was modified: the
+frontend needed no change, because it never referenced any of the removed code.
+
+---
 
 ### Pre-6I Blocker Repairs — 2026-09-05
 
@@ -1941,15 +2138,19 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           __init__.py
           run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
           storage.py          in-memory upload intake, safe filenames,
-                              upload limit — plus the run-directory
-                              helpers 6D left unused (6I removes)   (6C/6D)
+                              upload limit. Builds no path at all: the
+                              run-directory helpers 6D left unused were
+                              removed in 6I                        (6C/6D/6I)
           parser.py           parse_tabular_bytes: CSV + XLSX from memory (6C)
           runner.py           the generic Run pipeline, DataFrame-first   (6D)
           export.py           CSV/XLSX bytes from a result frame          (6D)
           preview.py          paginated slices of a result frame          (6D)
+          results.py          measuring a result table: schema, row counts,
+                              columns added and dropped                   (6E)
       tests/
         __init__.py
-        conftest.py           isolated runs dir + Run Store, registry, client
+        conftest.py           quarantine (an empty cwd, autouse), Run Store,
+                              registry, client         (runs_dir gone in 6I)
         helpers.py            make_action(), CSV/XLSX builders, upload
                               helpers, CSV/XLSX value normalisation     (6H)
         fixtures/             hand-written Action fixtures (Phase 4) plus the
@@ -1963,7 +2164,8 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_run_model.py     the logical Run and run IDs                 (6B)
         test_run_store.py     the five store operations, replaceability   (6B)
         test_storage.py       in-memory upload intake, path safety, upload
-                              limit, deletion  (rewritten in 6D; see KI 38)
+                              limit  (rewritten in 6D, see KI 38; the
+                              run-directory tests removed in 6I)
         test_parser.py        CSV, XLSX from bytes, worksheet ambiguity,
                               engine fallback                             (6C)
         test_runner.py        the pipeline, validation, failed Runs, results,
@@ -1975,8 +2177,8 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_audit.py         result metadata and the audit summary through
                               the pipeline; audit stays out of the data  (6E)
         test_runs_api.py      the Run endpoints and their status codes
-        test_contract_freeze.py  the Phase 6A freeze (amended once, in 6E,
-                              once in 6F; untouched by 6G and 6H)
+        test_contract_freeze.py  the Phase 6A freeze (amended in 6E, 6F and
+                              6I; no frozen value moved in 6I — see KI 48)
         test_spreadsheet_fixtures.py  the fixture system itself:
                               determinism, faithfulness, scenario coverage,
                               synthetic-only                             (6H)
@@ -1986,6 +2188,11 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_failure_regressions.py  the 6H.7 failure battery            (6H)
         test_exact_duplicate_remover.py / test_product_master_builder.py /
         test_action_round_trip.py                                (Phase 4)
+        test_upload_form.py   bounded memory-only multipart intake  (pre-6I)
+        test_mixed_xlsx_round_trip.py  the repaired XLSX parser through both
+                              real Actions and both exports         (pre-6I)
+        test_export_download.py  the download routes, filenames, release
+                              rule and no-server-paths rule              (6F)
 
 Installed backend packages (resolved 2026-08-22):
 
@@ -2009,17 +2216,22 @@ Backend configuration values (defaults in `backend/app/config.py`):
 
     HOST                     127.0.0.1
     PORT                     8000
-    DATA_DIRECTORY           <repo root>/data
-    RUNS_DIRECTORY           <repo root>/data/runs
     MAX_UPLOAD_BYTES         262144000  (250 MB)
     ALLOWED_FRONTEND_ORIGINS http://127.0.0.1:3000, http://localhost:3000
 
 Each is overridable through a `FORGEXL_`-prefixed environment variable
-(`FORGEXL_BACKEND_HOST`, `FORGEXL_BACKEND_PORT`, `FORGEXL_DATA_DIRECTORY`,
-`FORGEXL_MAX_UPLOAD_BYTES`, `FORGEXL_ALLOWED_FRONTEND_ORIGINS`). The prefix
-avoids collisions with the generic `HOST`/`PORT` variables that `next dev` and
-other local tooling also read; build plan §20 names the settings, not the
-variable names.
+(`FORGEXL_BACKEND_HOST`, `FORGEXL_BACKEND_PORT`, `FORGEXL_MAX_UPLOAD_BYTES`,
+`FORGEXL_ALLOWED_FRONTEND_ORIGINS`). The prefix avoids collisions with the
+generic `HOST`/`PORT` variables that `next dev` and other local tooling also
+read; build plan §20 names the settings, not the variable names.
+
+**There is no data-directory setting.** `DATA_DIRECTORY`, `RUNS_DIRECTORY` and
+`FORGEXL_DATA_DIRECTORY` were removed in Phase 6I along with the code that read
+them (6I.1), so the backend has no configured place to write at all. The one
+path constant left is `PROJECT_ROOT`, used only to point `uvicorn --reload` at
+the backend source tree. Build plan §20 lists a data directory among the
+settings to centralise; the Phase 6 architectural rules, which override earlier
+conflicting instructions, removed the need for one. See **Deviations**.
 
 ### API surface (current)
 
@@ -2148,28 +2360,45 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 
 ### Directory status vs build plan §10
 
-| Path                    | Status                                                       |
-| ----------------------- | ------------------------------------------------------------ |
-| `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1)  |
-| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)     |
-| `src/lib/`              | Exists (`api.js`, `formatters.js`, `backend-origin.js` — 6G) |
-| `backend/app/`          | Exists (`main.py`, `config.py`)                              |
-| `backend/app/api/`      | Exists (`actions.py`, `runs.py`)                             |
-| `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)     |
-| `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                              |
-| `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview) |
-| `backend/tests/`        | Exists (22 test modules and `fixtures/` — 4 added in 6H)     |
-| `data/runs/`            | Exists (`.gitkeep` only; nothing is written there — 6D)      |
-| `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)            |
-| `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)               |
-| `.env.example`          | Exists                                                       |
-| `.env.local`            | Not present — not required (frontend default fallback)       |
+| Path                    | Status                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1)                                                              |
+| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)                                                                 |
+| `src/lib/`              | Exists (`api.js`, `formatters.js`, `backend-origin.js` — 6G)                                                             |
+| `backend/app/`          | Exists (`main.py`, `config.py`)                                                                                          |
+| `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`)                                                                       |
+| `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
+| `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                                                                                          |
+| `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview, results)                                                    |
+| `backend/tests/`        | Exists (24 test modules and `fixtures/`)                                                                                 |
+| `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
+| `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)                                                                        |
+| `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)                                                                           |
+| `.env.example`          | Exists (no `FORGEXL_DATA_DIRECTORY` line since 6I)                                                                       |
+| `docs/`                 | Exists (`build-plan.md`, `implementation-status.md`, `phase-6a-compatibility-audit.md`, `architecture.md` — added in 6I) |
+| `.env.local`            | Not present — not required (frontend default fallback)                                                                   |
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/phase-6h-fixtures-regression-1uz3xp
-    Branched from:  bda091b  "small fix from prev commit"
+    Current branch: claude/forgexl-phase-6i-cleanup-0vs4f1
+    Branched from:  8bfe29f  "fixed problems prior to starting Phase 6I"
+
+**`main` is behind by six phases.** At the start of Phase 6I, `origin/main` was
+at `70c41b1` ("phase 6C fix"): Phases 6D, 6E, 6F, 6G, 6H and the pre-6I repairs
+are all on branches `main` does not contain. This is Known Issue 54, still
+unresolved and now larger. The 6I branch descends from `8bfe29f`, which carries
+all of that work, so nothing was skipped or duplicated — but a future session
+that inspects only `main` will conclude, wrongly, that most of Phase 6 was
+never done. Merging the phase branches would remove the hazard for good.
+
+Phase 6I's diff is one new document (`docs/architecture.md`), two backend
+modules, sixteen test modules, `.env.example`, `.gitignore` and this file, plus
+two file renames and the removal of `data/runs/.gitkeep`. `package.json`,
+`package-lock.json` and `backend/requirements.txt` are untouched, and nothing
+under `src/` changed.
+
+(The paragraphs below record earlier sessions' own view of the tree.)
 
 Phase 6H's changes are on `claude/phase-6h-fixtures-regression-1uz3xp`. The
 diff is **six new test files plus one modified test helper and this
@@ -2269,6 +2498,146 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 6I)
+
+Environment note: this session started in a **fresh ephemeral container** —
+`backend/.venv/` and `node_modules/` did not exist and were recreated by
+following the documented setup exactly (`python3 -m venv backend/.venv`,
+`pip install -r backend/requirements.txt`, `npm install`). No undocumented step
+was needed and no dependency was added.
+
+**The five integrity checks were run first, and two failed.** `git branch -r`
+showed `origin/main` at `70c41b1`, six phases behind (Known Issue 54). The
+duplicate-checksum check printed nothing, as required. The suite could not run
+at all — `ModuleNotFoundError: No module named 'app.api.upload_form'`, **0 of
+1,039 collected** — because `backend/app/api/upload-form.py` was committed with
+a hyphen. After the `git mv` repair the suite reported the documented
+**1,039 passed** baseline exactly, and `npm run build` succeeded.
+
+    cd backend && .venv/bin/python -m pytest
+      ->  1019 passed, 2 warnings in 9.84s
+
+    no failures · no skips · no xfails
+
+| Module             |    6H |    6I | Change                                            |
+| ------------------ | ----: | ----: | ------------------------------------------------- |
+| `test_storage.py`  |    64 |    43 | **-21** — coverage of the code 6I deleted         |
+| `test_runner.py`   |    51 |    52 | **+1** — the removal is pinned against regression |
+| every other module |   924 |   924 | unchanged                                         |
+| **Total**          | 1,039 | 1,019 | **-20**                                           |
+
+The arithmetic is exact and worth stating, because a _falling_ test count in a
+cleanup phase is the shape a weakened suite has. The 21 removed tests were:
+`create_run` directory creation (3), `new_run_id` round trip (1), the
+`parse_run_id` rejection battery (8 parametrised), `RunPaths` artifact-path
+safety (4 parametrised), and `delete_run_directory` (5). Every one covered a
+function that no longer exists. The `parse_run_id` battery was a **duplicate**
+of the identical list in `test_run_model.py`, which still runs. **No test was
+skipped, weakened, renamed or deleted to make the suite green**, and no
+assertion was loosened: the three tests whose filesystem probe had to move now
+watch the process working directory, which is a stronger place to watch than a
+config value that no longer exists.
+
+Per-module counts at 6I:
+
+    test_end_to_end.py              178      test_run_model.py            37
+    test_spreadsheet_fixtures.py    123      test_run_store.py            34
+    test_contract_freeze.py          84      test_actions.py              30
+    test_runs_api.py                 59      test_export_download.py      29
+    test_export.py                   56      test_audit.py                22
+    test_failure_regressions.py      52      test_preview.py              21
+    test_runner.py                   52      test_exact_duplicate_remover 21
+    test_parser.py                   50      test_input_slots.py          19
+    test_storage.py                  43      test_action_round_trip.py    17
+    test_product_master_builder.py   34      test_results.py              17
+                                             test_api.py                  14
+                                             test_upload_form.py          13
+                                             test_schemas.py              12
+                                             test_mixed_xlsx_round_trip.py 2
+
+The two warnings are the pre-existing upstream ones (Known Issue 7): Starlette's
+deprecated `httpx` test-client integration and its deprecated AnyIO
+`BlockingPortal` alias. Neither was suppressed.
+
+### Phase 6I integrity and static checks
+
+| Check                                                  | Result                                               |
+| ------------------------------------------------------ | ---------------------------------------------------- |
+| `git branch -r`                                        | `main` six phases behind — Known Issue 54            |
+| backend modules under `backend/app/`, not `src/app/`   | Pass                                                 |
+| `md5sum backend/tests/*.py \| ... \| uniq -d`          | Prints nothing — pass                                |
+| `cd backend && .venv/bin/python -m pytest`             | Baseline 1,039 after repair; 1,019 at end            |
+| `npx --yes pyright`                                    | 0 errors, 0 warnings, 0 informations                 |
+| `npm run lint`                                         | Exit 0, no findings                                  |
+| `NEXT_TELEMETRY_DISABLED=1 npm run build`              | Exit 0; `/`, `/_not-found`, `/forge-api/[...path]`   |
+| `git diff --cached --check`                            | Exit 0, no whitespace errors                         |
+| No stray file written into the repository by the suite | `git status --porcelain` shows only intended changes |
+
+### Phase 6I audit re-run (6I.2 / 6I.3)
+
+Every search `docs/phase-6a-compatibility-audit.md` §1 prescribes, re-run
+against `backend/app` and `src`:
+
+| Search                                                                                 | Hits                                                                                                 |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `data/ runs/ inputs/ working/ exports/ manifest.json tmp/`                             | docstrings recording history, URL route paths, frontend URL paths — no filesystem use                |
+| `open( mkdir unlink rmtree shutil tempfile FileResponse is_file is_dir write_* read_*` | **none in `backend/app`**                                                                            |
+| `Path(` / `pathlib`                                                                    | `PurePosixPath(...).name` string handling in `extension_of` / `display_filename`, and `PROJECT_ROOT` |
+| `sqlite3 sqlalchemy psycopg redis pymongo supabase boto3 duckdb alembic`               | none                                                                                                 |
+| file or path use inside `actions/`                                                     | none — only `accepted_extensions` metadata                                                           |
+| `localhost:8000` / `127.0.0.1:8000` / `NEXT_PUBLIC` in the frontend                    | two comment lines; no request                                                                        |
+
+### Phase 6I live verification (real uvicorn, real `next start`, real proxy)
+
+| Check                                                                  | Result                                                                         |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `GET /forge-api/health` through the proxy                              | `{"status":"ok"}`                                                              |
+| `POST /forge-api/api/runs`, product_master_builder, 5-row CSV          | 200, `succeeded`, 5 rows -> 3, accents preserved                               |
+| Preview through the proxy                                              | 3 rows, correct `column_schema`, `Château Margaux` / `Sélection Privée` intact |
+| CSV download                                                           | 200, `forgexl-product-master-builder-product-master-<ts>.csv`, exact bytes     |
+| XLSX download                                                          | 200, correct media type and filename, 6,318 bytes                              |
+| Repository tree after all of it                                        | No `data/` directory; `git status` shows only intended edits                   |
+| **FastAPI killed and restarted, frontend left running**                | `/health` ok immediately                                                       |
+| Pre-restart Run: retrieval / preview / CSV / XLSX / whole-Run workbook | All five: structured `UNKNOWN_RUN`, HTTP 404 — no crash, no 500                |
+| Fresh Run on the restarted backend                                     | 200, `succeeded`, metrics and audit correct                                    |
+| Any local path in a manifest                                           | None                                                                           |
+
+### Phase 6I memory-release verification (6I.4)
+
+Real pipeline, 300,000-row / 20.4 MB CSV through `product_master_builder`:
+
+| Step                                  | Observation                                               |
+| ------------------------------------- | --------------------------------------------------------- |
+| Result frame held by the Run Store    | 300,000 x 6, 20.3 MB (Polars estimate); RSS 116 -> 296 MB |
+| `weakref` after dropping local refs   | Still alive — the store is the only holder                |
+| `delete_run(run_id)` + `gc.collect()` | `weakref()` is `None` — frame unreachable                 |
+| `get_run` afterwards                  | `UnknownRunError` / `UNKNOWN_RUN` / HTTP 404              |
+| `list_runs()`                         | 0 runs                                                    |
+
+Peak RSS does not fall afterwards, because the allocator keeps its arena. The
+`weakref` is the evidence, not the memory figure.
+
+### Phase 6I browser verification (real headless Chromium)
+
+Chromium 1194 via Playwright installed **outside the repository**, driving the
+real production build over real HTTP:
+
+| Check                                                    | Result                                                       |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| Page load                                                | "Backend Connected"                                          |
+| Action selected, file chosen through the real file input | Accepted                                                     |
+| Run                                                      | "Run Successful", 3 preview rows, metrics and audit rendered |
+| Every request the browser issued                         | `http://127.0.0.1:3000/forge-api/...` — **never** `:8000`    |
+| FastAPI restarted underneath the open results page       | Page keeps rendering its result                              |
+| Stale download attempted from that page                  | Structured `UNKNOWN_RUN` 404                                 |
+| `[object Object]` anywhere on the page                   | No                                                           |
+| Traceback anywhere on the page                           | No                                                           |
+| Console errors                                           | One — the expected 404 from the deliberately stale request   |
+
+Playwright, its browser and the verification servers all live outside the
+repository and were stopped afterwards; `package.json` gained no dependency
+(Deviation 22 still stands).
 
 ### Backend test suite (Phase 6H)
 
@@ -4624,6 +4993,79 @@ remaining code blocker was found in this repair pass. Known Issue 64 remains
 an outstanding target-hardware acceptance check; the other deferred work
 keeps its existing phase ownership.
 
+**Added in Phase 6I:**
+
+70. **Committed state that could not import — the sixth instance, this time a
+    filename.**
+    Commit `8bfe29f` committed `backend/app/api/upload-form.py` with a hyphen,
+    which is not a legal Python module name, while `runs.py` and
+    `test_upload_form.py` both import `app.api.upload_form`. The backend could
+    not import at all: **0 of 1,039 tests ran**, and `python -m app.main` would
+    not start. The same commit misspelled
+    `backend/tests/test_mixed_xlsv_round_trip.py` (`xlsv` for `xlsx`), which
+    was harmless but did not match the name this document records. Both were
+    repaired with `git mv`; no content was edited.
+
+    Known Issues 10, 31, 32, 37 and 38 are the same family — committed state
+    that cannot import or cannot run. Two were the `src/app/` vs `backend/app/`
+    confusion, two were a test module overwritten with a copy of another, one
+    was a test module left stale by the commit that should have rewritten it,
+    and this one is a character in a filename. The existing structural checks
+    looked for none of the last kind. **The check list at the end of this
+    document now runs the suite first, which catches every variant at once**,
+    and it is the check that caught this one.
+
+71. ~~**`services/storage.py` holds dead runtime code** (Known Issue 39).~~
+    Resolved in Phase 6I. `create_run`, `RunPaths` and its members,
+    `run_paths`, `runs_directory` and `delete_run_directory` are gone, along
+    with the `shutil` import they alone needed. The module is 177 lines, down
+    from 273, and builds no path at all.
+
+72. ~~**`FORGEXL_DATA_DIRECTORY` is a documented setting with no consumer**
+    (Known Issue 21).~~ Resolved in Phase 6I, in the same phase as the code, as
+    that issue required. `config.DATA_DIRECTORY`, `config.RUNS_DIRECTORY`, the
+    `.env.example` block and the `data/` tree are all gone. `.env.example` now
+    says explicitly that there is no data-directory setting and why.
+
+73. **`test_contract_freeze.py` was amended a third time, in a cleanup phase.**
+    The Next Phase note written at the end of 6H said 6I had no reason to touch
+    it, and that an edit to `FROZEN_ROUTES` during a cleanup phase would mean
+    something had changed that 6I was not asked to change. That warning holds:
+    `FROZEN_ROUTES` is byte-identical, and no route, error code, metric key,
+    schema field or limit moved. What changed is one test that monkeypatched
+    `config.DATA_DIRECTORY` — a setting 6I.1 was explicitly instructed to
+    delete — plus two docstring sentences. Recorded because the module's value
+    comes from a reader being able to see that every change to it was a
+    decision.
+
+74. **The suite's filesystem isolation is now autouse, which changes ~1,000
+    tests' environment.** `conftest.quarantine` chdirs each test into an empty
+    temporary directory. That is a deliberate translation of what the
+    `runs_dir` fixture was doing for the hundred-plus tests that declared it
+    without reading it, applied uniformly rather than dropped — but it does
+    mean every test now runs with a different working directory than before.
+    Three tests in `test_parser.py` asserted `tmp_path` was empty and had to be
+    pointed at `quarantine` instead, since the fixture's directory lives inside
+    `tmp_path`. Any future test that asserts on `tmp_path` as a whole will need
+    the same treatment; asserting on `quarantine` is the pattern to follow.
+
+75. **`main` is now six phases behind, and Known Issue 54 has grown.** At the
+    start of this session `origin/main` was at `70c41b1` ("phase 6C fix").
+    Phases 6D, 6E, 6F, 6G, 6H, the pre-6I repairs and now 6I are all on
+    branches `main` does not contain. Nothing is lost — each branch descends
+    from the last — but a session that inspects `main` alone will conclude that
+    most of Phase 6 was never built. That has already caused one recorded
+    incident (Known Issue 54). Merging the phase branches is the fix and is the
+    user's to make.
+
+76. **`README.md` is still the Create Next App default, and now omits more.**
+    Known Issue 4, unchanged and still Phase 8.2's, but worth restating at the
+    end of Phase 6: a new reader finds nothing there about `npm run dev:lan`,
+    about running the test suite, about the backend virtual environment, or
+    about `docs/architecture.md`. 6I.9 forbids unrelated cleanup and 6I.6 asks
+    for an architecture document, not a README rewrite, so the architecture
+    document was written and the README was left alone.
+
 ---
 
 ## Deviations From Build Plan
@@ -5071,6 +5513,41 @@ failed` as an example and says explicitly: "Use existing equivalent status
     two normalisation helpers added alongside it are new functions, not changes
     to existing ones.
 
+51. **`data/runs/` no longer exists, and neither does `data/` (Phase 6I).**
+    Build plan §10 sketches `data/runs/.gitkeep` in the expected repository
+    structure, and §11 specifies a per-Run directory tree under it. Nothing has
+    been written there since Phase 6D, and the Phase 6 architectural rules —
+    which state that they override any earlier build-plan instruction that
+    conflicts with them — remove the need for it entirely (rules 1-3). Build
+    plan **6I.1** then explicitly assigns removing "run-directory creation …
+    working-directory creation … export-directory creation … path-building
+    helpers" to this phase. The directory was removed with them. The
+    `.gitignore` rule was kept, widened to `data/`, so a directory reintroduced
+    by accident is not committed.
+
+52. **The backend has no data-directory setting (Phase 6I).** Build plan §20
+    lists `DATA_DIRECTORY` among the settings backend configuration should
+    centralise. It is gone, for the same reason as Deviation 51: there is
+    nothing left that could read it, and leaving it would mean `.env.example`
+    documented a variable that does nothing — the exact outcome Known Issue 21
+    was recorded to prevent. `HOST`, `PORT`, `MAX_UPLOAD_BYTES` and
+    `ALLOWED_FRONTEND_ORIGINS`, the other four settings §20 names, are all
+    still centralised in `config.py`.
+
+53. **Build plan §28 (internal Parquet) is superseded, and now permanently.**
+    Recorded as a deliberate reversal in Known Issues 24 and 41 and carried out
+    in Phase 6D. Restated here at the close of Phase 6 because it is the one
+    place where a numbered build-plan section describes a mechanism the
+    finished V1 does not have: the preview is sliced from the retained result
+    DataFrame, as build plan 6E.2 requires and as 6E.2 explicitly forbids doing
+    any other way.
+
+54. **`docs/architecture.md` is a fourth document under `docs/` (Phase 6I).**
+    Build plan §10 sketches `docs/` as holding `build-plan.md` and
+    `implementation-status.md`. 6A added `phase-6a-compatibility-audit.md` and
+    6I.6 asks for the architecture to be documented; a section inside the
+    status file would have buried it in a 5,000-line phase log. Layout only.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -5095,100 +5572,98 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 6I — Cleanup, Regression Review, and Architecture Documentation**
+**Phase 7 — Reliability, Accuracy, Security, and Performance Hardening**
 
 **Not started.** Nothing for it was scaffolded, stubbed or prepared during
-Phase 6H. `services/storage.py` still holds its dead runtime code,
-`config.DATA_DIRECTORY` and `RUNS_DIRECTORY` are still defined and still
-documented in `.env.example`, `data/runs/` still exists with its `.gitkeep`,
-and `docs/` still has no architecture document.
+Phase 6I. No benchmark fixture, no performance harness, no security probe and
+no dependency decision was made.
 
-**Where 6I starts from.** The backend suite is **1,039 passed, zero xfails**,
-with two existing upstream deprecation warnings. Python type checks and
-ESLint are clean; the production build succeeds. The user-authorised
-**Pre-6I Blocker Repairs** below the Completed heading fixed upload intake,
-XLSX value preservation, and fixture determinism without executing Phase 6I.
-The historical Phase 6H sections retain their original test counts.
+### Phase 6 is complete
 
-**What Phase 6I owns** (build plan 6I.1-6I.9)
+Every completion criterion build plan Phase 6I lists, checked against what is
+actually in the repository:
 
-- **6I.1 — remove the obsolete runtime filesystem code.** Named precisely by
-  Known Issues 21 and 39: `storage.create_run()`, `RunPaths` and its `working`
-  / `exports` / `working_artifact` / `export_artifact` members, `run_paths()`,
-  `runs_directory()`, `delete_run_directory()`, plus `config.DATA_DIRECTORY`
-  and `RUNS_DIRECTORY`, the `.env.example` line documenting
-  `FORGEXL_DATA_DIRECTORY`, and the `data/runs/` directory itself. The
-  `runs_dir` and `run_paths` fixtures in `tests/conftest.py` exist only to
-  serve that code and to assert the directory stays empty; they go with it, and
-  so do the parts of `test_storage.py` that cover it. **`.env.example` must be
-  corrected in the same phase**, or the file will document a setting that does
-  nothing.
-- **6I.2/6I.3 — re-run the Phase 6A audit** against
-  `docs/phase-6a-compatibility-audit.md`, and search the frontend for
-  networking code that still names a backend address. Both should now come back
-  empty; 6A wrote that document specifically so this search could be done
-  against it.
-- **6I.4/6I.5 — verify cleanup and restart behaviour.** A Run's memory is
-  released when the Run is forgotten (already pinned by a `weakref` test in
-  `test_runner.py`), and a backend restart clears run history (Known Issue 25,
-  which is authorised behaviour, not a defect).
-- **6I.6/6I.7/6I.8 — the architecture documentation.** The V1 persistence
-  behaviour and the `PersistentRunStore` extension point are described in this
-  file in prose (Known Issues 25, 28, 49); 6I is where they become the
-  architecture document the build plan asks for.
-- **6I.9 — run the complete regression suite.** That is now a single command,
-  which is what Phase 6H was for.
+| Criterion                                              | Evidence                                                                    |
+| ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| Uploads processed without persistent server-side files | 6C; re-verified live in 6I — no `data/` directory exists at all             |
+| Actions operate on DataFrames, not paths               | 6D; 6I audit finds no file or path use in `actions/`                        |
+| Results remain in runtime state                        | 6D; `Run.result` holds the frames                                           |
+| Previews work                                          | 6D/6E; verified live and in the browser                                     |
+| Metrics work                                           | 6E; verified live and in the browser                                        |
+| Audit summaries work                                   | 6E; verified live and in the browser                                        |
+| CSV export works                                       | 6F; exact bytes verified through the proxy                                  |
+| XLSX export works                                      | 6F; reopened and verified, correct filename and media type                  |
+| Browser requests use `/forge-api/*`                    | 6G; every Chromium request observed in 6I went to the page's own origin     |
+| FastAPI can remain on `127.0.0.1`                      | 6G; `config.HOST` in every script                                           |
+| Next.js reachable from a second laptop                 | 6G, `npm run dev:lan` — **not accepted on real hardware; Known Issue 64**   |
+| The second laptop can upload real files                | Exercised by a real browser and a real file input — **not on a second Mac** |
+| The second laptop can download real XLSX results       | Exercised the same way — **not opened in Microsoft Excel**                  |
+| Synthetic integration tests pass                       | 6H; 1,019 passed at 6I                                                      |
+| Prior Phase 0/1-5 functionality still passes           | Whole suite green; the 6A freeze holds with no contract value changed       |
+| Obsolete filesystem assumptions removed                | 6I.1; the 6A audit re-run comes back empty                                  |
+| Architecture documented                                | `docs/architecture.md`                                                      |
 
-**What 6H leaves 6I to be careful about**
+**Two criteria are met only in substance, not on the target hardware.** Build
+plan 6G.7-6G.9 asks for an XLSX file selected from a _second laptop's own file
+picker_ and for the exported workbook to be _opened in Microsoft Excel_.
+Neither has happened; both are the user's to run, on the two Macs (Known
+Issue 64). Everything that a single machine can prove about that path has been
+proved — a real browser, a real file input, a real non-loopback address, a real
+download, reopened and verified — but a Mac file picker and Excel's own
+acceptance are not among them. Nothing in the code is expected to change if
+they fail; the finding would be a UX or Excel-compatibility one.
 
-- **The new suite asserts that `data/runs/` stays empty, and 6I deletes the
-  directory.** `test_end_to_end.py`, `test_input_slots.py` and
-  `test_failure_regressions.py` all take the `client` fixture, which depends on
-  `runs_dir`. When that fixture goes, those three modules need the dependency
-  removed — a one-line change each, not a rewrite. Nothing in them reads or
-  writes a path.
-- **`test_contract_freeze.py` is byte-identical to its 6F state** and 6I has no
-  reason to change it. If `FROZEN_ROUTES` needs an edit during a _cleanup_
-  phase, something has changed that 6I was not asked to change.
-- **Keep the mixed-XLSX regression and the upload-intake tests.** Known Issue
-  65 is fixed and its assertions are now ordinary passing tests. In particular,
-  a small TestClient upload cannot by itself prove that a large multipart
-  upload stays in memory; retain the temporary-file failure spy and the
-  streaming limit/disconnect checks.
+### Where Phase 7 starts from
 
-**What later phases still own**
+    cd backend && .venv/bin/python -m pytest   ->  1019 passed, 0 xfails
+    npx --yes pyright                          ->  0 errors
+    npm run lint                               ->  exit 0
+    NEXT_TELEMETRY_DISABLED=1 npm run build    ->  exit 0
 
-- **Phase 7A** — whether the committed suite should drive Next.js at all
-  (Deviation 22, Known Issues 66 and 69). 6H deliberately did not, so the proxy
-  and the real-HTTP layer are still verified by scratchpad scripts rewritten
-  each session.
-- **Phase 7G-7J** — performance fixtures at 100,000 rows, XLSX timing, preview
-  timing, and the retention policy for result frames accumulating in
-  `InMemoryRunStore` (Known Issue 40). 6H's `large_table()` generator is
-  reusable for those and takes any row count.
-- **Phase 8.2** — `README.md` is still the Create Next App default (Known Issue
-  4). It is now also the only place a new reader would look for `npm run
-dev:lan` and for how to run the test suite.
+Two upstream deprecation warnings remain and are deliberately unsuppressed
+(Known Issue 7). Read `docs/architecture.md` before `docs/implementation-status.md`:
+the architecture is stated once there, and this file is the phase log.
 
-**The two-Mac acceptance is still outstanding (Known Issue 64).** Build plan
-6G.7 asks for an XLSX file selected from a second laptop's own file picker and
-for the exported workbook to be opened in Microsoft Excel. Neither has
-happened; both are the user's to run. Phase 6H does not change that and was
-never going to — it is the phase that makes everything _except_ those two
-things testable without a second machine.
+### What Phase 7 inherits
 
-**Before writing any code, verify the repository is intact.**
+- **7A** — the dependency and warning decisions: `httpx` vs `httpx2`
+  (Known Issue 7), and whether the committed suite should drive Next.js at all
+  (Deviation 22, Known Issues 66 and 69). The `/forge-api` proxy still has no
+  committed regression test, and the specific risk is named: the Route Handler
+  must keep **streaming** the request body, and nothing in the repository would
+  catch a change that reads it.
+- **7G-7J** — performance. Nothing has been measured (Known Issue 14), and the
+  build plan's own targets (§3.4: 100,000 rows, under 15 s) must be produced on
+  the real Mac, not in this Linux container (Known Issue 3). 6H's
+  `large_table()` takes any row count and is the fixture to use. 7J owns the
+  retention policy for result frames accumulating in `InMemoryRunStore`
+  (Known Issue 40), and the memory profile of a 250 MB upload held in memory
+  (Known Issue 34).
+- **7K** — Next.js telemetry (Known Issue 1). The repo-local option is
+  exporting `NEXT_TELEMETRY_DISABLED=1` in the dev scripts.
+- **Phase 8.2** — `README.md` is still the Create Next App default (Known
+  Issues 4 and 76).
 
-    git branch -r                                    # is the last phase on an unmerged branch?
+### Before writing any code, verify the repository is intact
+
+    cd backend && .venv/bin/python -m pytest          # FIRST — catches everything below at once
+    git branch -r                                     # is the last phase on an unmerged branch?
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
+    ls backend/app/api/*.py backend/tests/*.py        # legal module names — no hyphens, no typos
     md5sum backend/tests/*.py | awk '{print $1}' | sort | uniq -d
-    cd backend && .venv/bin/python -m pytest
     npm run build
 
-The first must show whether a completed phase is sitting on a branch `main`
-does not contain (Known Issue 54 — it has been, twice). The second must show
-the backend modules under `backend/`. The third must print nothing. The fourth
-must report **1039 passed, zero xfails** at this repair baseline. The fifth
-must succeed. Recheck the current branch and test counts when later work lands.
+**Run the suite first.** Phase 6I found the backend unable to import at all
+because one committed file had a hyphen in its name; the four structural checks
+that existed at the time all passed, and only running the suite revealed it.
+This family of defect — committed state that cannot import or cannot run —
+has now occurred six times (Known Issues 10, 31, 32, 37, 38 and 70), and the
+suite catches every variant of it in one command.
 
-Do not begin Phase 7.
+The suite must report **1019 passed, zero xfails**. `git branch -r` must show
+whether a completed phase is sitting on a branch `main` does not contain —
+**at the time of writing, `main` is six phases behind** (Known Issue 75). The
+module-name check must find no hyphen in any `.py` filename. The checksum check
+must print nothing. The build must succeed.
+
+Do not begin Phase 7 until instructed.
