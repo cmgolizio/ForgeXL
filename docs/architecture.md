@@ -1,6 +1,9 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 6I.
+**Status:** current as of Phase 8 — the end of the proof of concept.
+Phase 7 added two refusals to §7 and the telemetry decision to §8; Phase 8
+changed no architecture at all, and re-verified every claim below against the
+running application.
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 

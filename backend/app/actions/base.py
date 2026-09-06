@@ -3,10 +3,14 @@
 An Action is a reusable, deterministic data-processing recipe. It declares what
 it needs and what it produces, and it transforms dataframes. Nothing else.
 
-The runner — not the Action — owns the generic mechanics: creating the Run
-directory, preserving the upload, parsing files, checking required columns,
-writing Parquet, generating CSV/XLSX exports and writing the manifest. Keeping
-that split intact is what makes a new Action a single new module.
+The runner — not the Action — owns the generic mechanics: reading the upload
+into memory, parsing it, checking required columns, recording the Run and its
+metrics, and generating CSV/XLSX exports on request. Keeping that split intact
+is what makes a new Action a single new module.
+
+(Before Phase 6 the runner also created a Run directory, preserved the upload,
+wrote an internal Parquet file and wrote a manifest file. Nothing is written to
+disk any more — see docs/architecture.md — but the split itself is unchanged.)
 
 Actions are ordinary imported Python. There is no plugin loader and nothing is
 ever executed from disk at runtime.
