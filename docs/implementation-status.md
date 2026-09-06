@@ -1,9 +1,9 @@
 # Implementation Status
 
-Last Updated: 2026-09-05
+Last Updated: 2026-09-06
 Current Phase: None
-Last Completed Phase: Phase 6I — Cleanup, Regression Review, and Architecture
-Documentation. **Phase 6 is complete.** Phase 7 is not started.
+Last Completed Phase: Phase 7 — Reliability, Accuracy, Security, and
+Performance Hardening. **Phase 7 is complete.** Phase 8 is not started.
 
 > **Architecture document.** `docs/architecture.md` was created in Phase 6I
 > (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
@@ -26,6 +26,465 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 7 — Reliability, Accuracy, Security, and Performance Hardening
+
+Both authoritative documents were read in full and the repository was inspected
+before anything was edited. The session began in a **fresh ephemeral
+container**: `backend/.venv/` and `node_modules/` did not exist and were
+recreated by following the documented setup exactly.
+
+Build plan Phase 7's instruction is "attempt to break the POC — do not merely
+demonstrate the happy path", so the work was done in that order: probe first,
+fix what the probes broke, then pin each finding with a test. **Three real
+accuracy defects were found and two were repaired**; the third is a limitation
+of floating-point representation and is documented rather than redesigned.
+
+#### Three repository defects found and repaired first
+
+The check list the Phase 6I entry prescribes was run before any Phase 7 work.
+The suite is the first check for the reason that entry gives, and it earned
+its place again — **the committed suite was not green**:
+
+- **`backend/app/api/upload-form.py` was still present**, alongside
+  `upload_form.py`, byte-identical to it. The Phase 6I entry records a
+  `git mv`; what is in the commit is an *add* of the correct name with the
+  hyphenated one left behind. Harmless only by luck — nothing imports the
+  hyphenated name because nothing can — but it is an unimportable module
+  sitting in the application package. Deleted.
+- **`backend/tests/test_mixed_xlsv_round_trip.py` was still misspelled**
+  (`xlsv` for `xlsx`). The same Phase 6I entry records this rename as done
+  too. Renamed with `git mv`; no content was edited.
+- **`test_export.py::test_generating_an_export_writes_nothing` still declared
+  the `runs_dir` fixture**, which 6I deleted from `conftest.py`. The suite
+  reported **1,018 passed, 1 error** rather than the documented 1,019 passed.
+  Repaired by the substitution Known Issue 74 documents as the pattern:
+  `runs_dir` becomes `quarantine`. The suite then reported the documented
+  **1,019 passed** exactly.
+
+This is the same family as Known Issues 10, 31, 32, 37, 38 and 70 — committed
+state that does not match its own record — and it is that family's **seventh**
+instance. Two of the three were claimed as done in the previous phase entry,
+which is a new variant worth naming: the check list catches a repository that
+cannot run, but nothing was checking a phase entry against the tree it
+describes. The check list at the end of this document has been extended.
+
+---
+
+#### 7A — Regression tests
+
+The full suite, frontend lint and a frontend production build, run first
+against the repaired baseline and again at the end. No warning was suppressed
+to make output clean. The two upstream deprecation warnings remain
+unsuppressed (Known Issue 7); the `httpx` / `httpx2` dependency decision this
+phase inherited is recorded under **Issues** below.
+
+#### 7B — Data edge cases → **one accuracy defect found and repaired**
+
+Every case build plan 7B lists was driven through the real pipeline. Most
+behaved correctly and are now pinned by `tests/test_data_edge_cases.py`
+(36 tests, both upload formats wherever a workbook can express the case).
+
+**Defect: a duplicated column name was silently renamed.** A file whose header
+row names two columns the same thing was accepted, and every parser resolved
+the clash by renaming the later column and carrying on:
+
+| Engine | `SKU, Vintage, SKU` became |
+| ------ | -------------------------- |
+| Polars CSV | `SKU, Vintage, SKU_duplicated_0` |
+| fastexcel | `SKU, Vintage, SKU_1` |
+| openpyxl | a Polars `DuplicateError`, reported as a generic parse failure |
+
+Through the Product Master Builder the consequence was concrete and silent:
+the Run **succeeded**, the Action selected the first `SKU`, and the second
+column's values were dropped from the result with no warning anywhere in the
+manifest. Build plan section 3.3 forbids this in three separate clauses —
+never silently rename required columns, never silently choose a semantically
+different field, never silently drop data.
+
+**Repaired** by checking the header row *as the file spells it*, before any
+engine has renamed anything, and refusing with a new structured
+`DUPLICATE_COLUMNS` / 422. Refusal rather than a warning, for the reason build
+plan section 17 gives for the multi-worksheet case: the application cannot
+know which of the two columns was meant, and guessing produces a wrong answer
+that looks right. Names are compared **exactly**, so `SKU` and `sku` are two
+names and neither is a duplicate; blank header cells are exempt, because two
+unnamed columns are not one name used twice.
+
+Everything else 7B lists behaves correctly and is now asserted:
+
+| Case | Behaviour |
+| ---- | --------- |
+| empty CSV (zero bytes) | `EMPTY_FILE` / 422 |
+| CSV holding only a newline | `PARSE_ERROR` / 422 |
+| headers only | `EMPTY_DATASET` / 422 — a different fact, told apart |
+| one-row dataset | round-trips exactly |
+| duplicate rows | exact repeats removed, near-misses kept |
+| all-null column | survives as a column of nulls, not dropped |
+| Unicode, accents, apostrophes | preserved; accented and unaccented names stay two rows |
+| commas inside quoted CSV cells | preserved as one value |
+| multiline CSV text | preserved; verified again by exporting and re-uploading |
+| dates | read as the text they are; date-shaped nonsense is not repaired |
+| negative numbers, zero, negative zero | preserved |
+| blank values | stay null, never an empty string |
+| large text cells | 40,000 characters survive CSV upload, preview and export |
+
+**Documented limitation, not repaired: floating-point precision.** A numeric
+column holding *both* a decimal and an integer larger than 2^53 is inferred as
+`Float64`, and 2^53 + 1 reads back as 2^53. The conditions are narrow and are
+pinned by three tests: an **integer-only** column is exact at any size (Polars
+widens past 64 bits when the file asks), a column holding any text stays text
+and loses nothing, and only the *mixed* case is affected. This is IEEE-754 —
+the same representation Excel itself uses, so the same file shows the same
+number there — and repairing it means changing how numeric columns are
+inferred, which is an architecture decision outside this phase (build plan
+section 14). Recorded as Known Issue 78.
+
+#### 7C — Incorrect schemas → correct, now pinned
+
+Both near-misses the build plan names, and twelve more, are refused by name.
+`tests/test_incorrect_schemas.py` (22 tests).
+
+| Uploaded | Result |
+| -------- | ------ |
+| `Sku` | `MISSING_COLUMNS`, `missing_columns: ["SKU"]` |
+| `Supplier Name` | `MISSING_COLUMNS`, `missing_columns: ["Supplier"]` |
+| `supplier`, `SKU `, ` SKU`, `VINTAGE`, `Vol`, `Volume (ml)`, `Selections`, `Producer/Winery` | each refused, naming the column it failed to match |
+| the exact six | accepted |
+| the exact six, reordered | accepted; the *output* order is still the fixed one |
+| the six plus two extra columns | accepted, extras dropped, no warning |
+
+Several of these are plainly the same *concept* as the column they miss, which
+is the point: recognising `Supplier Name` would mean ForgeXL had decided what a
+column represents. A refused Run is also recorded in the store with its real
+columns and its error, so the failure can be examined afterwards
+(build plan 3.9).
+
+#### 7D — Filename security → correct, now pinned end to end
+
+All five names the build plan lists, plus eight more shapes, driven through
+`POST /api/runs`. ForgeXL's answer is stronger than sanitising: since Phase 6C
+an upload is never written at all, so there is no path for a name to traverse.
+Each hostile name produces a normal Run, the application's own
+`source.csv`, the client's name kept verbatim as metadata, and **nothing
+written** — asserted against the quarantine directory *and its parent*, since a
+traversal that worked would land outside the quarantine.
+
+Also asserted: an error message reduces a path-shaped name to its basename; a
+download's `Content-Disposition` is built from the Run and never from the
+upload, so `../../"evil";name.csv` cannot reach that header; every extension
+build plan section 16 rejects is rejected; and a `.csv` extension does not make
+arbitrary bytes a CSV.
+
+#### 7E — Invalid IDs → controlled 4xx everywhere
+
+Malformed Run IDs, output IDs, Action IDs and paging parameters, across every
+route. `tests/test_hostile_input.py` (150 tests) covers 7D and 7E together.
+
+| Input | Result |
+| ----- | ------ |
+| 12 malformed Run IDs, on all five Run routes | 404 `UNKNOWN_RUN`, structured |
+| Run IDs containing a separator (`../../etc/passwd`, `<script>…`) | the URL matches no route — a framework 4xx, still controlled, still carrying no path |
+| 7 unknown output IDs × 3 routes | 404 `UNKNOWN_OUTPUT`, listing the available IDs |
+| 10 unknown Action IDs, including shell metacharacters | 404 `UNKNOWN_ACTION` |
+| blank or absent `action_id` | 400 `INVALID_REQUEST` |
+| a JSON body where a form is expected | 400 `INVALID_REQUEST` |
+| `offset=-1`, `limit=0`, `limit=501` | 400, refused rather than clamped |
+| `limit=abc` | 422, the framework refusing a non-integer |
+| `offset` past the end | 200 with an empty page — a legitimate question |
+
+No refusal returns 5xx, and none carries a server path or a traceback —
+asserted against this machine's real path prefixes rather than a guess at what
+a path looks like. The one 500 ForgeXL raises deliberately (an Action that
+crashes) was checked for what it does *not* say: its cause carries
+`/home/someone/private/data.csv` on purpose, and none of it reaches the
+response.
+
+#### 7F — Workbook cases → correct, now pinned
+
+`tests/test_workbook_cases.py` (21 tests).
+
+| Case | Behaviour |
+| ---- | --------- |
+| normal single-sheet XLSX | runs; engine and worksheet recorded |
+| empty XLSX | `PARSE_ERROR`, "contains no data" |
+| header-only XLSX | `EMPTY_DATASET` — told apart from the above |
+| two data sheets | `AMBIGUOUS_WORKBOOK`, naming both, with the build plan's own message |
+| one data sheet beside blank ones | unambiguous, runs |
+| a data sheet plus a one-cell notes tab | refused (Known Issue 12, now pinned) |
+| workbook without required columns | parses, then `MISSING_COLUMNS` |
+| workbook containing formulas | the **stored** value, never evaluated |
+
+**Macros.** The rule holds for a stronger reason than a disabled setting:
+ForgeXL never opens a file that can carry one. `.xlsm`, `.xlsb`, `.xls` and
+`.ods` are refused by extension before any engine sees the bytes, so there is
+no macro setting anywhere to get wrong. The formula tests cache *deliberately
+wrong* arithmetic — `=A2+B2` cached as `99` — so a reader that evaluated the
+formula would return 5 and fail the test. It returns 99. Text beginning with
+`=`, including the DDE form, is read as text and **written back as text**,
+verified by reopening the exported workbook with openpyxl in formula mode. The
+workbook ForgeXL writes declares no macro content and carries no
+`vbaProject.bin`.
+
+#### The XLSX export → **two more defects found and repaired**
+
+Not on 7F's list by name, but found by 7B's "large text cells" and 7F's
+workbook probing, and both are section 3.3 violations:
+
+- **A text value longer than 32,767 characters was silently truncated.**
+  xlsxwriter's answer to an over-long cell is to shorten it and return a code
+  Polars does not check, so the workbook opened cleanly and the value was
+  quietly shorter than the one uploaded. Measured, not theorised: 32,768
+  characters in, 32,767 out.
+- **A result larger than Excel's grid returned a bare `500 Internal Server
+  Error`** as plain text with no `error` object. `src/lib/api.js` reads a 5xx
+  carrying no structured error as the backend being unreachable, so the user
+  was told to check that ForgeXL was running — while it was running and had
+  just answered.
+
+**Repaired** by one guard, `export.check_fits_worksheet`, run before any
+worksheet is written: rows against 1,048,575, columns against 16,384, and the
+longest value of each string column against 32,767. It refuses with a new
+structured `EXPORT_TOO_LARGE` / 422 naming the limit, the number, and the
+column. 422 rather than 500 because nothing failed unexpectedly — the request
+was understood and the data is intact; it simply cannot be expressed in that
+format. **The same result still downloads as CSV**, which has none of those
+limits, and the message says so. Characters are counted rather than bytes,
+because that is what Excel counts. Every table is checked before any is
+written, so a multi-sheet workbook is never half-built.
+
+#### 7G / 7H / 7I — Performance, measured
+
+A benchmark harness was added at `backend/tests/benchmarks/`, deliberately
+**outside** the automated suite: `pytest.ini` sets `testpaths = tests` and
+pytest collects only `test_*.py`, so nothing there runs during
+`python -m pytest`. A benchmark asserts nothing and takes minutes.
+
+    cd backend && .venv/bin/python -m tests.benchmarks.run
+
+Every figure is the **median of five runs** with the minimum and maximum
+printed beside it, because build plan 7G forbids claiming performance from one
+anecdotal timing. Fixtures are generated by `large_table()` — arithmetic on the
+row index, no customer or company data, nothing read from disk.
+
+**All numbers below are from this Linux container, not from the target Mac
+(Known Issue 3).** Build plan section 3.4 asks for "ordinary modern Mac
+hardware"; that run is still owed and is the user's to make.
+
+**7G — CSV, in process, by stage** (median ms):
+
+| Stage | 10,000 | 50,000 | 100,000 |
+| ----- | -----: | -----: | ------: |
+| upload into memory | 0.7 | 3.0 | 1.7 |
+| parse | 2.4 | 5.5 | 9.4 |
+| validate | <0.1 | <0.1 | <0.1 |
+| Action execution | 1.6 | 3.1 | 4.5 |
+| export CSV (full size) | 2.8 | 4.5 | 8.2 |
+| export XLSX (full size) | 339 | 1,668 | 3,418 |
+| **whole Run (`execute_run`)** | **4.3** | **10.1** | **16.3** |
+
+Payload at 100,000 rows: 5.62 MiB, 7 columns.
+
+**7H — XLSX, in process, by stage** (median ms). Recorded separately, and
+deliberately not compared with CSV as though the two were the same format:
+
+| Stage | 10,000 | 50,000 | 100,000 |
+| ----- | -----: | -----: | ------: |
+| upload into memory | 0.1 | 0.5 | 1.1 |
+| parse | 75.7 | 316.5 | 767.9 |
+| validate | <0.1 | <0.1 | <0.1 |
+| Action execution | 1.4 | 2.6 | 3.5 |
+| export CSV (full size) | 3.3 | 8.5 | 10.7 |
+| export XLSX (full size) | 320 | 1,697 | 3,300 |
+| **whole Run (`execute_run`)** | **63.9** | **393.3** | **799.7** |
+
+100,000 rows was measured rather than skipped: 7H says "if reasonable", and at
+0.8 s it plainly is. Payload at 100,000 rows: 2.70 MiB.
+
+**Against build plan section 3.4** (100,000-row CSV, desired < 5 s, acceptance
+< 15 s): the whole Run is **0.016 s** for CSV and **0.800 s** for XLSX. Both
+are inside the *desired* target with two to three orders of magnitude of
+headroom. The honest caveat is the hardware, not the margin.
+
+**Over real HTTP**, through real uvicorn and a real `next start` with the real
+`/forge-api` proxy — because `TestClient` is not a socket (Known Issue 69):
+
+| Request | Round trip | Backend `duration_ms` |
+| ------- | ---------: | --------------------: |
+| 100,000-row CSV upload + Run (5.89 MB) | 93.6 ms | 22 |
+| 100,000-row XLSX upload + Run (2.83 MB) | 820.5 ms | 796 |
+| CSV download of a 100,000-row result | 12.3 ms | — (1,577,788 bytes) |
+| XLSX download of a 100,000-row result | 1,496.5 ms | — (1,626,965 bytes) |
+
+The downloaded workbook was reopened independently: 100,000 rows × 2 columns,
+first and last rows correct.
+
+**7I — Preview.** Against a genuine 100,000-row result (the two proof Actions
+both collapse the generated fixture to 250 distinct rows, so a separate
+all-distinct fixture was used — timing a preview against 250 rows would have
+proved nothing):
+
+| Page | In process | Over the proxy | Bytes returned |
+| ---- | ---------: | -------------: | -------------: |
+| rows 1–100 | 0.3 ms | 47.9 ms | 1,648 |
+| rows 10,001–10,100 | 0.2 ms | 47.9 ms | 2,272 |
+| rows 99,901–100,000 | 0.2 ms | 48.0 ms | 2,272 |
+| rows 1–500 (the maximum) | 0.5 ms | 48.0 ms | 8,048 |
+
+**A page costs the same wherever it is taken from**, which is the property 7I
+asks about: the deep offset is not slower than the first page. The ~48 ms over
+the proxy is the HTTP hop, flat across all four. And the backend does not send
+the dataset: a 100-row page is 2,272 bytes against ~2.18 MB for the whole
+result, a factor of about a thousand, with `total_rows` reported so the client
+can page.
+
+#### 7J — Memory and architecture review → **one inefficiency found and fixed**
+
+Each pattern build plan 7J names was searched for and, where it existed,
+measured:
+
+| Pattern | Finding |
+| ------- | ------- |
+| reading the upload into memory multiple times | No. One `read_upload`; the runner releases the payloads as soon as they are frames. |
+| converting a whole dataframe to Python dicts | No. `preview.py` calls `iter_rows()` on `frame.slice(offset, limit)` — at most 500 rows. |
+| converting a whole result to JSON | No. Measured: a page is ~1,000× smaller than the result. |
+| writing unnecessary temporary copies | None. No `tempfile`, `open(`, `mkdir` or `shutil` anywhere in `backend/app`. |
+| **processing the same file repeatedly** | **Yes, in the XLSX parser. Fixed.** |
+| proxying through Next.js | Transport only — see below. |
+
+**The XLSX parser was reading the worksheet four times.** calamine parses a
+whole sheet on every `load_sheet` regardless of how few rows are asked for, so
+at 100,000 rows each pass cost ~250 ms:
+
+| Pass | Why | Cost |
+| ---- | --- | ---: |
+| ambiguity probe (`header_row=None`) | build plan section 17 | 247 ms |
+| duplicate-header read | added earlier this phase | 251 ms |
+| main load | the data | 294 ms |
+| nullable text re-read | the Known Issue 65 repair | 259 ms |
+
+The duplicate-header read was **this phase's own regression**, and it was
+removed rather than accepted: `total_height` and `width` still report the whole
+sheet when a sheet is loaded with `n_rows=1`, so the ambiguity probe now loads
+one row and answers *both* questions — is this sheet populated, and what does
+its header row actually say. **XLSX parse at 100,000 rows: 1,074 ms → 673 ms**,
+which is also below where it stood before Phase 7 began. The three remaining
+passes are each required for a stated correctness rule, and the third only runs
+when a column contains nulls.
+
+**On 7J's "proxying through Next.js".** 7J lists this as a pattern to look for,
+and Phase 6G *requires* a same-origin proxy — a direct conflict between an
+earlier and a later build-plan section. The Phase 6 architectural rules state
+that they override earlier conflicting instructions, and section 5's actual
+concern is satisfied either way: the Route Handler streams the request body
+through without reading it, so the file is transferred once and parsed once, in
+Python. Recorded as a reading of the conflict, not a change to it; already
+Deviation 43.
+
+**Memory, one 100,000-row CSV Run:** 5.62 MiB payload, peak Python allocation
+11.95 MiB, and the result released on `delete_run()` — confirmed by a
+`weakref`, since peak RSS does not fall (the allocator keeps its arena).
+
+#### 7K — Local exposure → verified, and one decision made
+
+`tests/test_local_exposure.py` (35 tests). Each property is asserted rather
+than checked once by hand, because none has a visible symptom when it breaks:
+an application bound to `0.0.0.0` works exactly as well from the machine that
+broke it.
+
+- **Binding.** `config.HOST` is `127.0.0.1`; no backend module contains
+  `0.0.0.0` at all; `scripts/dev-backend.sh` passes no host, so `config.HOST`
+  is the only thing that decides. Exactly one npm script binds `0.0.0.0` —
+  `dev:web:lan`, which build plan 6G.6 requires — and it exposes Next.js only,
+  running the same `dev:api` as every other script.
+- **CORS.** Exactly the two local origins, never `*`, no `allow_origin_regex`,
+  `allow_credentials=False`. Verified behaviourally too: an unlisted origin
+  gets no `Access-Control-Allow-Origin` header, and a listed one gets its own
+  name back rather than a wildcard.
+- **No remote calls.** Sixteen analytics, cloud and AI hosts swept for across
+  every source file: none. Every absolute URL in the source is enumerated and
+  each is loopback, a documentation link in a comment, or a placeholder in
+  prose — `scripts/lan-address.mjs` is asserted to make no request of any kind.
+  No HTTP client is imported by the running backend at all (`httpx` is a test
+  dependency), no `NEXT_PUBLIC_` variable exists, and every browser request is
+  same-origin.
+
+**Next.js telemetry — the decision build plan 7K owes (Known Issue 1).**
+`npx next telemetry status` reported `Enabled`. It carries no uploaded data, so
+it does not breach section 8's rule about *data*, but it is an outbound call
+from a deliberately local-only project. **Disabled in the repository**, by
+exporting `NEXT_TELEMETRY_DISABLED=1` in the four npm scripts that run Next.js.
+The alternative, `next telemetry disable`, writes to a machine-global config
+file outside this repository: it would fix one developer's machine and leave
+the next checkout sending telemetry again. A test asserts every script that
+runs `next dev`, `next build` or `next start` carries the variable. No
+dependency was added — `VAR=1 command` is POSIX shell, and the build plan's
+target is a Mac.
+
+#### Browser verification (real headless Chromium)
+
+The two new refusals are user-facing, so they were driven through the real UI
+against the real servers rather than only over HTTP:
+
+| Check | Result |
+| ----- | ------ |
+| duplicate column names | "Validation Failed" and the full sentence naming `SKU`; no `[object Object]` |
+| incorrect schema | "Validation Failed", missing columns listed |
+| a 40,000-character cell | Run succeeds and renders |
+| its XLSX download | 422 `EXPORT_TOO_LARGE`, readable message naming the column and both limits |
+| its CSV download | 200, 40,012 bytes, the 40,000-character value intact |
+| a normal run, real click-download | `forgexl-exact-duplicate-remover-deduplicated-data-<stamp>.csv`, exact expected contents |
+| page errors / off-origin requests | none; every request went to the page's own origin |
+
+**Files created**
+
+- `backend/tests/test_data_edge_cases.py` (7B)
+- `backend/tests/test_incorrect_schemas.py` (7C)
+- `backend/tests/test_hostile_input.py` (7D, 7E)
+- `backend/tests/test_workbook_cases.py` (7F)
+- `backend/tests/test_local_exposure.py` (7K)
+- `backend/tests/benchmarks/__init__.py`
+- `backend/tests/benchmarks/run.py` (7G, 7H, 7I)
+
+**Files modified**
+
+- `backend/app/errors.py` — two new error classes
+- `backend/app/services/parser.py` — duplicate-header refusal; the probe reads
+  one row and serves both purposes (7J)
+- `backend/app/services/export.py` — `check_fits_worksheet` and the three
+  format limits
+- `backend/tests/fixtures/spreadsheets.py` — five 7B fixtures; two of them
+  kept out of `CATALOGUE`
+- `backend/tests/test_parser.py` — duplicate-column coverage
+- `backend/tests/test_export.py` — capacity coverage
+- `backend/tests/test_export_download.py` — the capacity refusal over HTTP
+- `backend/tests/test_contract_freeze.py` — two error codes added
+- `package.json` — `NEXT_TELEMETRY_DISABLED=1` in four scripts
+- `docs/implementation-status.md`
+
+**Files deleted**
+
+- `backend/app/api/upload-form.py` (the hyphenated duplicate; repair)
+
+**Files renamed**
+
+- `backend/tests/test_mixed_xlsv_round_trip.py` →
+  `backend/tests/test_mixed_xlsx_round_trip.py` (repair)
+
+`package-lock.json` and `backend/requirements.txt` are untouched — Phase 7
+added no dependency. Nothing under `src/` was modified: both repairs are
+backend, and the frontend already rendered the new structured errors correctly,
+which the browser verification confirms rather than assumes.
+
+**A note on the two new fixtures kept out of `CATALOGUE`.** Every entry in that
+tuple is a dataset ForgeXL reads and returns unchanged, and the sweep tests in
+`test_spreadsheet_fixtures.py` assert exactly that of every one. The duplicate-
+column fixture is refused by design and the 40,000-character fixture exceeds an
+XLSX limit, so adding either would have meant *loosening those sweeps* —
+removing the property that makes them evidence. They live in `REFUSED_TABLES`
+and `CSV_ONLY_TABLES` instead, each documented with why.
+
+---
 
 ### Phase 6I — Cleanup, Regression Review, and Architecture Documentation
 
@@ -2141,9 +2600,12 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               upload limit. Builds no path at all: the
                               run-directory helpers 6D left unused were
                               removed in 6I                        (6C/6D/6I)
-          parser.py           parse_tabular_bytes: CSV + XLSX from memory (6C)
+          parser.py           parse_tabular_bytes: CSV + XLSX from memory (6C);
+                              refuses a repeated column name             (7B)
           runner.py           the generic Run pipeline, DataFrame-first   (6D)
-          export.py           CSV/XLSX bytes from a result frame          (6D)
+          export.py           CSV/XLSX bytes from a result frame          (6D);
+                              check_fits_worksheet refuses a result the
+                              XLSX format cannot hold                    (7B)
           preview.py          paginated slices of a result frame          (6D)
           results.py          measuring a result table: schema, row counts,
                               columns added and dropped                   (6E)
@@ -2193,6 +2655,20 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               real Actions and both exports         (pre-6I)
         test_export_download.py  the download routes, filenames, release
                               rule and no-server-paths rule              (6F)
+        test_data_edge_cases.py  the 7B edge-case list, end to end, both
+                              upload formats                             (7B)
+        test_incorrect_schemas.py  exact column matching; every near-miss
+                              refused by name                            (7C)
+        test_hostile_input.py  hostile filenames and malformed Run /
+                              output / Action IDs                    (7D/7E)
+        test_workbook_cases.py  the 7F workbook list; formulas read as
+                              stored values, macro formats refused       (7F)
+        test_local_exposure.py  loopback binding, CORS, and no remote
+                              call anywhere in the source                (7K)
+      benchmarks/             NOT collected by pytest (testpaths=tests and
+                              the test_*.py glob). Run directly:
+                              `.venv/bin/python -m tests.benchmarks.run`
+        run.py                the 7G/7H/7I performance harness    (7G-7I)
 
 Installed backend packages (resolved 2026-08-22):
 
@@ -2262,8 +2738,10 @@ responses of its own, neither of them FastAPI's:
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
-                            422 validation failure — including the new
-                                EMPTY_FILE for a zero-byte upload (6C)
+                            422 validation failure — including
+                                EMPTY_FILE for a zero-byte upload (6C) and
+                                DUPLICATE_COLUMNS for a header row that
+                                names two columns the same thing (7B)
                             500 Action raised
 
     GET  /api/runs/{run_id}
@@ -2293,6 +2771,11 @@ responses of its own, neither of them FastAPI's:
                             forgexl-<action>-<output>-<YYYYMMDD-HHMMSS>.<ext>
                             404 unknown Run or output, or the Run no longer
                                 holds its result (MISSING_ARTIFACT)
+                            422 EXPORT_TOO_LARGE — XLSX only: the result
+                                exceeds an Excel limit (1,048,575 rows,
+                                16,384 columns, 32,767 characters in a
+                                cell) and would be truncated. CSV has no
+                                such limits and is unaffected.       (7B)
 
     GET  /api/runs/{run_id}/download/xlsx                       (new in 6F)
                         ->  200 attachment | 404
@@ -2350,6 +2833,10 @@ file changes, because the UI is built entirely from `GET /api/actions`.
     start        next start --hostname 127.0.0.1 --port 3000
     lint         eslint
 
+Every script that runs `next dev`, `next build` or `next start` prefixes it
+with `NEXT_TELEMETRY_DISABLED=1` (Phase 7K, Known Issue 1). Omitted from the
+listing above for width; `test_local_exposure.py` asserts it is on all four.
+
 Only `dev:web:lan` binds `0.0.0.0`, and only Next.js. `dev:api` is unchanged in
 every script: FastAPI takes its host from `config.HOST`, which is `127.0.0.1`
 (build plan 6G.5). `scripts/lan-address.mjs` prints the LAN URLs before Next
@@ -2366,11 +2853,11 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)                                                                 |
 | `src/lib/`              | Exists (`api.js`, `formatters.js`, `backend-origin.js` — 6G)                                                             |
 | `backend/app/`          | Exists (`main.py`, `config.py`)                                                                                          |
-| `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`)                                                                       |
+| `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`; the hyphenated duplicate was removed in Phase 7)                      |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
 | `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                                                                                          |
 | `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview, results)                                                    |
-| `backend/tests/`        | Exists (24 test modules and `fixtures/`)                                                                                 |
+| `backend/tests/`        | Exists (29 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
 | `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
 | `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)                                                                        |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)                                                                           |
@@ -2498,6 +2985,112 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 7)
+
+    cd backend && .venv/bin/python -m pytest
+    1335 passed, 2 warnings in 12.24s
+
+No failures, no skips, no xfails. The two warnings are the upstream ones
+recorded as Known Issue 7 and are deliberately unsuppressed.
+
+The suite grew from 1,019 to 1,335. Every new test is an assertion about
+behaviour build plan Phase 7 asks to be checked; none replaces or loosens an
+existing one.
+
+| Module | Tests | Subphase |
+| ------ | ----: | -------- |
+| `test_hostile_input.py` (new) | 150 | 7D, 7E |
+| `test_data_edge_cases.py` (new) | 36 | 7B |
+| `test_local_exposure.py` (new) | 35 | 7K |
+| `test_incorrect_schemas.py` (new) | 22 | 7C |
+| `test_workbook_cases.py` (new) | 21 | 7F |
+| `test_parser.py` (extended) | 62 (was 51) | duplicate columns |
+| `test_export.py` (extended) | 68 (was 56) | XLSX capacity |
+| `test_export_download.py` (extended) | 35 (was 29) | the capacity refusal over HTTP |
+| `test_spreadsheet_fixtures.py` | +20 | the three new catalogue fixtures |
+| `test_contract_freeze.py` | 86 (was 84) | two error codes added |
+
+### Baseline repair (Phase 7, before any new work)
+
+    cd backend && .venv/bin/python -m pytest      # as committed
+    1018 passed, 1 error          <- test_export.py used the removed runs_dir fixture
+
+    cd backend && .venv/bin/python -m pytest      # after the three repairs
+    1019 passed                   <- the documented baseline, exactly
+
+### Type checking (Phase 7)
+
+    npx --yes pyright
+    0 errors, 0 warnings, 0 informations
+
+Two genuine errors appeared during the phase and were **fixed rather than
+suppressed**: `len()` on a value typed `object` (fixed by narrowing with
+`isinstance`, which also strengthens the assertion), and `len()` on the
+abstract `RunStore`, which has no `__len__` — only `InMemoryRunStore` does
+(fixed by calling `list_runs()`). No new `# pyright: ignore` was added.
+
+### Frontend static checks (Phase 7)
+
+    npm run lint                    exit 0, no findings
+    npm run build                   exit 0
+    git diff --check                exit 0
+
+The build produces `/`, `/_not-found` and the dynamic `/forge-api/[...path]`,
+and now runs with telemetry disabled by the script itself (7K).
+
+### Phase 7 performance measurements
+
+    cd backend && .venv/bin/python -m tests.benchmarks.run
+
+Full tables under **Completed → 7G / 7H / 7I**. Headline figures, median of
+five runs, **on this Linux container and not on the target Mac**:
+
+| Measurement | 100,000 rows |
+| ----------- | -----------: |
+| whole Run, CSV, in process | 16.3 ms |
+| whole Run, XLSX, in process | 799.7 ms |
+| whole request over the real proxy, CSV (5.89 MB) | 93.6 ms |
+| whole request over the real proxy, XLSX (2.83 MB) | 820.5 ms |
+| preview, any offset, over the proxy | ~48 ms, flat |
+| CSV download of a 100,000-row result | 12.3 ms |
+| XLSX download of a 100,000-row result | 1,496 ms |
+
+Build plan section 3.4 asks for under 15 s (acceptance) and under 5 s
+(desired) for a 100,000-row CSV. Both formats are inside the *desired* target.
+
+### Phase 7 end-to-end verification over real HTTP
+
+Real uvicorn on `127.0.0.1:8000`, real `next start` on `127.0.0.1:3000`, every
+request through the real `/forge-api` proxy. `/health` answered on both the
+backend directly and through the proxy; the page returned 200.
+
+| Check | Result |
+| ----- | ------ |
+| duplicate column names | 422 `DUPLICATE_COLUMNS` |
+| empty file | 422 `EMPTY_FILE` |
+| incorrect schema | 422 `MISSING_COLUMNS` |
+| ambiguous workbook | 422 `AMBIGUOUS_WORKBOOK` |
+| traversal-shaped filename | 200 — a normal Run, nothing written |
+| over-long cell, XLSX download | 422 `EXPORT_TOO_LARGE` |
+| over-long cell, CSV download | 200, value intact |
+| malformed Run ID | 404 `UNKNOWN_RUN` |
+| unknown output ID | 404 `UNKNOWN_OUTPUT` |
+| `limit=501` | 400 `INVALID_REQUEST` |
+| 100,000-row XLSX download, reopened | 100,000 × 2, first and last rows correct |
+
+### Phase 7 browser verification (real headless Chromium)
+
+Chromium 1194 via Playwright, installed **outside the repository** in the
+session scratchpad, driving the real UI against the real servers. Full table
+under **Completed → Browser verification**. Summary: both new refusals render
+as readable sentences with no `[object Object]` and no traceback; the CSV
+download of the same result succeeds with its 40,000-character value intact; a
+real click-download saved the correct filename with the exact expected bytes;
+no page errors; **every request went to the page's own origin**.
+
+Verification servers and the browser were stopped afterwards. Nothing was
+written into the repository at any point.
 
 ### Backend test suite (Phase 6I)
 
@@ -4307,7 +4900,15 @@ them. The file was restored and re-verified clean.
 
 ## Known Issues
 
-1.  **Next.js telemetry is enabled by default.** `npx next telemetry status`
+1.  ~~**Next.js telemetry is enabled by default.**~~ **Resolved in Phase 7K**,
+    by the repo-local option this entry itself proposes: the four npm scripts
+    that run Next.js now export `NEXT_TELEMETRY_DISABLED=1`, and a test in
+    `test_local_exposure.py` asserts that every such script carries it. The
+    machine-global `next telemetry disable` was rejected for the reason given
+    below — it writes outside the repository, so it would fix one machine and
+    leave the next checkout sending telemetry again. Original text follows.
+
+    **Next.js telemetry is enabled by default.** `npx next telemetry status`
     reports `Enabled`. This is Next.js's own anonymous build/usage telemetry to
     Vercel; it carries no uploaded data and no application data, so it does not
     violate build plan §8's rule about transmitting uploaded data. It is
@@ -4402,7 +5003,13 @@ them. The file was restored and re-verified clean.
     — no job queue. A large upload therefore holds the request open for the
     duration of the Run. Phase 7G/7H will measure how long that actually is.
 
-14. **Performance has not been measured.** No benchmark fixtures were
+14. ~~**Performance has not been measured.**~~ **Measured in Phase 7G-7I** —
+    see **Tests** and **Completed**. The remaining half of this issue is real
+    and is carried forward as Known Issue 82: the numbers were produced in a
+    Linux container, and build plan section 3.4 asks for a Mac. Original text
+    follows.
+
+    **Performance has not been measured.** No benchmark fixtures were
     generated and no timing was recorded beyond incidental `duration_ms`
     values on tiny files. That is Phase 7G-7I, and must be done on the real
     target machine.
@@ -4993,6 +5600,91 @@ remaining code blocker was found in this repair pass. Known Issue 64 remains
 an outstanding target-hardware acceptance check; the other deferred work
 keeps its existing phase ownership.
 
+**Added in Phase 7:**
+
+77. **Committed state that did not match its own record — the seventh
+    instance, and a new variant.**
+    Three defects were found before any Phase 7 work, and **two of them were
+    recorded as already done** in the Phase 6I entry:
+    `backend/app/api/upload-form.py` was still present beside `upload_form.py`
+    (byte-identical, an unimportable module name), and
+    `backend/tests/test_mixed_xlsv_round_trip.py` was still misspelled. The
+    entry describes both as `git mv` renames; the commit contains an *add* and
+    no rename. The third was live: `test_export.py` still declared the
+    `runs_dir` fixture 6I deleted, so the committed suite reported **1,018
+    passed, 1 error** rather than the documented 1,019 passed.
+
+    Known Issues 10, 31, 32, 37, 38 and 70 are the same family. What is new is
+    that the check list catches a repository that cannot *run*, and nothing was
+    checking a phase entry against the tree it claims to describe — two of
+    these three were invisible to a green suite. The check list at the end of
+    this document now includes a search for duplicate module content across
+    `backend/app` as well as `backend/tests`, which is what would have caught
+    the hyphenated file.
+
+78. **A mixed numeric column carries floating-point precision.**
+    One Polars column holds one type, so a column containing both a decimal and
+    an integer larger than 2^53 is inferred `Float64`, and 2^53 + 1 reads back
+    as 2^53. The conditions are narrow and all three are pinned by tests: an
+    **integer-only** column is exact at any size (Polars widens past 64 bits
+    when the file asks for it), a column holding any text stays text and loses
+    nothing, and only the *mixed* case is affected.
+
+    Not repaired, deliberately. This is IEEE-754, the same representation Excel
+    itself uses, so the same file shows the same number there — and repairing it
+    means changing how numeric columns are inferred, which is an architecture
+    decision outside this phase (build plan section 14). Recorded because build
+    plan Phase 7's exit criteria require known limitations to be documented,
+    and because a value that changed silently is exactly what section 3.3 is
+    about, even when the cause is the number system rather than the code.
+
+79. **A refused XLSX download is shown as a JSON body, not as an in-page
+    message.** `ExportButtons.jsx` renders each export as a plain link, which
+    build plan 6F and section 29 ask for — the browser follows it as an
+    ordinary navigation, so the file streams to the downloads folder and never
+    becomes a copy of the result in page memory. The consequence is that when a
+    download is *refused*, the browser displays the structured error body
+    rather than the page rendering it. The message is readable and complete —
+    it names the column, both numbers and the CSV alternative — but it appears
+    in a new tab instead of beside the result.
+
+    Turning the links into `fetch` calls would fix the presentation and undo
+    the reason they are links. That is a Phase 6F design decision to revisit,
+    not a Phase 7 repair, and the case is rare: it needs a result past an Excel
+    limit. Confirmed in the browser verification.
+
+80. **The XLSX export of a large result is the slowest operation in ForgeXL.**
+    Measured: 3.3 s in process for a 100,000-row frame, 1.5 s over the proxy
+    for the 100,000-row result actually produced (the difference is the column
+    count). It is xlsxwriter's cost, not ForgeXL's — the same 100,000 rows
+    export to CSV in 12 ms. Nothing is wrong and nothing is being fixed; it is
+    recorded so that a future session reading "exports are generated per
+    request" (6F.7) knows what that costs at size. It does not affect Run
+    timings, because since Phase 6F an export is generated at download time and
+    not during the Run.
+
+81. **The XLSX parser still reads the worksheet three times.** Down from four
+    (see **Completed → 7J**), and each remaining pass is required by a stated
+    rule: the ambiguity probe of build plan section 17, which now also supplies
+    the header for the duplicate-name check; the main load; and the nullable
+    text re-read that repairs Known Issue 65, which only runs when a column
+    contains nulls. calamine parses a whole sheet on every `load_sheet`
+    regardless of `n_rows`, so each pass costs a full parse — about 250 ms per
+    pass at 100,000 rows. Removing another would mean giving up one of those
+    correctness rules, which build plan 7J's "do not perform speculative
+    micro-optimization" does not ask for. Recorded so the cost is known rather
+    than rediscovered.
+
+82. **Performance has been measured, but not on the target machine.**
+    Known Issue 14 is resolved in substance: every figure build plan 7G, 7H and
+    7I asks for now exists, repeated five times each, with the spread printed
+    beside the median. But build plan section 3.4 specifies "ordinary modern
+    Mac hardware" and every number in this document was produced in a Linux
+    container (Known Issue 3). The margins are large — 0.016 s against a 15 s
+    acceptance threshold — so the conclusion is very unlikely to change, but
+    the measurement on the Mac is still owed and is the user's to make. The
+    harness is committed and takes one command.
+
 **Added in Phase 6I:**
 
 70. **Committed state that could not import — the sixth instance, this time a
@@ -5548,6 +6240,64 @@ failed` as an example and says explicitly: "Use existing equivalent status
     6I.6 asks for the architecture to be documented; a section inside the
     status file would have buried it in a 5,000-line phase log. Layout only.
 
+**Added in Phase 7:**
+
+55. **Two error codes were added to the frozen taxonomy.** `DUPLICATE_COLUMNS`
+    (422) and `EXPORT_TOO_LARGE` (422) are new entries in `FROZEN_ERRORS` in
+    `test_contract_freeze.py`, which is that module's **fourth** amendment.
+    Like 6F's route addition they are additions and not changes: every code,
+    class and status already in the table is untouched, and so are
+    `FROZEN_ROUTES`, the Action inventory, the metric keys, the schema field
+    lists and `MANIFEST_SCHEMA_VERSION`.
+
+    Each names a failure that previously had **no code at all**, because it was
+    not being reported: a duplicated column was silently renamed by the parser,
+    and an over-long cell was silently truncated by the workbook writer. Build
+    plan section 22's status list is examples rather than a closed set, and 422
+    is the one that fits both — the request was understood and cannot be
+    processed as asked.
+
+56. **A new test directory, `backend/tests/benchmarks/`, that pytest does not
+    collect.** Build plan §10 sketches `tests/` as holding test modules, and
+    Deviations 14, 25, 29 and 46 have already extended it. This one is
+    different in kind rather than in count: a benchmark asserts nothing and
+    takes minutes, so it must not run during `python -m pytest`. It does not:
+    `pytest.ini` sets `testpaths = tests` and pytest collects only `test_*.py`,
+    so `benchmarks/run.py` is inert to the suite and is invoked directly. Build
+    plan 7G requires the numbers to be recorded in
+    `docs/implementation-status.md`, which is where they are; the harness is
+    committed so they can be reproduced rather than taken on trust.
+
+57. **`package.json` sets an environment variable inline in four scripts.**
+    `NEXT_TELEMETRY_DISABLED=1` prefixes `next dev`, `next build`, `next start`
+    and the LAN variant. Build plan §20 asks for configuration to be
+    centralised in `.env.example` and `config.py`; this is not application
+    configuration but a property of how the tool is invoked, and it has to be
+    set before Next.js starts rather than read by it. `VAR=1 command` is POSIX
+    shell and the build plan's target is a Mac, so no `cross-env` dependency
+    was added. See Known Issue 1.
+
+58. **Two fixtures live outside `CATALOGUE`.** `REFUSED_TABLES` and
+    `CSV_ONLY_TABLES` in `tests/fixtures/spreadsheets.py` hold the duplicate-
+    column fixture and the 40,000-character-cell fixture. Every entry in
+    `CATALOGUE` is a dataset ForgeXL reads and returns unchanged, and the sweep
+    tests in `test_spreadsheet_fixtures.py` assert exactly that of all of them;
+    adding either of these would have meant loosening those sweeps to
+    accommodate a fixture that is *supposed* to be refused. Separating them
+    keeps the sweeps' property intact, which is the property that makes them
+    evidence. The same reasoning `WORKBOOKS` already followed for workbook-
+    structure fixtures.
+
+59. **A refusal was added where a Run previously succeeded.** A file whose
+    header names two columns the same thing is now refused with
+    `DUPLICATE_COLUMNS` instead of being accepted with the second column
+    silently renamed. This is a **behaviour change to a previously working
+    path**, and it is recorded as a deviation rather than only as a repair
+    because a user with such a file will notice. It is what build plan section
+    3.3 requires in three separate clauses, and section 17's precedent — refuse
+    an ambiguity rather than resolve it silently — is the model. See
+    **Completed → 7B**.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -5572,98 +6322,100 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 7 — Reliability, Accuracy, Security, and Performance Hardening**
+**Phase 8 — Final POC Validation and Handoff**
 
 **Not started.** Nothing for it was scaffolded, stubbed or prepared during
-Phase 6I. No benchmark fixture, no performance harness, no security probe and
-no dependency decision was made.
+Phase 7. `README.md` is untouched and is still the Create Next App default
+(Known Issues 4 and 76, which are Phase 8.2's).
 
-### Phase 6 is complete
+### Phase 7 is complete
 
-Every completion criterion build plan Phase 6I lists, checked against what is
-actually in the repository:
+Every exit criterion build plan Phase 7 lists, checked against what is actually
+in the repository:
 
-| Criterion                                              | Evidence                                                                    |
-| ------------------------------------------------------ | --------------------------------------------------------------------------- |
-| Uploads processed without persistent server-side files | 6C; re-verified live in 6I — no `data/` directory exists at all             |
-| Actions operate on DataFrames, not paths               | 6D; 6I audit finds no file or path use in `actions/`                        |
-| Results remain in runtime state                        | 6D; `Run.result` holds the frames                                           |
-| Previews work                                          | 6D/6E; verified live and in the browser                                     |
-| Metrics work                                           | 6E; verified live and in the browser                                        |
-| Audit summaries work                                   | 6E; verified live and in the browser                                        |
-| CSV export works                                       | 6F; exact bytes verified through the proxy                                  |
-| XLSX export works                                      | 6F; reopened and verified, correct filename and media type                  |
-| Browser requests use `/forge-api/*`                    | 6G; every Chromium request observed in 6I went to the page's own origin     |
-| FastAPI can remain on `127.0.0.1`                      | 6G; `config.HOST` in every script                                           |
-| Next.js reachable from a second laptop                 | 6G, `npm run dev:lan` — **not accepted on real hardware; Known Issue 64**   |
-| The second laptop can upload real files                | Exercised by a real browser and a real file input — **not on a second Mac** |
-| The second laptop can download real XLSX results       | Exercised the same way — **not opened in Microsoft Excel**                  |
-| Synthetic integration tests pass                       | 6H; 1,019 passed at 6I                                                      |
-| Prior Phase 0/1-5 functionality still passes           | Whole suite green; the 6A freeze holds with no contract value changed       |
-| Obsolete filesystem assumptions removed                | 6I.1; the 6A audit re-run comes back empty                                  |
-| Architecture documented                                | `docs/architecture.md`                                                      |
+| Criterion | Evidence |
+| --------- | -------- |
+| The POC has been deliberately stress-tested | 7B-7F and 7K, 264 new tests across five modules, plus extensions to three existing ones |
+| Known performance is measured | 7G/7H/7I, five repeats per figure, in process and over real HTTP; tables under **Tests** |
+| Known limitations are documented | Known Issues 78-82 |
+| All critical tests pass | 1,335 passed, 0 failures, 0 skips, 0 xfails |
+| `docs/implementation-status.md` updated | this entry |
 
-**Two criteria are met only in substance, not on the target hardware.** Build
-plan 6G.7-6G.9 asks for an XLSX file selected from a _second laptop's own file
-picker_ and for the exported workbook to be _opened in Microsoft Excel_.
-Neither has happened; both are the user's to run, on the two Macs (Known
-Issue 64). Everything that a single machine can prove about that path has been
-proved — a real browser, a real file input, a real non-loopback address, a real
-download, reopened and verified — but a Mac file picker and Excel's own
-acceptance are not among them. Nothing in the code is expected to change if
-they fail; the finding would be a UX or Excel-compatibility one.
+**Three accuracy defects were found; two were repaired and one is documented.**
+That is the phase working as intended — build plan Phase 7's instruction is
+"attempt to break the POC", and a phase that found nothing would have been the
+worrying outcome:
 
-### Where Phase 7 starts from
+| Defect | Outcome |
+| ------ | ------- |
+| a duplicated column name was silently renamed, and its data dropped from the result | repaired — `DUPLICATE_COLUMNS` / 422 |
+| a cell over 32,767 characters was silently truncated by the XLSX export | repaired — `EXPORT_TOO_LARGE` / 422 |
+| a result past Excel's grid returned a bare 500 the UI reported as an unreachable backend | repaired — the same guard |
+| a mixed numeric column loses integer precision past 2^53 | documented (Known Issue 78); repairing it is an architecture decision |
 
-    cd backend && .venv/bin/python -m pytest   ->  1019 passed, 0 xfails
-    npx --yes pyright                          ->  0 errors
-    npm run lint                               ->  exit 0
-    NEXT_TELEMETRY_DISABLED=1 npm run build    ->  exit 0
+One self-inflicted regression was also found and removed: the duplicate-column
+check initially added a fourth full parse to every XLSX read. XLSX parsing at
+100,000 rows now takes **673 ms, below where it stood before this phase began**.
 
-Two upstream deprecation warnings remain and are deliberately unsuppressed
-(Known Issue 7). Read `docs/architecture.md` before `docs/implementation-status.md`:
-the architecture is stated once there, and this file is the phase log.
+### What Phase 8 inherits
 
-### What Phase 7 inherits
+- **8.1 clean setup test** — this session recreated `backend/.venv` and
+  `node_modules` from scratch by following the documented steps exactly, and
+  needed no undocumented step. That is most of 8.1 already, but on Linux.
+- **8.2 README** — still the Create Next App default. A new reader finds
+  nothing there about `npm run dev:lan`, the backend virtual environment,
+  running the suite, `docs/architecture.md`, or now the benchmark harness.
+- **8.4 acceptance test** — every part of it has been exercised
+  programmatically and in a real browser. What is left is a person doing it.
+- **The two-Mac acceptance (Known Issue 64) is still outstanding** and is
+  unchanged by this phase. A Mac file picker, Finder drag-and-drop and
+  Microsoft Excel opening an export are the three things one machine cannot
+  prove.
+- **The Mac performance run (Known Issue 82).** The harness is committed and
+  takes one command; the margins are large enough that the conclusion is very
+  unlikely to change, but the numbers in this document are container numbers.
+- **`main` is still behind** and this phase did not change that — see below.
 
-- **7A** — the dependency and warning decisions: `httpx` vs `httpx2`
-  (Known Issue 7), and whether the committed suite should drive Next.js at all
-  (Deviation 22, Known Issues 66 and 69). The `/forge-api` proxy still has no
-  committed regression test, and the specific risk is named: the Route Handler
-  must keep **streaming** the request body, and nothing in the repository would
-  catch a change that reads it.
-- **7G-7J** — performance. Nothing has been measured (Known Issue 14), and the
-  build plan's own targets (§3.4: 100,000 rows, under 15 s) must be produced on
-  the real Mac, not in this Linux container (Known Issue 3). 6H's
-  `large_table()` takes any row count and is the fixture to use. 7J owns the
-  retention policy for result frames accumulating in `InMemoryRunStore`
-  (Known Issue 40), and the memory profile of a 250 MB upload held in memory
-  (Known Issue 34).
-- **7K** — Next.js telemetry (Known Issue 1). The repo-local option is
-  exporting `NEXT_TELEMETRY_DISABLED=1` in the dev scripts.
-- **Phase 8.2** — `README.md` is still the Create Next App default (Known
-  Issues 4 and 76).
+### Repository / Git
+
+    Remote:         https://github.com/cmgolizio/ForgeXL
+    Current branch: claude/forgexl-phase-merge-validate-dvzp09
+    Descends from:  2513e0e  "phase 6I complete"
+
+**`main` is seven phases behind.** `origin/main` is at `70c41b1`
+("phase 6C fix"); 6D, 6E, 6F, 6G, 6H, the pre-6I repairs, 6I and now Phase 7
+are all on branches `main` does not contain. This is Known Issue 75, unchanged
+in kind and one phase larger. The current branch descends from `2513e0e`, so
+nothing is skipped or duplicated — but a session inspecting `main` alone will
+still conclude that most of Phase 6 was never built. Merging is the user's to
+do; Phase 7 was not authorised to touch `main`.
 
 ### Before writing any code, verify the repository is intact
 
-    cd backend && .venv/bin/python -m pytest          # FIRST — catches everything below at once
-    git branch -r                                     # is the last phase on an unmerged branch?
+    cd backend && .venv/bin/python -m pytest      # FIRST — catches most of the below at once
+    git branch -r                                 # is the last phase on an unmerged branch?
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
-    ls backend/app/api/*.py backend/tests/*.py        # legal module names — no hyphens, no typos
-    md5sum backend/tests/*.py | awk '{print $1}' | sort | uniq -d
+    ls backend/app/**/*.py backend/tests/*.py | grep -- -       # hyphens are not legal module names
+    md5sum backend/tests/*.py backend/app/**/*.py | awk '{print $1}' | sort | uniq -d
     npm run build
 
-**Run the suite first.** Phase 6I found the backend unable to import at all
-because one committed file had a hyphen in its name; the four structural checks
-that existed at the time all passed, and only running the suite revealed it.
-This family of defect — committed state that cannot import or cannot run —
-has now occurred six times (Known Issues 10, 31, 32, 37, 38 and 70), and the
-suite catches every variant of it in one command.
+The suite must report **1335 passed, zero xfails**. Every other line must
+produce no output, and the build must succeed.
 
-The suite must report **1019 passed, zero xfails**. `git branch -r` must show
-whether a completed phase is sitting on a branch `main` does not contain —
-**at the time of writing, `main` is six phases behind** (Known Issue 75). The
-module-name check must find no hyphen in any `.py` filename. The checksum check
-must print nothing. The build must succeed.
+**Run the suite first**, and then check the rest anyway. Phase 7 found the
+committed suite *not* green — one test still declared a fixture Phase 6I had
+deleted — and found two files the Phase 6I entry describes as renamed that had
+never been renamed. That is the seventh instance of this family (Known Issues
+10, 31, 32, 37, 38, 70, 77) and the first where a phase entry described work
+that was not in the tree. Two consequences for the checks above:
 
-Do not begin Phase 7 until instructed.
+- **The checksum and hyphen checks now cover `backend/app` as well as
+  `backend/tests`.** The hyphenated duplicate that survived 6I was in
+  `app/api/`, which the previous check list did not look at.
+- **A green suite is necessary and not sufficient.** Two of Phase 7's three
+  repairs were invisible to it: a dead duplicate module nothing imports, and a
+  misspelled test filename pytest collects by glob either way. Reading the last
+  phase's "Files renamed" list against `git log --diff-filter=R` is what would
+  have caught them.
+
+Do not begin Phase 8 until instructed.

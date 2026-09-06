@@ -19,6 +19,11 @@ Accuracy rules this module follows:
   are preserved as text, with the affected columns reported to the runner
   for a visible warning. No trimming or date repair is applied
   (build plan section 3.3).
+* **No column is silently renamed.** Every engine here resolves a repeated
+  header name by renaming the later column and carrying on. That is a silent
+  rename and a silent choice between two fields, both of which build plan
+  section 3.3 forbids, so the header row is checked as the file actually
+  spells it and a repeat is refused (build plan 7B/7C).
 * **No engine switch is hidden.** If the preferred Excel engine fails and the
   compatibility fallback succeeds, the fallback is what gets recorded
   (build plan section 6.2).
@@ -36,6 +41,7 @@ import polars as pl
 
 from app.errors import (
     AmbiguousWorkbookError,
+    DuplicateColumnsError,
     FileParseError,
     UnsupportedExtensionError,
 )
@@ -59,6 +65,16 @@ class _WorkbookStructureError(FileParseError):
     The compatibility fallback would reach the same conclusion, so these
     propagate immediately instead of triggering a retry.
     """
+
+
+#: Refusals about the file rather than about an engine's ability to read it.
+#: They are answers, so the engine fallback must not swallow one and report a
+#: generic parse failure in its place.
+_FILE_REFUSALS = (
+    AmbiguousWorkbookError,
+    DuplicateColumnsError,
+    _WorkbookStructureError,
+)
 
 
 @dataclass(frozen=True)
@@ -136,6 +152,12 @@ def _parse_csv(payload: bytes) -> ParsedFile:
     """
     try:
         frame = pl.read_csv(payload)
+        # Read the header a second time as *data*, which is the only way to
+        # see the names the file actually carries: `read_csv` has already
+        # renamed any repeat to `<name>_duplicated_0` by the time it returns,
+        # and the rename is not recoverable from the result. Only the first
+        # record is read, so the cost does not grow with the number of rows.
+        header = pl.read_csv(payload, has_header=False, n_rows=1).row(0)
     except pl.exceptions.NoDataError as exc:
         raise FileParseError(
             "The uploaded CSV file is empty.", details={"reason": str(exc)}
@@ -146,6 +168,8 @@ def _parse_csv(payload: bytes) -> ParsedFile:
             "may not be a CSV file.",
             details={"reason": str(exc)},
         ) from exc
+
+    reject_duplicate_columns(header)
     return ParsedFile(frame=frame, parser_engine=ENGINE_POLARS_CSV)
 
 
@@ -161,20 +185,22 @@ def _parse_xlsx(payload: bytes) -> ParsedFile:
     workbook accurately, openpyxl is tried as the compatibility fallback and
     whichever engine succeeded is what the manifest records.
 
-    A refusal about the workbook's *structure* — no data sheet, or several —
-    is never retried: the fallback would reach the same conclusion.
+    A refusal about the workbook itself — no data sheet, several data sheets,
+    or one name used for two columns — is never retried: the fallback reads the
+    same file and reaches the same conclusion, and retrying would replace a
+    specific answer with a generic "could not be read".
 
     Both engines read the values stored in the workbook. Neither evaluates
     formulas and neither executes macros (build plan section 17 and 7F).
     """
     try:
         return _parse_xlsx_with_fastexcel(payload)
-    except (AmbiguousWorkbookError, _WorkbookStructureError):
+    except _FILE_REFUSALS:
         raise
     except Exception as primary_error:
         try:
             return _parse_xlsx_with_openpyxl(payload)
-        except (AmbiguousWorkbookError, _WorkbookStructureError):
+        except _FILE_REFUSALS:
             raise
         except Exception as fallback_error:
             raise FileParseError(
@@ -199,12 +225,25 @@ def _parse_xlsx_with_fastexcel(payload: bytes) -> ParsedFile:
     an engine failure like any other: it propagates out of this function and
     into :func:`_parse_xlsx`, which retries the whole workbook with the
     compatibility fallback. A worksheet this engine cannot open is never
-    counted as an empty one — see :func:`_fastexcel_sheet_has_data`.
+    counted as an empty one — see :func:`_probe_sheet`.
+
+    The probe's own load is reused for the duplicate-name check rather than
+    reading the header a second time: calamine parses a worksheet in full
+    however few rows are asked for, so a second load costs a second parse of
+    the whole sheet — a third of the time this function takes, at 100,000 rows
+    (build plan 7J).
     """
     reader = fastexcel.read_excel(payload)
+    probes = {name: _probe_sheet(reader, name) for name in reader.sheet_names}
     worksheet = _select_data_worksheet(
-        {name: _fastexcel_sheet_has_data(reader, name) for name in reader.sheet_names}
+        {
+            name: probe.total_height > 0 and probe.width > 0
+            for name, probe in probes.items()
+        }
     )
+    # The header as the workbook spells it, before this engine renames a repeat
+    # to `<name>_1`. It is the first row of the probe, which is already loaded.
+    reject_duplicate_columns(probes[worksheet].to_polars().row(0))
     sheet = reader.load_sheet(
         worksheet, header_row=0, schema_sample_rows=None, dtype_coercion="strict"
     )
@@ -232,12 +271,19 @@ def _parse_xlsx_with_fastexcel(payload: bytes) -> ParsedFile:
     )
 
 
-def _fastexcel_sheet_has_data(reader: fastexcel.ExcelReader, name: str) -> bool:
-    """Whether a worksheet contains any cells at all.
+def _probe_sheet(reader: fastexcel.ExcelReader, name: str) -> fastexcel.ExcelSheet:
+    """Load enough of a worksheet to say whether it holds data, and what it calls
+    its columns.
 
     ``header_row=None`` counts every row, so a sheet holding only a header row
     still counts as a data sheet — a header-only upload is a legitimate dataset
     with zero rows, not an empty sheet.
+
+    ``n_rows=1`` materialises one row while ``total_height`` and ``width`` still
+    report the whole sheet, so the same load answers both questions the caller
+    has: is this sheet populated, and what does its header row say. Reading the
+    header separately would mean parsing the worksheet twice
+    (build plan 7J).
 
     A worksheet that genuinely holds nothing reports a height and width of
     zero; it does not fail to load. So a load failure here is not evidence
@@ -252,8 +298,7 @@ def _fastexcel_sheet_has_data(reader: fastexcel.ExcelReader, name: str) -> bool:
     openpyxl and, if that fails too, reports a parse error naming both engines
     (build plan 3.5 and section 6.2).
     """
-    sheet = reader.load_sheet(name, header_row=None)
-    return sheet.total_height > 0 and sheet.width > 0
+    return reader.load_sheet(name, header_row=None, n_rows=1)
 
 
 def _parse_xlsx_with_openpyxl(payload: bytes) -> ParsedFile:
@@ -321,6 +366,8 @@ def _frame_from_rows(
             "The selected worksheet is empty.", details={"worksheet_empty": True}
         ) from None
 
+    reject_duplicate_columns(header)
+
     column_names = [
         str(value) if value is not None else f"column_{index + 1}"
         for index, value in enumerate(header)
@@ -355,6 +402,43 @@ def _frame_from_rows(
         schema=column_names,
         orient="row",
         infer_schema_length=None,
+    )
+
+
+def reject_duplicate_columns(header: Iterable[Any]) -> None:
+    """Refuse a header row that names two columns the same thing.
+
+    `header` is the header as the file spells it, read before any engine has
+    had a chance to rename a repeat. Names are compared exactly, the same way
+    required columns are (build plan 3.7): ``SKU`` and ``sku`` are two
+    different names and neither is a duplicate of the other.
+
+    Blank header cells are exempt. Two unnamed columns are not one name used
+    twice — every engine here gives them distinct generated names
+    (``__UNNAMED__2``, ``column_3``), so nothing is renamed and nothing is
+    ambiguous.
+
+    Raises:
+        DuplicateColumnsError: a name appears more than once.
+    """
+    seen: set[str] = set()
+    duplicated: list[str] = []
+    for value in header:
+        if value is None:
+            continue
+        name = str(value)
+        if name in seen and name not in duplicated:
+            duplicated.append(name)
+        seen.add(name)
+
+    if not duplicated:
+        return
+
+    raise DuplicateColumnsError(
+        "The uploaded file uses the same column name more than once: "
+        f"{_human_list(tuple(duplicated))}. ForgeXL cannot tell which column "
+        "is meant, so rename or remove the repeated one and try again.",
+        details={"duplicate_columns": duplicated},
     )
 
 

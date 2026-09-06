@@ -191,6 +191,26 @@ class MissingColumnsError(InputValidationError):
     code = "MISSING_COLUMNS"
 
 
+class DuplicateColumnsError(InputValidationError):
+    """The uploaded file's header row uses one name for two columns.
+
+    Every parser this project uses resolves the clash by *renaming* the later
+    column — Polars produces ``SKU_duplicated_0``, fastexcel ``SKU_1`` — and
+    then carries on. Build plan section 3.3 forbids exactly that: the
+    application must "never silently rename required columns" and must "never
+    silently choose a semantically different field". With two columns called
+    ``SKU``, an Action that selects ``SKU`` gets the first one and the second
+    one's values are dropped from the result without anybody being told.
+
+    The application cannot know which of the two the user meant, so it refuses
+    and says so — the same answer, for the same reason, that
+    :class:`AmbiguousWorkbookError` gives a workbook holding two data sheets
+    (build plan section 17).
+    """
+
+    code = "DUPLICATE_COLUMNS"
+
+
 class RunValidationError(WorkbenchError):
     """One or more validation issues stopped a Run before it executed.
 
@@ -221,6 +241,34 @@ class RunValidationError(WorkbenchError):
                 "The uploaded data failed validation.",
                 details={"issues": [issue.model_dump() for issue in collected]},
             )
+
+
+class ExportTooLargeError(WorkbenchError):
+    """The result cannot be represented in the requested export format.
+
+    Raised only by the XLSX export, and only for a limit the *file format*
+    imposes: a worksheet holds 1,048,576 rows and 16,384 columns, and one cell
+    holds 32,767 characters. A result past any of those cannot become a
+    workbook without losing data.
+
+    It is reported rather than absorbed because both ways of absorbing it are
+    forbidden. xlsxwriter's own answer to an over-long cell is to truncate it
+    and carry on, which is build plan section 3.3's "silently convert invalid
+    data into valid-looking data" — the user would open a spreadsheet whose
+    values are quietly shorter than the ones they uploaded. Letting the
+    underlying error escape instead produced a bare ``500 Internal Server
+    Error`` with no structured body, which the UI can only report as the
+    backend being unreachable (build plan section 22).
+
+    422 rather than 500: nothing failed unexpectedly. The request was
+    understood and the data is intact — it simply cannot be expressed in this
+    format, and the same result downloads as CSV without limit, which is what
+    the message says. Of the statuses build plan section 22 lists, 422 is the
+    one that means "understood, but cannot be processed as asked".
+    """
+
+    code = "EXPORT_TOO_LARGE"
+    http_status = 422
 
 
 # ---------------------------------------------------------------------------

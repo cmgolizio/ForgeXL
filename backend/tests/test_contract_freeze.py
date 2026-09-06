@@ -24,7 +24,7 @@ current implementation in depth, and several of them are expected to be
 rewritten as the runtime changes. This module is the part that must not need
 rewriting.
 
-**Amended twice.** The freeze passed unchanged through 6B, 6C and 6D.
+**Amended four times.** The freeze passed unchanged through 6B, 6C and 6D.
 
 *Phase 6E* is the phase build plan Phase 6 always intended to change the
 manifest: 6E.1 requires result metadata and 6E.5 requires an audit summary,
@@ -44,11 +44,21 @@ key, a schema field or a limit. The probe moved because what it probed was
 deleted; had `FROZEN_ROUTES` or any contract needed an edit during a cleanup
 phase, that would have meant 6I changed something it was not asked to.
 
-Everything else in this module — the Action inventory, the error table, the
-metric keys, the preview limits, the determinism checks — is untouched across
-all three amendments and still passing. Each amended entry says below exactly
-what changed and why, so the change stays a recorded decision rather than a
-quiet edit.
+*Phase 7* adds two entries to :data:`FROZEN_ERRORS`: ``DUPLICATE_COLUMNS`` for
+a header row that names two columns the same thing, and ``EXPORT_TOO_LARGE``
+for a result the XLSX format cannot hold. Like 6F's route, these are
+**additions and not changes** — every code, class and status already in the
+table is untouched, and so are `FROZEN_ROUTES`, the Action inventory, the
+metric keys, the schema field lists and the manifest version. Each names a
+failure that previously had no code at all: before this phase a duplicated
+column was silently renamed by the parser and an over-long cell was silently
+truncated by the workbook writer, so there was nothing for the table to pin.
+
+Everything else in this module — the Action inventory, the metric keys, the
+preview limits, the determinism checks — is untouched across all four
+amendments and still passing. Each amended entry says below exactly what
+changed and why, so the change stays a recorded decision rather than a quiet
+edit.
 """
 
 from __future__ import annotations
@@ -71,7 +81,9 @@ from app.actions.registry import ActionRegistry, DuplicateActionIdError
 from app.errors import (
     ActionExecutionError,
     AmbiguousWorkbookError,
+    DuplicateColumnsError,
     EmptyDatasetError,
+    ExportTooLargeError,
     FileParseError,
     InputValidationError,
     InvalidRequestError,
@@ -219,6 +231,11 @@ FROZEN_ERRORS: tuple[tuple[type[WorkbenchError], str, int], ...] = (
     (AmbiguousWorkbookError, "AMBIGUOUS_WORKBOOK", 422),
     (EmptyDatasetError, "EMPTY_DATASET", 422),
     (MissingColumnsError, "MISSING_COLUMNS", 422),
+    # Added in Phase 7. Both are new codes for failures that previously had no
+    # code at all — a silent rename and a silent truncation. Nothing already
+    # listed above moved.
+    (DuplicateColumnsError, "DUPLICATE_COLUMNS", 422),
+    (ExportTooLargeError, "EXPORT_TOO_LARGE", 422),
     (ActionExecutionError, "ACTION_FAILED", 500),
 )
 

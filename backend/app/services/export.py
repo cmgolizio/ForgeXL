@@ -34,6 +34,18 @@ Phase 6F finishes the job:
   and releases its buffer; this module holds no cache, and a Run stores no
   rendered export.
 
+Phase 7 adds one guard. The XLSX format has hard capacity limits, and a result
+that exceeds one of them cannot become a workbook without losing data: past
+1,048,576 rows or 16,384 columns Polars refuses outright, and past 32,767
+characters in a cell xlsxwriter **silently truncates the value and carries on**.
+Both were reaching the user badly — the first as a bare ``500 Internal Server
+Error`` the UI could only report as an unreachable backend, the second as a
+spreadsheet whose text was quietly shorter than what was uploaded, which is
+build plan section 3.3's "silently convert invalid data into valid-looking
+data". :func:`check_fits_worksheet` measures the frame first and refuses with a
+structured error naming what exceeded which limit. CSV has no such limits and
+is unaffected; the message says so.
+
 Actions never call this module; the download endpoints do, once per request
 (build plan section 24).
 """
@@ -47,6 +59,8 @@ from datetime import datetime, timezone
 
 import polars as pl
 import xlsxwriter
+
+from app.errors import ExportTooLargeError
 
 CSV_FORMAT = "csv"
 XLSX_FORMAT = "xlsx"
@@ -108,6 +122,26 @@ WORKBOOK_OPTIONS: dict[str, object] = {
     "default_date_format": "yyyy-mm-dd;@",
     "use_zip64": False,
 }
+
+# ---------------------------------------------------------------------------
+# XLSX format capacity (build plan 7B, 7F)
+# ---------------------------------------------------------------------------
+#
+# Excel's own limits, not this application's. They are checked before a
+# workbook is written because neither engine reports exceeding one usefully:
+# Polars raises an internal error for the grid, and xlsxwriter silently
+# truncates an over-long cell.
+
+#: Data rows one worksheet holds. Excel's grid is 1,048,576 rows and the
+#: header takes the first, so a result may fill the rest.
+MAX_WORKSHEET_ROWS = 1_048_575
+
+#: Columns one worksheet holds (Excel's XFD).
+MAX_WORKSHEET_COLUMNS = 16_384
+
+#: Characters one cell holds. xlsxwriter truncates past this and returns a
+#: code Polars does not check, so the value would be shortened in silence.
+MAX_CELL_CHARACTERS = 32_767
 
 #: Excel's own "show the number as it is" format.
 #:
@@ -172,15 +206,22 @@ def to_workbook_bytes(sheets: Iterable[tuple[str, pl.DataFrame]]) -> bytes:
     reassemble. Build plan 6F.2 and 6F.7: the workbook is assembled in a memory
     buffer, which is released as soon as its bytes have been taken.
 
+    Every table is checked against the format's capacity before any of them is
+    written, so a workbook is never half-built and then abandoned.
+
     Raises:
         ValueError: `sheets` is empty — a workbook with no worksheet is not a
             file Excel will open.
+        ExportTooLargeError: a table does not fit the XLSX format.
     """
     entries: Sequence[tuple[str, pl.DataFrame]] = [
         (str(label), frame) for label, frame in sheets
     ]
     if not entries:
         raise ValueError("A workbook must contain at least one worksheet.")
+
+    for label, frame in entries:
+        check_fits_worksheet(frame, label=label)
 
     names = worksheet_names(label for label, _ in entries)
 
@@ -204,6 +245,81 @@ def to_workbook_bytes(sheets: Iterable[tuple[str, pl.DataFrame]]) -> bytes:
         return buffer.getvalue()
     finally:
         buffer.close()
+
+
+# ---------------------------------------------------------------------------
+# Worksheet capacity (build plan 7B, 7F; section 3.3)
+# ---------------------------------------------------------------------------
+
+
+def check_fits_worksheet(frame: pl.DataFrame, *, label: str) -> None:
+    """Refuse `frame` if the XLSX format cannot hold it without losing data.
+
+    Three limits belong to the file format itself, not to this application:
+    a worksheet holds :data:`MAX_WORKSHEET_ROWS` rows of data beneath its
+    header row and :data:`MAX_WORKSHEET_COLUMNS` columns, and one cell holds
+    :data:`MAX_CELL_CHARACTERS` characters.
+
+    The cell check measures characters, not bytes, because that is what Excel
+    counts — an accented name is one character per letter however many bytes it
+    takes. Only string-typed columns are measured, in one vectorised pass each;
+    no value is materialised in Python.
+
+    Raises:
+        ExportTooLargeError: naming the limit that was exceeded, and where.
+    """
+    if frame.height > MAX_WORKSHEET_ROWS:
+        raise ExportTooLargeError(
+            f"{label} has {frame.height:,} rows. An Excel worksheet holds "
+            f"{MAX_WORKSHEET_ROWS:,}, so this result cannot be saved as a "
+            "workbook. Download it as CSV instead — CSV has no row limit.",
+            details={
+                "output_label": label,
+                "limit": "rows",
+                "maximum": MAX_WORKSHEET_ROWS,
+                "actual": frame.height,
+            },
+        )
+
+    if frame.width > MAX_WORKSHEET_COLUMNS:
+        raise ExportTooLargeError(
+            f"{label} has {frame.width:,} columns. An Excel worksheet holds "
+            f"{MAX_WORKSHEET_COLUMNS:,}, so this result cannot be saved as a "
+            "workbook. Download it as CSV instead — CSV has no column limit.",
+            details={
+                "output_label": label,
+                "limit": "columns",
+                "maximum": MAX_WORKSHEET_COLUMNS,
+                "actual": frame.width,
+            },
+        )
+
+    text_columns = [
+        name for name, dtype in frame.schema.items() if dtype == pl.String
+    ]
+    if not text_columns:
+        return
+
+    longest = frame.select(
+        pl.col(name).str.len_chars().max().alias(name) for name in text_columns
+    ).row(0, named=True)
+
+    for name, length in longest.items():
+        if length is not None and length > MAX_CELL_CHARACTERS:
+            raise ExportTooLargeError(
+                f"A value in the {name!r} column of {label} is {length:,} "
+                f"characters long. An Excel cell holds "
+                f"{MAX_CELL_CHARACTERS:,}, and saving it as a workbook would "
+                "shorten the value without saying so. Download it as CSV "
+                "instead — CSV has no cell length limit.",
+                details={
+                    "output_label": label,
+                    "limit": "cell_characters",
+                    "maximum": MAX_CELL_CHARACTERS,
+                    "actual": length,
+                    "column": name,
+                },
+            )
 
 
 # ---------------------------------------------------------------------------

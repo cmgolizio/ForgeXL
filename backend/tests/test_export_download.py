@@ -520,3 +520,146 @@ def test_a_download_error_names_no_server_location(split_client) -> None:
     assert response.status_code == 404
     for marker in ("/Users/", "/home/", "/tmp", "data/runs"):
         assert marker not in response.text
+
+# ---------------------------------------------------------------------------
+# A result the XLSX format cannot hold (build plan 7B, 7F; section 22)
+#
+# Before Phase 7 both cases below reached the browser as a bare
+# `500 Internal Server Error` with a plain-text body. `src/lib/api.js` reads a
+# 5xx carrying no `error` object as the backend being unreachable, so the user
+# was told to check that ForgeXL was running — while it was running, and had
+# just answered. The CSV of the same result downloads normally either way,
+# which is what the message now says.
+# ---------------------------------------------------------------------------
+
+
+def _wide_csv(width: int) -> bytes:
+    header = tuple(f"c{index}" for index in range(width))
+    return csv_bytes(header, [tuple(1 for _ in range(width))])
+
+
+def test_a_result_too_wide_for_excel_is_a_structured_422(client) -> None:
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={
+            "source_file": upload_file(
+                "wide.csv", _wide_csv(export.MAX_WORKSHEET_COLUMNS + 6)
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+
+    download = client.get(
+        f"/api/runs/{run_id}/outputs/deduplicated_data/download/xlsx"
+    )
+
+    assert download.status_code == 422
+    assert download.headers["content-type"].startswith("application/json")
+    error = download.json()["error"]
+    assert error["code"] == "EXPORT_TOO_LARGE"
+    assert error["details"]["limit"] == "columns"
+    assert error["details"]["maximum"] == export.MAX_WORKSHEET_COLUMNS
+
+
+def test_the_same_result_still_downloads_as_csv(client) -> None:
+    """The refusal is about one format, and the user is not blocked from the data."""
+    width = export.MAX_WORKSHEET_COLUMNS + 6
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={"source_file": upload_file("wide.csv", _wide_csv(width))},
+    )
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+
+    download = client.get(
+        f"/api/runs/{run_id}/outputs/deduplicated_data/download/csv"
+    )
+
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("text/csv")
+    assert len(download.text.splitlines()[0].split(",")) == width
+
+
+def test_a_cell_too_long_for_excel_is_a_structured_422(client) -> None:
+    """The silent-truncation case, at the HTTP boundary."""
+    payload = csv_bytes(
+        ("note",), [("x" * (export.MAX_CELL_CHARACTERS + 1),), ("short",)]
+    )
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={"source_file": upload_file("long.csv", payload)},
+    )
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+
+    download = client.get(
+        f"/api/runs/{run_id}/outputs/deduplicated_data/download/xlsx"
+    )
+
+    assert download.status_code == 422
+    error = download.json()["error"]
+    assert error["code"] == "EXPORT_TOO_LARGE"
+    assert error["details"]["limit"] == "cell_characters"
+    assert error["details"]["column"] == "note"
+
+
+def test_the_whole_run_workbook_refuses_the_same_way(client) -> None:
+    """The run-level route builds a workbook too, and hits the same limits."""
+    payload = csv_bytes(
+        ("note",), [("x" * (export.MAX_CELL_CHARACTERS + 1),), ("short",)]
+    )
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={"source_file": upload_file("long.csv", payload)},
+    )
+    assert response.status_code == 200, response.text
+
+    download = client.get(f"/api/runs/{response.json()['run_id']}/download/xlsx")
+
+    assert download.status_code == 422
+    assert download.json()["error"]["code"] == "EXPORT_TOO_LARGE"
+
+
+def test_the_capacity_refusal_names_no_server_location(client) -> None:
+    payload = csv_bytes(("note",), [("x" * (export.MAX_CELL_CHARACTERS + 1),)])
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={"source_file": upload_file("long.csv", payload)},
+    )
+    assert response.status_code == 200, response.text
+
+    download = client.get(
+        f"/api/runs/{response.json()['run_id']}/outputs/deduplicated_data/download/xlsx"
+    )
+
+    for marker in ("/Users/", "/home/", "/tmp", "data/runs", "Traceback"):
+        assert marker not in download.text
+
+
+def test_the_preview_is_unaffected_by_a_value_excel_cannot_hold(client) -> None:
+    """The result is intact; only one way of exporting it is not available.
+
+    Worth pinning: a guard that refused the preview as well would be a much
+    larger behaviour change than the one this phase intends.
+    """
+    long_value = "x" * (export.MAX_CELL_CHARACTERS + 1)
+    payload = csv_bytes(("note",), [(long_value,)])
+    response = client.post(
+        "/api/runs",
+        data={"action_id": "exact_duplicate_remover"},
+        files={"source_file": upload_file("long.csv", payload)},
+    )
+    assert response.status_code == 200, response.text
+
+    preview = client.get(
+        f"/api/runs/{response.json()['run_id']}/outputs/deduplicated_data/preview"
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0][0] == long_value

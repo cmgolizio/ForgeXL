@@ -216,6 +216,19 @@ before there is evidence it solves an actual problem.
   evaluated, and no uploaded value reaches a shell command.
 - **A workbook with more than one plausible data sheet is refused**, with the
   message build plan §17 specifies, rather than a sheet being guessed.
+- **A header row that names two columns the same thing is refused**
+  (`DUPLICATE_COLUMNS` / 422, added in Phase 7). Every parser resolves the
+  clash by renaming the later column and carrying on, which is the silent
+  rename build plan §3.3 forbids: an Action selecting that column would get the
+  first one and drop the second's values with nothing said. The check reads the
+  header as the file spells it, before any engine has renamed anything, and
+  compares names exactly — `SKU` and `sku` are two names.
+- **An export that cannot hold the data is refused, never truncated**
+  (`EXPORT_TOO_LARGE` / 422, added in Phase 7). The XLSX format holds
+  1,048,575 data rows, 16,384 columns and 32,767 characters in a cell; past any
+  of those, xlsxwriter silently shortens the value or Polars raises an error
+  nothing caught. `export.check_fits_worksheet` measures the result first and
+  says which limit was exceeded, where, and that CSV has none of them.
 - **CORS is an exact allowlist** — `http://127.0.0.1:3000` and
   `http://localhost:3000`. Never a wildcard.
 - **Errors are structured**: `{"error": {"code", "message", "details"}}`. A
@@ -234,9 +247,17 @@ before there is evidence it solves an actual problem.
 to `0.0.0.0` so a second laptop can reach it; FastAPI takes its host from
 `config.HOST` in every script and stays on loopback.
 
-No uploaded data is transmitted to any external service. The one outbound call
-the stack makes on its own is Next.js's build telemetry, which carries no
-application data and is recorded as Known Issue 1 for a Phase 7K decision.
+No uploaded data is transmitted to any external service, and no source file
+names one — Phase 7K sweeps for it in `tests/test_local_exposure.py`, along
+with the loopback binding and the CORS allowlist above. The running backend
+imports no HTTP client at all.
+
+Next.js's own build telemetry was the one outbound call the stack made on its
+own. Phase 7K disabled it in the repository: every npm script that runs
+`next dev`, `next build` or `next start` exports `NEXT_TELEMETRY_DISABLED=1`.
+The machine-global `next telemetry disable` was rejected because it writes
+outside the repository, so it would fix one developer's machine and leave the
+next checkout sending telemetry again.
 
 ---
 

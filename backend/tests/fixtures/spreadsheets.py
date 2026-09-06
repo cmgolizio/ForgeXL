@@ -445,6 +445,98 @@ SINGLE_ROW = Table(
     rows=(("North", "Widget", 10),),
 )
 
+# ---------------------------------------------------------------------------
+# Phase 7B additions
+#
+# The build plan's 7B list, minus the entries the catalogue above already
+# covers. Each is a case that was not represented before this phase.
+# ---------------------------------------------------------------------------
+
+ALL_NULL_COLUMN = Table(
+    name="all-null-column",
+    description=(
+        "A column that is blank in every row, beside columns that are not. "
+        "It is a column of the dataset like any other: it must survive with "
+        "its name and its width, holding nulls rather than being dropped."
+    ),
+    header=("Region", "Note", "Units"),
+    rows=(
+        ("North", None, 10),
+        ("South", None, 25),
+        ("East", None, 7),
+    ),
+)
+
+MULTILINE_TEXT = Table(
+    name="multiline-text",
+    description=(
+        "Values containing newlines, a carriage return and a tab. In a CSV "
+        "these live inside quoted fields and are the classic way a naive "
+        "reader splits one row into several."
+    ),
+    header=("Code", "Note"),
+    rows=(
+        ("A", "line one\nline two"),
+        ("B", "carriage\rreturn"),
+        ("C", "tab\tseparated"),
+        ("D", "line one\nline two\nline three"),
+        ("E", "no break at all"),
+    ),
+)
+
+NUMERIC_EXTREMES = Table(
+    name="numeric-extremes",
+    description=(
+        "Negative numbers, both zeros and a value that is only meaningful at "
+        "full precision. None may be rounded, re-signed or turned into a "
+        "null. `Count` is a separate, integer-only column: an integer past "
+        "2**53 is exact in a column of integers and would not be in a column "
+        "that also holds a decimal, and the two facts belong to two columns "
+        "rather than to one."
+    ),
+    header=("Label", "Amount", "Count"),
+    rows=(
+        ("negative integer", -42, 1),
+        ("negative decimal", -0.5, 2),
+        ("zero", 0, 3),
+        ("negative zero", -0.0, 4),
+        ("small decimal", 0.000123, 5),
+        ("large count", 1.0, 9_007_199_254_740_993),
+    ),
+)
+
+LARGE_TEXT_CELLS = Table(
+    name="large-text-cells",
+    description=(
+        "A text value of 40,000 characters, beside an ordinary one. Longer "
+        "than an Excel cell holds (32,767), so it round-trips through CSV "
+        "unchanged and is refused rather than truncated by the XLSX export."
+    ),
+    header=("Code", "Note"),
+    rows=(
+        ("A", "x" * 40_000),
+        ("B", "short"),
+    ),
+)
+
+#: The largest text value :data:`LARGE_TEXT_CELLS` carries, so a test can state
+#: the expectation without repeating the literal.
+LARGE_TEXT_LENGTH = 40_000
+
+DUPLICATE_COLUMN_NAMES = Table(
+    name="duplicate-column-names",
+    description=(
+        "One name used for two columns. Every parser resolves this by "
+        "renaming the second and carrying on, which is the silent rename "
+        "build plan section 3.3 forbids, so ForgeXL refuses the file."
+    ),
+    header=("SKU", "Vintage", "SKU"),
+    rows=(
+        ("SKU-1", 2019, "SKU-1-again"),
+        ("SKU-2", 2020, "SKU-2-again"),
+    ),
+)
+
 #: Every single-table fixture, for tests that sweep the whole catalogue.
 CATALOGUE: tuple[Table, ...] = (
     SIMPLE_TABLE,
@@ -462,7 +554,32 @@ CATALOGUE: tuple[Table, ...] = (
     MISSING_REQUIRED_COLUMNS,
     HEADER_ONLY,
     SINGLE_ROW,
+    ALL_NULL_COLUMN,
+    MULTILINE_TEXT,
+    NUMERIC_EXTREMES,
 )
+
+#: Fixtures deliberately kept **out** of :data:`CATALOGUE` (Phase 7).
+#:
+#: Every entry in the catalogue above is a dataset ForgeXL reads and returns
+#: unchanged, and the sweep tests in ``test_spreadsheet_fixtures.py`` assert
+#: exactly that of every one of them. These two are not such datasets, and
+#: putting them in the catalogue would have meant loosening those sweeps to
+#: accommodate them — which would have removed the property that makes them
+#: evidence.
+
+#: Tables ForgeXL refuses to read at all. The refusal is the expected
+#: behaviour, so the assertion is about the error, not about the values.
+REFUSED_TABLES: tuple[Table, ...] = (DUPLICATE_COLUMN_NAMES,)
+
+#: Tables that are perfectly good data but exceed a limit of the *XLSX format*
+#: rather than of ForgeXL. They round-trip through CSV unchanged; the XLSX
+#: export refuses them rather than truncating.
+#:
+#: These must never be rendered with :meth:`Table.as_xlsx`. xlsxwriter would
+#: shorten the over-long value in silence, and a fixture builder that converts
+#: data cannot be used to prove the application never does (Known Issue 67).
+CSV_ONLY_TABLES: tuple[Table, ...] = (LARGE_TEXT_CELLS,)
 
 
 # ---------------------------------------------------------------------------

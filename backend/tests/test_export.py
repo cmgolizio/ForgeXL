@@ -27,6 +27,7 @@ import fastexcel
 import polars as pl
 import pytest
 
+from app.errors import ExportTooLargeError
 from app.services import export, parser
 
 FRAME = pl.DataFrame(
@@ -153,7 +154,7 @@ def test_the_offered_formats_are_csv_then_xlsx() -> None:
 
 
 def test_generating_an_export_writes_nothing(
-    tmp_path: Path, runs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, quarantine: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Build plan 6D: a Run needs no ``working/`` or ``exports/`` directory."""
     empty = tmp_path / "cwd"
@@ -164,7 +165,7 @@ def test_generating_an_export_writes_nothing(
     export.to_xlsx_bytes(FRAME, worksheet="result")
 
     assert list(empty.iterdir()) == []
-    assert list(runs_dir.rglob("*")) == []
+    assert list(quarantine.rglob("*")) == []
 
 
 def test_the_service_no_longer_writes_artifacts() -> None:
@@ -548,3 +549,185 @@ def _sheet_names(payload: bytes) -> list[str]:
         html.unescape(name)
         for name in re.findall(r'<sheet name="([^"]*)"', workbook)
     ]
+
+# ---------------------------------------------------------------------------
+# XLSX format capacity (build plan 7B, 7F; section 3.3)
+#
+# Three limits belong to the file format, and before Phase 7 each reached the
+# user badly. An over-long cell was silently truncated by xlsxwriter, which is
+# section 3.3's "silently convert invalid data into valid-looking data"; an
+# over-large grid raised a Polars error nothing caught, which the API returned
+# as a bare 500. `check_fits_worksheet` measures first and refuses with a
+# structured error naming the limit.
+# ---------------------------------------------------------------------------
+
+
+def test_a_cell_at_the_character_limit_is_written_whole() -> None:
+    """The boundary from the side that must keep working."""
+    at_limit = "x" * export.MAX_CELL_CHARACTERS
+    frame = pl.DataFrame({"note": [at_limit]})
+
+    payload = export.to_xlsx_bytes(frame, worksheet="Result")
+
+    assert parser.parse_tabular_bytes(payload, ".xlsx").frame["note"][0] == at_limit
+
+
+def test_a_cell_over_the_character_limit_is_refused_not_truncated() -> None:
+    """One character past the limit, which is where the truncation used to be.
+
+    Verified as a real truncation, not a theoretical one: xlsxwriter writes
+    32,767 characters and returns a code Polars does not check, so the file
+    opened cleanly and the value was quietly shorter than the one uploaded.
+    """
+    too_long = "x" * (export.MAX_CELL_CHARACTERS + 1)
+    frame = pl.DataFrame({"note": [too_long]})
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_xlsx_bytes(frame, worksheet="Result")
+
+    error = raised.value
+    assert error.code == "EXPORT_TOO_LARGE"
+    assert error.http_status == 422
+    assert error.details["limit"] == "cell_characters"
+    assert error.details["column"] == "note"
+    assert error.details["actual"] == export.MAX_CELL_CHARACTERS + 1
+    assert error.details["maximum"] == export.MAX_CELL_CHARACTERS
+    # The message points at the format that has no such limit.
+    assert "CSV" in error.message
+
+
+def test_the_refusal_names_the_column_the_long_value_is_in() -> None:
+    """A user with a wide result needs to know where to look."""
+    frame = pl.DataFrame(
+        {
+            "sku": ["A1"],
+            "short note": ["fine"],
+            "long note": ["x" * (export.MAX_CELL_CHARACTERS + 10)],
+        }
+    )
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_xlsx_bytes(frame, worksheet="Result")
+
+    assert raised.value.details["column"] == "long note"
+
+
+def test_the_same_over_long_value_exports_as_csv_without_complaint() -> None:
+    """CSV has no cell limit, so the refusal above is about XLSX alone.
+
+    This is what makes the refusal acceptable rather than a dead end: the user
+    is not blocked from their data, only from one representation of it.
+    """
+    too_long = "x" * (export.MAX_CELL_CHARACTERS + 5_000)
+    frame = pl.DataFrame({"note": [too_long]})
+
+    payload = export.to_csv_bytes(frame)
+
+    assert parser.parse_tabular_bytes(payload, ".csv").frame["note"][0] == too_long
+
+
+def test_characters_are_counted_not_bytes() -> None:
+    """Excel counts characters, and so does the guard.
+
+    An accented value is one character per letter however many bytes it takes,
+    so a value comfortably inside the limit must not be refused for the size of
+    its UTF-8 encoding.
+    """
+    # Well over the limit in bytes (3 bytes each), well under it in characters.
+    multibyte = "é" * (export.MAX_CELL_CHARACTERS - 1)
+    assert len(multibyte.encode("utf-8")) > export.MAX_CELL_CHARACTERS
+
+    payload = export.to_xlsx_bytes(pl.DataFrame({"note": [multibyte]}), worksheet="R")
+
+    assert parser.parse_tabular_bytes(payload, ".xlsx").frame["note"][0] == multibyte
+
+
+def test_a_frame_wider_than_the_worksheet_is_refused_with_its_numbers() -> None:
+    """Excel's grid is 16,384 columns; past it Polars raises and nothing caught it."""
+    frame = pl.DataFrame({f"c{index}": [1] for index in range(
+        export.MAX_WORKSHEET_COLUMNS + 1
+    )})
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_xlsx_bytes(frame, worksheet="Result")
+
+    assert raised.value.details["limit"] == "columns"
+    assert raised.value.details["actual"] == export.MAX_WORKSHEET_COLUMNS + 1
+    assert raised.value.details["maximum"] == export.MAX_WORKSHEET_COLUMNS
+
+
+def test_a_frame_at_the_column_limit_is_written() -> None:
+    """The boundary, from the side that must work. Deliberately the exact width."""
+    frame = pl.DataFrame(
+        {f"c{index}": [1] for index in range(export.MAX_WORKSHEET_COLUMNS)}
+    )
+
+    payload = export.to_xlsx_bytes(frame, worksheet="Result")
+
+    assert parser.parse_tabular_bytes(payload, ".xlsx").frame.width == (
+        export.MAX_WORKSHEET_COLUMNS
+    )
+
+
+def test_a_frame_taller_than_the_worksheet_is_refused() -> None:
+    """The row limit, checked without building a million-row frame.
+
+    The guard reads `frame.height`, so a lazily-constructed frame of the right
+    height proves the rule at the cost of the rows it actually needs. Building
+    1,048,576 real rows to assert an integer comparison would add seconds to
+    the suite for nothing.
+    """
+    too_tall = pl.select(
+        pl.int_range(0, export.MAX_WORKSHEET_ROWS + 1, eager=True).alias("n")
+    )
+    assert too_tall.height == export.MAX_WORKSHEET_ROWS + 1
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_xlsx_bytes(too_tall, worksheet="Result")
+
+    assert raised.value.details["limit"] == "rows"
+    assert raised.value.details["maximum"] == export.MAX_WORKSHEET_ROWS
+
+
+def test_the_limits_are_excels_own_numbers() -> None:
+    """Pinned, because they are facts about the format and not preferences."""
+    assert export.MAX_WORKSHEET_ROWS == 1_048_575  # 1,048,576 less the header
+    assert export.MAX_WORKSHEET_COLUMNS == 16_384  # column XFD
+    assert export.MAX_CELL_CHARACTERS == 32_767
+
+
+def test_a_workbook_is_never_half_built_before_a_table_is_refused() -> None:
+    """Every table is checked before any is written (build plan 6F.4).
+
+    A workbook whose second sheet is impossible must fail as a whole, not
+    produce a one-sheet file that looks complete.
+    """
+    fits = pl.DataFrame({"a": [1]})
+    does_not = pl.DataFrame({"note": ["x" * (export.MAX_CELL_CHARACTERS + 1)]})
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_workbook_bytes([("Kept", fits), ("Rejected", does_not)])
+
+    assert raised.value.details["output_label"] == "Rejected"
+
+
+def test_a_non_text_column_is_not_measured_for_cell_length() -> None:
+    """Only string columns can exceed the character limit, so only they are read.
+
+    Stated as a test because the guard's cost is otherwise invisible: a result
+    of pure numbers is not scanned at all.
+    """
+    numbers = pl.DataFrame({"n": [1, 2, 3], "f": [1.5, 2.5, 3.5]})
+
+    export.check_fits_worksheet(numbers, label="Numbers")  # must not raise
+
+    assert export.to_xlsx_bytes(numbers, worksheet="R")
+
+
+def test_a_null_only_text_column_does_not_confuse_the_guard() -> None:
+    """A column with no values has no longest value, and that is not an error."""
+    frame = pl.DataFrame({"note": [None, None]}, schema={"note": pl.String})
+
+    export.check_fits_worksheet(frame, label="Empty")  # must not raise
+
+    assert export.to_xlsx_bytes(frame, worksheet="R")

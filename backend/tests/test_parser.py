@@ -17,6 +17,7 @@ import pytest
 
 from app.errors import (
     AmbiguousWorkbookError,
+    DuplicateColumnsError,
     FileParseError,
     UnsupportedExtensionError,
 )
@@ -487,3 +488,130 @@ def test_a_failed_probe_that_the_fallback_cannot_rescue_is_a_parse_error(
     assert raised.value.details["primary_engine"] == parser.ENGINE_FASTEXCEL
     assert raised.value.details["fallback_engine"] == parser.ENGINE_OPENPYXL
     assert "could not be loaded" in raised.value.details["primary_reason"]
+
+# ---------------------------------------------------------------------------
+# A repeated column name is refused, not renamed (build plan section 3.3, 7B)
+#
+# Each engine resolves the clash its own way and then carries on:
+#
+#     Polars CSV  SKU, SKU  ->  SKU, SKU_duplicated_0
+#     fastexcel   SKU, SKU  ->  SKU, SKU_1
+#     openpyxl    SKU, SKU  ->  a Polars DuplicateError from the schema
+#
+# The first two are the silent rename section 3.3 forbids, and the third is a
+# confusing internal error. All three are now one explicit refusal, made
+# against the header as the file spells it rather than as an engine renamed it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_repeated_csv_column_name_is_refused() -> None:
+    with pytest.raises(DuplicateColumnsError) as raised:
+        parser.parse_tabular_bytes(b"SKU,Vintage,SKU\nA,1,B\n", ".csv")
+
+    assert raised.value.code == "DUPLICATE_COLUMNS"
+    assert raised.value.http_status == 422
+    assert raised.value.details["duplicate_columns"] == ["SKU"]
+
+
+def test_a_repeated_xlsx_column_name_is_refused() -> None:
+    payload = xlsx_bytes({"Data": [["SKU", "Vintage", "SKU"], ["A", 1, "B"]]})
+
+    with pytest.raises(DuplicateColumnsError) as raised:
+        parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert raised.value.details["duplicate_columns"] == ["SKU"]
+
+
+def test_the_refusal_is_not_retried_with_the_fallback_engine() -> None:
+    """It is an answer about the file, so a second engine cannot improve on it.
+
+    Retrying would replace `DUPLICATE_COLUMNS` with the fallback's own generic
+    parse failure, which tells the user nothing about what is wrong.
+    """
+    payload = xlsx_bytes({"Data": [["A", "A"], [1, 2]]})
+
+    with pytest.raises(DuplicateColumnsError):
+        parser.parse_tabular_bytes(payload, ".xlsx")
+
+
+def test_every_repeated_name_is_reported_once_in_order() -> None:
+    with pytest.raises(DuplicateColumnsError) as raised:
+        parser.parse_tabular_bytes(b"B,A,B,A,B\n1,2,3,4,5\n", ".csv")
+
+    assert raised.value.details["duplicate_columns"] == ["B", "A"]
+
+
+def test_names_that_differ_only_in_case_are_not_a_duplicate() -> None:
+    """Compared exactly, as required columns are (build plan 3.7)."""
+    parsed = parser.parse_tabular_bytes(b"sku,SKU,Sku\n1,2,3\n", ".csv")
+
+    assert parsed.columns == ("sku", "SKU", "Sku")
+
+
+def test_names_differing_by_whitespace_are_not_a_duplicate() -> None:
+    """Nothing is trimmed before the comparison, because nothing is trimmed.
+
+    ``SKU`` and ``" SKU "`` are two names, so a header carrying both is
+    accepted with both kept exactly as written.
+    """
+    parsed = parser.parse_tabular_bytes(b"SKU, SKU ,SKU  \n1,2,3\n", ".csv")
+
+    assert parsed.columns == ("SKU", " SKU ", "SKU  ")
+
+
+def test_a_genuine_repeat_beside_whitespace_variants_is_still_caught() -> None:
+    """Exact comparison finds the real repeat and ignores the near-misses."""
+    with pytest.raises(DuplicateColumnsError) as raised:
+        parser.parse_tabular_bytes(b"SKU, SKU ,SKU\n1,2,3\n", ".csv")
+
+    assert raised.value.details["duplicate_columns"] == ["SKU"]
+
+
+def test_the_header_check_reads_the_names_the_file_actually_carries() -> None:
+    """The engine's rename must not be what the check sees.
+
+    Without reading the header separately, `read_csv` has already produced
+    unique names by the time the check could run, and the duplicate would be
+    invisible. Asserted directly against the helper so the mechanism is pinned,
+    not only its effect.
+    """
+    parser.reject_duplicate_columns(("a", "b", "c"))  # must not raise
+
+    with pytest.raises(DuplicateColumnsError):
+        parser.reject_duplicate_columns(("a", "b", "a"))
+
+
+def test_blank_header_cells_are_not_duplicates_of_each_other() -> None:
+    """Two unnamed columns are not one name used twice."""
+    parser.reject_duplicate_columns(("Region", None, None))  # must not raise
+
+    payload = xlsx_bytes({"Data": [["Region", None, None], ["North", 1, 2]]})
+    parsed = parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert len(set(parsed.columns)) == parsed.column_count
+
+
+def test_a_header_only_file_with_a_repeat_is_still_refused() -> None:
+    """The refusal is about the header, so it does not need rows to find it."""
+    with pytest.raises(DuplicateColumnsError):
+        parser.parse_tabular_bytes(b"A,B,A\n", ".csv")
+
+
+def test_a_numeric_header_cell_repeated_is_a_duplicate() -> None:
+    """A header cell holding a number is a name like any other."""
+    payload = xlsx_bytes({"Data": [[2019, "Region", 2019], [1, "North", 2]]})
+
+    with pytest.raises(DuplicateColumnsError) as raised:
+        parser.parse_tabular_bytes(payload, ".xlsx")
+
+    assert raised.value.details["duplicate_columns"] == ["2019.0"]
+
+
+def test_a_file_with_no_repeat_is_unaffected() -> None:
+    """The control: the check adds a refusal, it does not change a good file."""
+    parsed = parser.parse_tabular_bytes(
+        csv_bytes(("SKU", "Vintage", "Supplier"), [("A1", 2019, "Acme")]), ".csv"
+    )
+
+    assert parsed.columns == ("SKU", "Vintage", "Supplier")
+    assert parsed.frame.rows() == [("A1", 2019, "Acme")]
