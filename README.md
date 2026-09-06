@@ -139,13 +139,12 @@ being guessed. Maximum upload size is 250 MB per file, configurable via
 
 ## Where Runs are stored
 
-**In the backend process's memory. Nothing is written to disk.**
+**In the backend process's memory. Running an Action writes nothing to disk.**
 
 Uploaded files are read into memory and parsed from there. Results stay as
 in-memory dataframes. CSV and XLSX exports are generated when you click
 download and released with the response. No upload, no intermediate file, no
-export and no manifest ever reaches the filesystem, and the backend has no
-configured data directory at all.
+export and no manifest ever reaches the filesystem.
 
 The consequence: **restarting the backend clears Run history.** A link to an
 earlier Run then returns a clean "run not found" message. This is intended V1
@@ -155,6 +154,25 @@ browser rather than on the server.
 
 Nothing uploaded is sent anywhere. There is no telemetry, no analytics and no
 outbound HTTP client in the running backend.
+
+## Where the Data Library is stored
+
+Separate from a Run, and the one thing ForgeXL does keep:
+**`data/library/`**, on this machine, ignored by git in full.
+
+The Data Library holds business data that has to outlive a Run — sales history,
+sample history, and account-ownership snapshots — as versioned Parquet files
+with small JSON records beside them. Committed versions are immutable: a month
+is corrected by committing a replacement that records what it replaces and why,
+so an older report can still be reproduced from the data it was built from.
+There is no database.
+
+Change the location with `FORGEXL_LIBRARY_DIRECTORY`. The directory is created
+when the first version is committed, not at startup, and it is safe to back up
+by copying. See [`docs/architecture.md`](docs/architecture.md) §5a.
+
+Nothing in the application writes to it yet: the storage layer exists (build
+plan Phase 9) and the monthly ingestion that fills it is Phase 10.
 
 ---
 
