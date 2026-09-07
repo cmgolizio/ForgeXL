@@ -103,6 +103,30 @@ class MissingArtifactError(WorkbenchError):
     http_status = 404
 
 
+class UnknownDatasetError(WorkbenchError):
+    """No Data Library dataset exists with the requested ID.
+
+    Also raised for an ID that could never be a dataset ID at all — a path
+    fragment, a name with separators — which is refused for its shape before
+    the library is asked whether it holds one (build plan 9A).
+    """
+
+    code = "UNKNOWN_DATASET"
+    http_status = 404
+
+
+class UnknownDatasetVersionError(WorkbenchError):
+    """The dataset exists but holds no version with the requested ID.
+
+    Like :class:`UnknownRunError`, this also covers an ID that is not a valid
+    version ID: version IDs are ForgeXL-generated UUIDs (build plan 9B), so
+    anything else is refused rather than used to build a path.
+    """
+
+    code = "UNKNOWN_DATASET_VERSION"
+    http_status = 404
+
+
 # ---------------------------------------------------------------------------
 # 413 — upload too large
 # ---------------------------------------------------------------------------
@@ -243,6 +267,24 @@ class RunValidationError(WorkbenchError):
             )
 
 
+class InvalidDatasetCommitError(WorkbenchError):
+    """A commit to the Data Library was refused before anything was written.
+
+    Raised for a commit that cannot be persisted honestly: a period that is not
+    a calendar month, a snapshot without the period it is effective for, an
+    empty result, or a supersession naming a version that does not exist.
+
+    422 rather than 400 for the same reason
+    :class:`RunValidationError` is: the request was understood, and what it
+    describes cannot be stored. Nothing has been written when this is raised —
+    every check runs before the first byte reaches the disk, which is what
+    build plan 9F means by an invalid commit leaving no partially valid state.
+    """
+
+    code = "INVALID_DATASET_COMMIT"
+    http_status = 422
+
+
 class ExportTooLargeError(WorkbenchError):
     """The result cannot be represented in the requested export format.
 
@@ -284,4 +326,19 @@ class ActionExecutionError(WorkbenchError):
     """
 
     code = "ACTION_FAILED"
+    http_status = 500
+
+
+class DataLibraryError(WorkbenchError):
+    """The Data Library's persistent state could not be read or written.
+
+    This is the corrupt-or-unavailable case, not the not-found case: a record
+    that no longer validates, a record written by a newer build than this one,
+    or a write the filesystem refused. It is deliberately loud. Persistent
+    business data that cannot be read is a fault to report, never something to
+    paper over with an empty result — an empty answer would look exactly like
+    "this month was never imported" (build plan 9F).
+    """
+
+    code = "DATA_LIBRARY_ERROR"
     http_status = 500

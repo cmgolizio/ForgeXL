@@ -1,16 +1,21 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 8 — the end of the proof of concept.
-Phase 7 added two refusals to §7 and the telemetry decision to §8; Phase 8
-changed no architecture at all, and re-verified every claim below against the
-running application.
+**Status:** current as of Phase 9 — the first phase of the post-POC expansion.
+Phases 0–8 built and validated the proof of concept; Phase 9 added the
+persistent Data Library described in §5a and changed nothing else.
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
 ForgeXL is a local data workbench. A user opens it in a browser, picks a
 reusable Action, uploads one or more spreadsheets, runs the Action, reviews the
 result, and downloads it as CSV or Excel. Everything happens on the machine
-running ForgeXL, and — since Phase 6 — everything happens in memory.
+running ForgeXL, and — since Phase 6 — **running an Action happens entirely in
+memory.**
+
+Since Phase 9 there is one thing ForgeXL does keep: a local **Data Library** of
+business data (sales history, sample history, account ownership snapshots) that
+outlives a Run and is deliberately not part of a Run at all. §5a describes it.
+Nothing in the Run path below reads or writes it.
 
 ---
 
@@ -70,6 +75,7 @@ from a client component is a build error, and none of its variables is a
 | Pipeline                 | `backend/app/services/runner.py`       | The generic Run lifecycle. Every Action goes through it.                          |
 | Parsing                  | `backend/app/services/parser.py`       | Bytes → Polars DataFrame. CSV, XLSX, worksheet-ambiguity rules.                   |
 | Run state                | `backend/app/services/run_store.py`    | Where a Run lives. Five methods, one implementation in V1.                        |
+| Persistent data          | `backend/app/services/data_library.py` | Versioned business datasets that outlive a Run. Seven methods. See §5a.           |
 | Results                  | `backend/app/services/results.py`      | Measuring a result table: schema, row counts, columns added/dropped.              |
 | Preview                  | `backend/app/services/preview.py`      | Paginated slices of a retained result frame.                                      |
 | Export                   | `backend/app/services/export.py`       | CSV/XLSX bytes from a result frame, generated per request.                        |
@@ -174,6 +180,92 @@ and the capability to release a Run already exists.
 
 ---
 
+## 5a. The Data Library (Phase 9)
+
+Everything in §5 is about a **Run**, and it is still true. The Data Library is
+a different thing, and the build plan states the difference as a rule:
+
+```text
+RunStore     ->  temporary execution/runtime state
+Data Library ->  persistent business datasets used across Runs
+```
+
+They share no module, no record and no directory. A Run still writes nothing;
+the library is written only when something is deliberately committed to it.
+
+### What it holds
+
+| Dataset               | Kind       | Meaning                                                         |
+| --------------------- | ---------- | --------------------------------------------------------------- |
+| `sales_history`       | `history`  | Monthly sales. Versions accumulate across periods.              |
+| `sample_history`      | `history`  | Monthly samples. A dataset of its own, never folded into sales. |
+| `account_assignments` | `snapshot` | Rep/account ownership **as of** one reporting period.           |
+
+The `snapshot` kind is the point of build plan 9E. An account owned by one rep
+in September and another in November needs September's report to use
+September's ownership, so ownership is stored per effective month rather than
+as one mutable current file.
+
+### Layout
+
+```text
+data/library/                      (git-ignored in full; configurable)
+    sales_history/
+        dataset.json               the dataset record
+        versions/
+            <version id>/          version id is a ForgeXL-generated UUID
+                version.json       the version record
+                data.parquet       the rows
+    sample_history/…
+    account_assignments/…
+    .staging/                      transient; a commit in progress
+```
+
+Parquet plus small JSON records, as build plan 9C prefers. **No database was
+added**, and none is needed to store a few dozen monthly tables. There is also
+no separate index file: a dataset _is_ a directory holding `dataset.json`, and
+a version _is_ a directory holding `version.json`. The layout is the catalogue,
+so there is no catalogue that can disagree with the data it describes.
+
+`config.LIBRARY_DIRECTORY` is the only location the backend is configured to
+write, overridable with `FORGEXL_LIBRARY_DIRECTORY`. It is resolved once, at
+construction, so the library a caller reaches never depends on the process
+working directory. **No path from it is ever exposed through the API** — callers
+name a dataset and a version by their logical IDs.
+
+### Three invariants
+
+- **A committed version is immutable.** Nothing rewrites one. Correcting a
+  month means committing a _new_ version that names the old one in
+  `supersedes`, with a reason; the old version stays loadable by ID, which is
+  what makes an old report reproducible. The interface has no `delete_version`
+  and no `update_version`, so history cannot be rewritten by accident.
+- **A commit is all-or-nothing.** Every check runs before the first byte is
+  written; the files are then assembled in `.staging/` and published with a
+  single `os.rename`. A reader sees either no such version or the whole of it.
+  The dataset record is written the same way — temporary file, flush, replace.
+- **Exactly one live version per period.** A second commit for a period that
+  already has one is refused unless it explicitly supersedes it, so the library
+  can never hold two versions of September with nothing to choose between them
+  — the silent overwrite build plan 9D forbids, arrived at by addition.
+
+### Identity
+
+A dataset ID is a lowercase identifier declared in ForgeXL code; a version ID
+is a ForgeXL-generated UUID, validated as one exactly as a Run ID is. Both are
+checked for shape before they are used to build a path, so neither an uploaded
+filename nor a client-supplied string can steer a read or a write out of the
+library root (build plan 9B).
+
+### Not yet wired to anything
+
+Phase 9 built the layer and stopped there. Nothing imports it from a route, a
+runner or the frontend, and `ensure_known_datasets()` is called deliberately
+rather than at import, so a library that has never been written to stays
+absent. Ingestion is Phase 10; library-backed Action inputs are Phase 11.
+
+---
+
 ## 6. The extension point for future persistence
 
 The DataFrame-first Action contract is deliberately independent of where
@@ -197,9 +289,19 @@ The seam is a single module-level instance, `app.services.run_store.RUN_STORE`.
 Swapping it is exactly the mechanism the test suite already uses to give each
 test its own store, which is the practical proof that the abstraction holds.
 
-**None of this is implemented, and none of it should be** until there is a
-concrete requirement for it. Build plan §7 applies: do not add infrastructure
-before there is evidence it solves an actual problem.
+**None of these three is implemented, and none of them should be** until there
+is a concrete requirement for it. Build plan §7 applies: do not add
+infrastructure before there is evidence it solves an actual problem.
+
+Phase 9 is the first time that seam was used in anger, and it is worth
+recording what it cost: **nothing above it changed.** The Data Library is a new
+service beside the Run Store, with an interface of its own
+(`app.services.data_library.DataLibrary`) and its own module-level instance
+(`DATA_LIBRARY`) swapped the same way. `Action.run(inputs) -> ActionResult` is
+untouched, no Action ID, version, input slot or output ID moved, the runner's
+stages and failure contract are unchanged, and the manifest, preview and export
+shapes are byte-for-byte what Phase 8 froze. That is the property §6 was
+claiming, now demonstrated rather than asserted.
 
 ---
 
@@ -207,7 +309,17 @@ before there is evidence it solves an actual problem.
 
 - **A client filename is metadata, never a path.** Every upload is known
   internally as `source<ext>`; the browser's name is recorded and used nowhere
-  else. Since Phase 6C no path is built from any client value at all.
+  else. Since Phase 6C no path is built from any client value at all, and the
+  Data Library keeps the rule: a version's `source_filename` is recorded and
+  its ID is a generated UUID.
+- **A dataset or version ID must parse before it becomes a path.** A dataset ID
+  is a lowercase identifier and a version ID is a UUID; anything else is
+  `UNKNOWN_DATASET` / `UNKNOWN_DATASET_VERSION` / 404 rather than a directory
+  lookup.
+- **A committed dataset version is never rewritten** (build plan 9D). The Data
+  Library interface offers no way to delete or edit one, a period can only be
+  re-committed as an explicit supersession with a reason, and a commit is
+  staged and renamed into place so a partial one cannot be read as a version.
 - **A Run ID must parse as a UUID** before it reaches anything. A
   traversal-shaped or truncated ID is `UNKNOWN_RUN` / 404.
 - **No API response contains a local path.** Regression tests assert that

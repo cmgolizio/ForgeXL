@@ -1,7 +1,7 @@
 """Fixtures shared by the backend pipeline tests.
 
-Every test gets its own Run Store, so run state never leaks from one test into
-the next.
+Every test gets its own Run Store and its own Data Library, so neither runtime
+state nor persistent business data leaks from one test into the next.
 
 Until Phase 6I this module also owned a ``runs_dir`` fixture that redirected
 ``config.RUNS_DIRECTORY`` at a temporary directory, so the suite could never
@@ -22,7 +22,9 @@ from app.actions import registry as registry_module
 from app.actions.base import Action
 from app.actions.registry import ActionRegistry
 from app.main import app
+from app.services import data_library as data_library_module
 from app.services import run_store as run_store_module
+from app.services.data_library import LocalDataLibrary
 from app.services.run_store import InMemoryRunStore
 
 
@@ -66,6 +68,31 @@ def run_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryRunStore:
     store = InMemoryRunStore()
     monkeypatch.setattr(run_store_module, "RUN_STORE", store)
     return store
+
+
+@pytest.fixture(autouse=True)
+def data_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalDataLibrary:
+    """Give each test its own empty Data Library (build plan Phase 9).
+
+    Autouse, and for a stronger reason than the Run Store fixture beside it.
+    The Data Library is the one part of ForgeXL that is *meant* to write to
+    disk, and its default location is a real directory inside the repository
+    (``config.LIBRARY_DIRECTORY``). Without this redirect a test that committed
+    a dataset would leave company-shaped data in the working tree and would
+    see whatever an earlier test had left there. Redirecting it here means no
+    test can reach the real library even by accident.
+
+    It sits outside :func:`quarantine` on purpose: quarantine is the directory
+    that must stay empty, and this one is the directory a test is allowed to
+    fill.
+
+    Swapping the single :data:`app.services.data_library.DATA_LIBRARY`
+    instance is also exactly how a different implementation would be installed
+    (build plan 9A).
+    """
+    library = LocalDataLibrary(tmp_path / "library")
+    monkeypatch.setattr(data_library_module, "DATA_LIBRARY", library)
+    return library
 
 
 @pytest.fixture

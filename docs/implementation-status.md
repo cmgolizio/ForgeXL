@@ -2,14 +2,16 @@
 
 Last Updated: 2026-09-06
 Current Phase: None
-Last Completed Phase: Phase 8 — Final POC Validation and Handoff.
-**Phase 8 is complete, and with it the proof of concept.** Phase 9 is not
-started; nothing for it has been scaffolded, stubbed or prepared.
+Last Completed Phase: Phase 9 — Persistent Data Library Foundation.
+**Phase 9 is complete.** It is the first phase of the post-POC expansion; the
+user's GO decision on the proof of concept was given by assigning it. Phase 10
+is not started; nothing for it has been scaffolded, stubbed or prepared.
 
 > **Architecture document.** `docs/architecture.md` was created in Phase 6I
 > (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
-> persistence behaviour and the extension point for future persistence. This
-> file remains the phase-by-phase record.
+> persistence behaviour and the extension point for future persistence. Phase 9
+> added §5a, the persistent Data Library. This file remains the phase-by-phase
+> record.
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -27,6 +29,392 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 9 — Persistent Data Library Foundation
+
+Both authoritative documents were read in full and the repository was inspected
+before anything was edited. The session began in a **fresh ephemeral
+container**: `backend/.venv/` and `node_modules/` did not exist and were rebuilt
+with the four commands `README.md` documents, which worked exactly as written.
+
+Phase 9 creates the persistent local dataset layer the recurring monthly
+reporting workflow needs, **without touching the Action and Run architecture
+the proof of concept validated**. That constraint shaped every decision below.
+
+#### One repository defect found and repaired first
+
+The check list the Phase 8 entry prescribes was run before any Phase 9 work.
+The suite was green at **1,335 passed** — the documented figure exactly —
+`npm run build` succeeded, and no hyphenated module or duplicate file was
+found. One check failed, and it is the one Phase 8 put first for this reason:
+
+- **`backend/tests/test_mixed_xlsv_round_trip.py` was _still_ misspelled**
+  (`xlsv` for `xlsx`). `git show --name-status HEAD` on commit `60817e8`
+  ("phase 8 complete") lists four modified files and **no rename at all**,
+  although the Phase 8 entry records the rename under "Files renamed".
+  Repaired with `git mv`; no content was edited.
+
+This is the **ninth** instance of the family Known Issues 10, 31, 32, 37, 38,
+70, 77 and 83 name, the **third** where a phase entry describes work that is
+not in the tree, and the **third consecutive phase** to record this same
+rename. 6I, 7 and 8 each claimed it; `git log --diff-filter=R` shows it in none
+of their commits. It is recorded again as Known Issue 85, with what appears to
+be the actual cause.
+
+---
+
+#### 9A — Data Library contract
+
+`backend/app/services/data_library.py` defines `DataLibrary`, an abstract
+interface with **exactly the seven operations build plan 9A lists**:
+
+    create dataset          create_dataset(definition)
+    get dataset metadata    get_dataset(dataset_id)
+    list datasets           list_datasets()
+    commit dataset version  commit_version(dataset_id, commit)
+    get dataset version     get_version(dataset_id, version_id)
+    list dataset versions   list_versions(dataset_id)
+    load dataset version    load_version(dataset_id, version_id)
+
+Everything else on the class is **derived from those seven and implemented
+once, on the base class** — `ensure_dataset`, `has_dataset`,
+`superseded_version_ids`, `current_versions`, `versions_for_period`,
+`current_version` — so no implementation can answer a derived question
+differently from the facts it stores.
+
+It is deliberately shaped like `RunStore`, which is the convention this
+repository already established: an ABC, one implementation, a single
+module-level instance (`DATA_LIBRARY`), and module-level functions that read
+it. The test suite swaps that instance per test, which is the same mechanism a
+different implementation would be installed by.
+
+**It is not `RunStore`, and shares nothing with it.** A test asserts the two
+interfaces have no method name in common, and another asserts that committing
+to the library records no Run. The build plan states this as a rule of its own
+("Run State and Business Data Are Different") and it is the rule the whole
+phase is built around.
+
+The three datasets build plan Phase 9 requires are declared in
+`backend/app/models/library.py` as `KNOWN_DATASETS`:
+
+| ID                    | Kind       | Why that kind                                                  |
+| --------------------- | ---------- | -------------------------------------------------------------- |
+| `sales_history`       | `history`  | Versions accumulate; a report reads every month it covers      |
+| `sample_history`      | `history`  | A dataset of its own — never folded into sales (build plan 10D) |
+| `account_assignments` | `snapshot` | The whole truth as of one month (build plan 9E)                |
+
+**No filesystem location appears in any of it.** Callers name a dataset and a
+version by logical ID; where those live is `LocalDataLibrary`'s business.
+
+---
+
+#### 9B — Dataset version model
+
+`DatasetVersion` (Pydantic, frozen) records every item on build plan 9B's list.
+The mapping is written into the class docstring so a reader can check it
+against the plan without leaving the file:
+
+| build plan 9B                | field                             |
+| ---------------------------- | --------------------------------- |
+| dataset ID                   | `dataset_id`                      |
+| version ID                   | `version_id`                      |
+| dataset type                 | `dataset_kind`                    |
+| reporting/effective period   | `period`                          |
+| created timestamp            | `created_at` (tz-aware UTC)       |
+| source filename              | `source_filename`                 |
+| source byte size             | `source_byte_size`                |
+| source content hash          | `source_sha256`                   |
+| row count                    | `row_count`                       |
+| column count                 | `column_count`                    |
+| column schema                | `column_schema` (`ColumnSchema`)  |
+| parser information           | `parser_engine`, `worksheet`      |
+| minimum / maximum date       | `min_date`, `max_date`            |
+| report month                 | `period` — see Deviation 63       |
+| replacement / supersession   | `supersedes`, `supersession_reason` |
+
+`column_schema` reuses the existing `ColumnSchema` model and
+`results.column_schema()`, so a stored dataset is described exactly the way a
+Run's result is. Nothing new was invented for it.
+
+**Version IDs are generated by ForgeXL** (`new_version_id()`, a UUID4) and
+validated by `parse_version_id()` with the same rule `parse_run_id` applies —
+canonical UUID or nothing. Dataset IDs are lowercase identifiers declared in
+code, validated by `parse_dataset_id()`. Both are checked **for their shape,
+before they are used to build a path**, so neither an uploaded filename nor a
+client-supplied string can steer a read or a write out of the library root.
+`test_data_library.py` drives `../../etc/passwd`, `/etc/passwd`, `..`,
+`September.csv` and an empty string at both and gets a structured 404 each
+time.
+
+Provenance is **required, not optional**. A commit must state the filename,
+byte size and SHA-256 of the file it came from; `DatasetCommit.from_upload()`
+derives the last two from the bytes so a caller cannot state a size and a hash
+that disagree with the file. A version whose source is unknown could not be
+audited, could not be recognised as an accidental re-upload (build plan 10C)
+and could not explain a report it fed.
+
+---
+
+#### 9C — Local persistent storage
+
+Parquet plus small JSON records, as build plan 9C prefers. **No database was
+added.** No DuckDB, no SQLite, no PostgreSQL, no Redis, no Supabase — and no
+new dependency of any kind: `backend/requirements.txt` and `package.json` are
+untouched. Polars already writes and reads Parquet.
+
+    data/library/                       config.LIBRARY_DIRECTORY; git-ignored
+        sales_history/
+            dataset.json
+            versions/
+                <version id>/
+                    version.json
+                    data.parquet
+        sample_history/ …
+        account_assignments/ …
+        .staging/                       transient; a commit in progress
+
+**There is no separate index file.** A dataset *is* a directory holding
+`dataset.json`; a version *is* a directory holding `version.json`. The layout
+is the catalogue, so there is no catalogue that can disagree with the data it
+describes. The cost is that `list_versions` reads one small JSON per version;
+at monthly granularity that is a few dozen files, and it is recorded as Known
+Issue 87 rather than optimised speculatively.
+
+**Atomic writes**, which build plan 9C asks for "wherever a partial write could
+corrupt persistent state", in two forms:
+
+- **A version** is assembled in `.staging/<uuid>/` and published with a single
+  `os.rename`. `os.rename` refuses an existing directory and the version ID is
+  freshly generated, so publishing can never overwrite a committed version. A
+  reader sees either no such version or the whole of it.
+- **A dataset record** is written to a temporary file in the same directory,
+  flushed and `fsync`ed, then `os.replace`d over the destination.
+
+Both staged files are `fsync`ed before the rename, so the rename does not
+publish a name whose contents are still in a buffer.
+
+`config.LIBRARY_DIRECTORY` is the **only** location the backend is configured to
+write, overridable with `FORGEXL_LIBRARY_DIRECTORY`, absolute by default and
+derived from the repository root rather than the working directory. It is
+resolved once at construction, so a `chdir` cannot change which library a
+caller reaches — asserted by a test that chdirs and reads.
+
+**No physical path is exposed.** A test sweeps every JSON file the library
+writes for `/home/`, `/Users/`, `/tmp`, `versions/` and `.parquet` and finds
+none, and another does the same over a serialised record.
+
+---
+
+#### 9D — Immutable historical versions
+
+Enforced three ways, not asserted once:
+
+1. **The interface has no way to rewrite history.** No `delete_version`, no
+   `update_version`. A test asserts those names are absent from `DataLibrary`,
+   so adding one would be a deliberate act with a failing test attached.
+2. **A commit always creates a new version ID**, and publishing uses a rename
+   that fails on an existing target.
+3. **A period that already has a live version can only be re-committed as an
+   explicit replacement**, naming the version it supersedes and giving a
+   reason. Without that rule 9D would be satisfiable by *addition* rather than
+   overwriting: two live versions of September, with nothing to say which is
+   true. Recorded as Deviation 65, because the rule is an interpretation of
+   9D rather than a sentence in it.
+
+Build plan 9D's four requirements, each with the test that proves it:
+
+| 9D requires                          | Proof                                                                       |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| preserve the old version             | the old version's bytes on disk are **byte-identical** before and after     |
+| create a new version                 | a new ID, loading the corrected rows                                        |
+| mark which version supersedes it     | `supersedes` on the new version; `superseded_version_ids()` derives the set |
+| retain metadata explaining the change | `supersession_reason` — a version that supersedes without one is refused    |
+
+The reverse pointer is **derived, never written back**: marking the old record
+would mean rewriting an immutable record, and a fact stored twice is a fact
+that can end up disagreeing with itself.
+
+Three integrity rules keep the chain explainable: a replacement must name a
+version that exists, must cover the same period, and must not name one that has
+already been replaced. A replacement can itself be replaced, and a test walks a
+three-deep chain.
+
+---
+
+#### 9E — Account ownership snapshots
+
+`account_assignments` is declared `snapshot`, and the kind is enforced: **a
+snapshot version must state the period it is effective for.** A snapshot with
+no month could not be selected for a report and could not be superseded by a
+later month, so it is refused rather than stored as something nothing can use.
+
+The scenario build plan 9E describes is tested directly. An account belongs to
+Beth Comeaux in September and Kevin Wardell in November; three monthly
+snapshots are committed; `current_version("account_assignments", "2026-09")`
+returns September's, and loading it gives `Beth Comeaux`. A later snapshot
+supersedes nothing — `superseded_version_ids()` is empty and both months stay
+live — which is the difference between a snapshot dataset and one mutable file.
+
+A history version, by contrast, **may** cover no single period, because build
+plan 10G's bootstrap spans several months. Only a snapshot is required to name
+one.
+
+---
+
+#### 9F — Persistence verification
+
+All seven proofs build plan 9F requires, in
+`backend/tests/test_library_persistence.py`, one section per item.
+
+**The two restart proofs are done in a separate Python process**, not by
+constructing a second object in this one. Two objects in one interpreter would
+share any accidental module-level cache, and the test would pass for the wrong
+reason. A subprocess started after the commit, importing ForgeXL from source
+with nothing in memory, reads the version back — which is what "survives a
+backend restart" actually means. The reopened-instance tests are kept alongside
+as the cheaper form.
+
+| 9F requires                                                   | Result                                                                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| a dataset version survives backend restart                    | a **second process** reads the rows back, values and all                                                      |
+| dataset metadata survives backend restart                     | a second process reads all three datasets and the full version record; a reopen compares the record **equal** |
+| multiple versions of one dataset coexist                      | two months, both loadable after a reopen; adding one leaves the other's bytes identical                       |
+| an older version can be loaded explicitly                     | a superseded version still loads by ID, in-process and in a second process                                    |
+| replacing a period does not silently destroy the previous one | both version directories present; a re-commit without superseding is **refused**, not absorbed                |
+| account snapshots remain independently retrievable            | three months, each retrieved on its own; a second process reads the rep who owned the account *then*          |
+| invalid/corrupt commits leave no partially valid state        | seven tests — see below                                                                                       |
+
+The last row is the one worth expanding, because "no partially valid state"
+has more than one failure mode:
+
+- **A refused commit writes nothing at all.** Every check runs before the first
+  byte; after three different refusals the `versions/` directory does not exist.
+- **A commit that fails part-way leaves no version.** The failure is injected
+  *between* the two files a version consists of — the worst moment, with the
+  Parquet payload written and its record not — and nothing of it appears where
+  a version is looked for. Staging is left clean.
+- **A corrupt record is reported, not ignored.** Malformed JSON, a missing
+  required field, and a record claiming a newer format version each raise
+  `DATA_LIBRARY_ERROR`. Returning an empty result would read as "this month was
+  never imported", which is worse than the fault.
+- **A record must agree with where it is stored.** Copying one version's record
+  into another's directory is detected and reported, rather than serving one
+  month's figures under another month's ID.
+- **A directory that is not a version is not read as one.** A directory with no
+  record, and one whose name is not a version ID, are both skipped without
+  failing the listing.
+
+---
+
+#### Concurrency, and the control that proves the guard works
+
+`LocalDataLibrary` holds a write lock, for the reason `InMemoryRunStore`
+already documents: Uvicorn runs synchronous endpoints in a thread pool, so two
+commits really can arrive at once, and every write here is a check-then-write
+against state on disk. Without it, two commits could both read "September is
+free" and both publish.
+
+The test starts four threads on a barrier and asserts exactly one succeeds.
+**It was then run against a deliberately unlocked build** — the lock replaced
+with `nullcontext()` — and it failed, which is the only way to know the test
+is testing something. The lock was restored and it passes again. The lock
+covers this process only; two backends sharing one library directory are not
+protected and are not a supported configuration (Known Issue 88).
+
+---
+
+#### What Phase 9 deliberately did not do
+
+Build plan Phase 9 ends with "No Monthly Sales Rep Report business logic is
+required yet", and the assignment was explicit about not preparing later
+phases. Nothing was built beyond the storage layer:
+
+- **No API endpoint.** Nothing under `backend/app/api/` changed, and
+  `main.py` mounts no new router. The library is not reachable over HTTP.
+- **No frontend change.** Nothing under `src/` was touched at all.
+- **No ingestion.** No schema for a sales, sample or assignment file; no period
+  detection; no duplicate-upload detection; no coordinated monthly import; no
+  bootstrap path. All of that is Phase 10.
+- **No library-backed Action inputs.** `Action.run(inputs)` is untouched, no
+  Action knows the library exists, and the runner does not import it. Phase 11.
+- **No import-time side effect.** `ensure_known_datasets()` is called
+  deliberately, never on import, so a library that has never been written to
+  stays absent. Confirmed by a test and by the live check below: after a full
+  Run through the real application, **no `data/` directory exists**.
+
+The only module outside `app/services/data_library.py` and
+`app/models/library.py` that changed is `app/errors.py` (four new error
+classes) and `app/config.py` (one new setting).
+
+---
+
+#### Verification
+
+The full check list, run against the repaired baseline and again at the end.
+
+| Check                              | Result                                                                        |
+| ---------------------------------- | ----------------------------------------------------------------------------- |
+| `pytest` (baseline, before work)   | **1,335 passed** — the documented figure                                      |
+| `pytest` (after Phase 9)           | **1,475 passed**, 0 failures, 0 skips, 0 xfails — 140 added                   |
+| `npx pyright`                      | **0 errors, 0 warnings, 0 informations**                                      |
+| `npm run lint`                     | exit 0, silent                                                                |
+| `npm run build`                    | exit 0, compiled successfully, same three routes                              |
+| `npm run dev` + real HTTP          | both servers up; a Product Master Run through `/forge-api/*` succeeded        |
+| repository after a full Run        | **no `data/` directory created** — the Run path still writes nothing          |
+| default library location, for real | a commit into `data/library/` and a **cross-process** read back; then removed |
+| `git status` during that check     | `data/` never appeared — the ignore rule holds                                |
+
+The live check is worth stating precisely, because it is the one thing no unit
+test can prove: the suite redirects `DATA_LIBRARY` at a temporary directory, so
+only a real run against `config.LIBRARY_DIRECTORY` shows that the *default* is
+right. One was performed — three datasets created, one September version
+committed, then read back by a **brand-new Python process** — and the
+directory was removed afterwards. `git status` confirmed at every step that
+git never saw it.
+
+**Files created**
+
+- `backend/app/models/library.py` — dataset and version model, identity rules,
+  the three declared datasets
+- `backend/app/services/data_library.py` — `DataLibrary`, `LocalDataLibrary`,
+  `DATA_LIBRARY`, the module-level functions
+- `backend/tests/test_library_models.py` — 61 tests (9B)
+- `backend/tests/test_data_library.py` — 52 tests (9A, 9C, 9D, 9E)
+- `backend/tests/test_library_persistence.py` — 27 tests (9F)
+
+**Files modified**
+
+- `backend/app/config.py` — `LIBRARY_DIRECTORY` added; the "there is no data
+  directory" comment corrected rather than left to become false
+- `backend/app/errors.py` — `UNKNOWN_DATASET`, `UNKNOWN_DATASET_VERSION`,
+  `INVALID_DATASET_COMMIT`, `DATA_LIBRARY_ERROR`
+- `backend/tests/conftest.py` — an autouse `data_library` fixture, so no test
+  can reach the repository's real library even by accident
+- `.gitignore` — the `data/` rule's comment, which claimed there was nothing
+  to protect
+- `.env.example` — `FORGEXL_LIBRARY_DIRECTORY`, replacing the "there is no
+  data-directory setting" block
+- `README.md` — a "Where the Data Library is stored" section beside the
+  existing "Where Runs are stored"
+- `docs/architecture.md` — §5a (the Data Library), two entries in §2 and §7,
+  and §6 updated to record that the seam it described was used and cost nothing
+- `docs/implementation-status.md`
+
+**Files renamed**
+
+- `backend/tests/test_mixed_xlsv_round_trip.py` →
+  `backend/tests/test_mixed_xlsx_round_trip.py` (the repair above — the third
+  phase to attempt it; this time verify it against `git show --name-status`)
+
+**Files deleted**
+
+- none
+
+`package.json`, `package-lock.json` and `backend/requirements.txt` are
+untouched — **Phase 9 added no dependency** — and **nothing under `src/` was
+modified**.
+
+---
 
 ### Phase 8 — Final POC Validation and Handoff
 
@@ -2999,9 +3387,16 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           __init__.py
           schemas.py          every Pydantic schema
           run.py              the logical Run, RunResult, run IDs   (6B/6D)
+          library.py          Data Library records: Dataset, DatasetVersion,
+                              DatasetCommit, dataset/version identity,
+                              KNOWN_DATASETS                          (9A/9B)
         services/
           __init__.py
           run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
+          data_library.py     DataLibrary, LocalDataLibrary, DATA_LIBRARY:
+                              persistent versioned business datasets as
+                              Parquet + JSON records. Separate from run
+                              state; shares no method with it      (9A/9C-9E)
           storage.py          in-memory upload intake, safe filenames,
                               upload limit. Builds no path at all: the
                               run-directory helpers 6D left unused were
@@ -3071,6 +3466,13 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               stored values, macro formats refused       (7F)
         test_local_exposure.py  loopback binding, CORS, and no remote
                               call anywhere in the source                (7K)
+        test_library_models.py  dataset/version records, identity, periods,
+                              supersession metadata, JSON round trip      (9B)
+        test_data_library.py  the seven operations, the storage layout,
+                              immutability, snapshot semantics, the write
+                              lock                                (9A/9C-9E)
+        test_library_persistence.py  9F's seven proofs; two of them in a
+                              separate Python process                     (9F)
       benchmarks/             NOT collected by pytest (testpaths=tests and
                               the test_*.py glob). Run directly:
                               `.venv/bin/python -m tests.benchmarks.run`
@@ -3100,20 +3502,28 @@ Backend configuration values (defaults in `backend/app/config.py`):
     PORT                     8000
     MAX_UPLOAD_BYTES         262144000  (250 MB)
     ALLOWED_FRONTEND_ORIGINS http://127.0.0.1:3000, http://localhost:3000
+    LIBRARY_DIRECTORY        <repository>/data/library              (Phase 9)
 
 Each is overridable through a `FORGEXL_`-prefixed environment variable
 (`FORGEXL_BACKEND_HOST`, `FORGEXL_BACKEND_PORT`, `FORGEXL_MAX_UPLOAD_BYTES`,
-`FORGEXL_ALLOWED_FRONTEND_ORIGINS`). The prefix avoids collisions with the
-generic `HOST`/`PORT` variables that `next dev` and other local tooling also
-read; build plan §20 names the settings, not the variable names.
+`FORGEXL_ALLOWED_FRONTEND_ORIGINS`, `FORGEXL_LIBRARY_DIRECTORY`). The prefix
+avoids collisions with the generic `HOST`/`PORT` variables that `next dev` and
+other local tooling also read; build plan §20 names the settings, not the
+variable names.
 
-**There is no data-directory setting.** `DATA_DIRECTORY`, `RUNS_DIRECTORY` and
-`FORGEXL_DATA_DIRECTORY` were removed in Phase 6I along with the code that read
-them (6I.1), so the backend has no configured place to write at all. The one
-path constant left is `PROJECT_ROOT`, used only to point `uvicorn --reload` at
-the backend source tree. Build plan §20 lists a data directory among the
-settings to centralise; the Phase 6 architectural rules, which override earlier
-conflicting instructions, removed the need for one. See **Deviations**.
+**There is still no run-data directory, and `LIBRARY_DIRECTORY` is not one.**
+`DATA_DIRECTORY`, `RUNS_DIRECTORY` and `FORGEXL_DATA_DIRECTORY` were removed in
+Phase 6I along with the code that read them (6I.1) and have not come back: a
+Run writes nothing, and there is no setting that could give it somewhere to
+write. What Phase 9 added is the location of the persistent **Data Library**,
+which holds business data rather than run state — the build plan's
+"Run State and Business Data Are Different" rule. It is absolute, derived from
+`PROJECT_ROOT` rather than the working directory, git-ignored in full, and the
+directory is created on the first commit rather than at startup. See
+**Deviations**.
+
+`PROJECT_ROOT` is used to point `uvicorn --reload` at the backend source tree
+and as the base of the library default.
 
 ### API surface (current)
 
@@ -3261,27 +3671,35 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/`          | Exists (`main.py`, `config.py`)                                                                                          |
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`; the hyphenated duplicate was removed in Phase 7)                      |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
-| `backend/app/models/`   | Exists (`schemas.py`, `run.py`)                                                                                          |
-| `backend/app/services/` | Exists (run_store, storage, parser, runner, export, preview, results)                                                    |
-| `backend/tests/`        | Exists (29 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
+| `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B)                                                                                          |
+| `backend/app/services/` | Exists (run_store, data_library, storage, parser, runner, export, preview, results)                                                    |
+| `backend/tests/`        | Exists (32 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
 | `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
+| `data/library/`         | The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.         |
 | `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)                                                                        |
 | `public/`               | Exists (`.gitkeep`; starter demo SVGs removed)                                                                           |
-| `.env.example`          | Exists (no `FORGEXL_DATA_DIRECTORY` line since 6I)                                                                       |
+| `.env.example`          | Exists (no `FORGEXL_DATA_DIRECTORY` since 6I; gained `FORGEXL_LIBRARY_DIRECTORY` in Phase 9)                             |
 | `docs/`                 | Exists (`build-plan.md`, `implementation-status.md`, `phase-6a-compatibility-audit.md`, `architecture.md` — added in 6I) |
 | `.env.local`            | Not present — not required (frontend default fallback)                                                                   |
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-8-validation-nzgez2
-    Descends from:  d3a0676  "phase 7 complete"
+    Current branch: claude/forgexl-phase-9-n9d431
+    Descends from:  60817e8  "phase 8 complete"
+
+Phase 9's diff is five new files (`backend/app/models/library.py`,
+`backend/app/services/data_library.py` and three test modules), eight modified
+files and one rename. The current state of `main` and of the unmerged phase
+branches is recorded under **Next Phase → Repository / Git**, which is the
+entry to trust; the paragraphs below record earlier sessions' own view of the
+tree and are left as written.
+
+(The Phase 8 session's record follows.)
 
 Phase 8's diff is three files — `README.md`, one docstring paragraph in
-`backend/app/actions/base.py`, and this document — plus one file rename. The
-current state of `main` and of the unmerged phase branches is recorded under
-**Next Phase → Repository / Git**, which is the entry to trust; the paragraphs
-below record earlier sessions' own view of the tree and are left as written.
+`backend/app/actions/base.py`, and this document — plus one file rename that is
+not in commit `60817e8`; see Known Issue 85.
 
 (The Phase 6I session's record follows.)
 
@@ -3399,6 +3817,86 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 9)
+
+    cd backend && .venv/bin/python -m pytest
+    1475 passed, 2 warnings in 15.46s
+
+Run against the committed tree before any Phase 9 edit — **1,335 passed**, the
+documented figure exactly — and again at the end. No failures, no skips, no
+xfails. The two warnings are the upstream ones recorded as Known Issue 7 and
+are deliberately unsuppressed.
+
+**140 tests added, all in three new modules.** No existing test was changed,
+weakened or deleted, which is the claim that matters for a phase adding
+persistence to an application whose defining property is that it writes
+nothing: every Phase 6/7 assertion that a Run touches no filesystem is
+untouched and still passing.
+
+| Module                        | Tests | Covers                                                          |
+| ----------------------------- | ----: | --------------------------------------------------------------- |
+| `test_library_models.py`      |    61 | 9B — records, identity, periods, supersession, JSON round trip  |
+| `test_data_library.py`        |    52 | 9A, 9C, 9D, 9E — the seven operations, layout, immutability     |
+| `test_library_persistence.py` |    27 | 9F — the seven required proofs                                  |
+
+Two of them run a **separate Python interpreter** against the library
+directory, so "survives a backend restart" is proved by a process that has
+none of this one's memory rather than by a second object beside the first.
+
+**One control was run**, on the concurrency guard: the write lock was replaced
+with `nullcontext()` and the four-thread test failed; the lock was restored and
+it passed. A concurrency test that passes either way proves nothing, so it was
+checked.
+
+### Type checking (Phase 9)
+
+    npx pyright     ->  0 errors, 0 warnings, 0 informations
+
+Run against the full `backend/` tree with both new modules and all three new
+test modules in it.
+
+### Frontend static checks (Phase 9)
+
+    npm run lint    ->  exit 0, no output, no warnings
+    npm run build   ->  exit 0
+                        ✓ Compiled successfully
+                        Routes: ○ /   ○ /_not-found   ƒ /forge-api/[...path]
+
+Identical to Phase 8's, and necessarily so: **Phase 9 modified no file under
+`src/`.** The routes are unchanged because no endpoint was added.
+
+### Phase 9 live verification over real HTTP
+
+`npm run dev`, then a real Product Master Builder Run driven through the
+same-origin proxy with `curl`:
+
+| Check                                         | Result                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------- |
+| `GET /forge-api/health`                       | `{"status":"ok"}`                                                               |
+| `GET /forge-api/api/actions`                  | both Actions, unchanged                                                         |
+| `POST /forge-api/api/runs`                    | `succeeded`; metrics `input_rows 3, output_rows 2, duplicate_product_rows_removed 1` |
+| preview                                       | `Château Lafite`, `Sélection`, `Weingut Müller` intact                          |
+| CSV download                                  | correct, accents preserved                                                      |
+| **repository after the whole Run**            | **no `data/` directory created**                                                |
+
+The last line is the point. The Data Library exists in the code and the Run
+path still writes nothing at all — nothing calls `ensure_known_datasets()` on
+import, at startup, or from a route.
+
+### Phase 9 verification of the real default library location (not a test)
+
+The suite redirects `DATA_LIBRARY` at a temporary directory, so no test can
+prove the **default** setting is right. That was checked by hand, once:
+
+| Step                                                       | Result                                                                 |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `config.LIBRARY_DIRECTORY`                                 | `/home/user/ForgeXL/data/library`                                      |
+| exists before                                              | `False`                                                                |
+| `ensure_known_datasets()` then one September commit        | three `dataset.json`, one `version.json`, one `data.parquet`           |
+| **a brand-new Python process** reads it                    | `[('2026-09', 1, 'sept.csv')]`, rows `[{'Account': 'Acme', ...}]`      |
+| `git status` while it existed                              | `data/` **never appeared** — the ignore rule holds                     |
+| afterwards                                                 | directory removed; `git status --ignored` clean of it                  |
 
 ### Backend test suite (Phase 8)
 
@@ -6266,6 +6764,75 @@ keeps its existing phase ownership.
     requires a code change, and neither is expected to change the
     recommendation. See **Completed → Phase 8 → build plan §36**.
 
+**Added in Phase 9:**
+
+85. **The same rename has now been recorded as done by three consecutive
+    phases and performed by none of them — the ninth instance of this
+    family.**
+    `backend/tests/test_mixed_xlsv_round_trip.py` (`xlsv` for `xlsx`) was
+    recorded as renamed by Phase 6I, again by Phase 7, and again by Phase 8.
+    `git log --diff-filter=R` shows the rename in none of `2513e0e`, `d3a0676`
+    or `60817e8`; `git show --name-status 60817e8` lists four modified files
+    and no rename at all. Phase 9 found it still misspelled and repaired it
+    with `git mv`.
+
+    **What is probably happening, and what would actually fix it.** Each phase
+    ran `git mv` and then wrote its report, and the rename is genuinely staged
+    when the report is written — `git status` shows it, which is what the
+    report is written from. What no phase has verified is the **commit**: the
+    commits are made after the report, and something between the two is losing
+    a staged rename. A staged rename is also invisible to every other check in
+    the list, because pytest collects `test_*.py` by glob and a misspelled
+    filename runs exactly as well as a correct one.
+
+    So the fix is not another `git mv`. It is: **after committing, run
+    `git show --name-status HEAD` and confirm every rename the report claims is
+    in it.** That check has been added to the list at the end of this document,
+    positioned after the commit rather than before it. Until a phase does that,
+    the tenth instance is likelier than not.
+
+    Family: Known Issues 10, 31, 32, 37, 38, 70, 77, 83 and this one.
+
+86. **The Data Library is built and connected to nothing.**
+    Deliberate — build plan Phase 9 ends before ingestion, and the assignment
+    forbade preparing later phases — but worth stating plainly so it is not
+    mistaken for an oversight: no route reaches it, no Action knows it exists,
+    the runner does not import it, and nothing calls
+    `ensure_known_datasets()`. A reader who starts the application and looks
+    for `data/library/` will not find it, and that is correct. Phase 10 fills
+    it; Phase 11 lets an Action read it.
+
+87. **`list_versions` reads one JSON file per version.**
+    The library has no index file, on purpose: the layout is the catalogue, so
+    nothing can disagree with the data it describes. The cost is that listing a
+    dataset's versions opens every version record, and the derived queries
+    built on it (`current_versions`, `superseded_version_ids`,
+    `current_version`) each do a full listing — so
+    `current_version(..., period)` reads every record to answer about one
+    month.
+
+    At the scale this is designed for — one version per month, a handful of
+    corrections — that is a few dozen small files and is not worth optimising.
+    It would matter if a dataset ever accumulated thousands of versions, or if
+    a report resolved a period inside a loop. An index or a per-instance cache
+    would both reintroduce something that can go stale, so neither was added
+    speculatively; if Phase 13's report generation makes this visible, measure
+    it first.
+
+88. **The Data Library's write lock protects one process, not one directory.**
+    `LocalDataLibrary` holds a `threading.Lock`, which closes the real hazard:
+    Uvicorn runs synchronous endpoints in a thread pool, so two commits can
+    arrive at once and every write here is a check-then-write against state on
+    disk. That is tested, and the test was checked against an unlocked build.
+
+    Two **separate processes** sharing one library directory are not protected.
+    Two backends could both decide September was free and both publish, leaving
+    two live versions of one month — which `current_version` reports as
+    `DATA_LIBRARY_ERROR` rather than silently picking one, so the damage is
+    visible rather than silent. ForgeXL is a local single-user application and
+    two concurrent backends are not a supported configuration; a file lock
+    would be the fix if that ever changes.
+
 **Added in Phase 6I:**
 
 70. **Committed state that could not import — the sixth instance, this time a
@@ -6935,6 +7502,75 @@ failed` as an example and says explicitly: "Use existing equivalent status
     the Phase 7 modules. The harnesses themselves lived in the session
     scratchpad and were removed with it.
 
+**Added in Phase 9:**
+
+63. **Build plan 9B's "report month" and "reporting period" are one field.**
+    9B lists "reporting period or effective period" among the required fields
+    and "report month" among the where-applicable ones. `DatasetVersion` has a
+    single `period`, and the docstring says so explicitly.
+
+    Recording the same month under two names would create two things that can
+    disagree, and a version whose two months disagreed would be unreproducible
+    in exactly the way build plan 9E exists to prevent. For a monthly history
+    version the reporting period **is** the report month; for a snapshot it is
+    the month the snapshot is effective for. The *actual* date extremes found
+    in the data are recorded separately, as `min_date` and `max_date`, which is
+    the distinct fact 9B also asks for.
+
+64. **Supersession is recorded forward only; the reverse is derived.**
+    9D asks to "mark which version supersedes the previous version". A new
+    version carries `supersedes` and `supersession_reason`; the superseded
+    version carries nothing, and `superseded_version_ids()` derives the set
+    from the forward pointers.
+
+    Writing a `superseded_by` field back into the older record would mean
+    **rewriting an immutable record**, which is the very thing 9D requires must
+    not happen. The mark exists and is queryable in both directions; only its
+    storage is one-directional.
+
+65. **A period that already has a live version can only be re-committed as an
+    explicit replacement.** Build plan 9D forbids silently overwriting stored
+    history and describes how a deliberate replacement works. It does not
+    literally say what happens if the same month is committed twice without one.
+
+    Allowing it would satisfy 9D's letter — nothing is overwritten — and defeat
+    its purpose: the library would hold two live versions of September with
+    nothing to say which is true, and any report reading "September" would have
+    to guess. So a second commit for a period that already has a live version
+    is refused, naming the existing version and saying that replacing it is
+    deliberate. The invariant this buys — exactly one live version per period —
+    is what makes `current_version()` a question with one answer.
+
+    Two supporting rules follow from the same reasoning: a replacement must
+    cover the same period as the version it replaces, and a version that has
+    already been replaced cannot be replaced again (a forked chain could not
+    explain what happened). A replacement can itself be replaced, so
+    corrections still chain.
+
+66. **A snapshot version must state its period; a history version need not.**
+    9E requires account assignments to be stored by effective reporting period.
+    Enforced as a rule on the `snapshot` kind rather than left to the caller: a
+    snapshot with no month could not be selected for a report and could not be
+    superseded by a later month, so it would be stored as something nothing can
+    ever use.
+
+    History versions are deliberately allowed to have no period, because build
+    plan 10G's historical bootstrap "may accept a wider historical period than
+    recurring monthly ingestion" and needs to be expressible.
+
+67. **`config.LIBRARY_DIRECTORY` reintroduces a configured write location,
+    six phases after Phase 6I removed one.** Deviation 31 and the Phase 6I
+    entry both record that the backend had no configured place to write at all,
+    and that was load-bearing: it is why a Run provably touches no filesystem.
+
+    That property is unchanged. `LIBRARY_DIRECTORY` is not a run-data directory
+    and is not reachable from the Run pipeline — no route, service or Action
+    imports the Data Library, and a live Run was verified to create no `data/`
+    directory. It is the location of persistent **business data**, which the
+    build plan's "Run State and Business Data Are Different" rule requires to
+    be a different thing in a different place. `DATA_DIRECTORY`,
+    `RUNS_DIRECTORY` and `FORGEXL_DATA_DIRECTORY` remain deleted.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -6959,80 +7595,88 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 9 — Persistent Data Library Foundation.**
+**Phase 10 — Monthly Dataset Ingestion and Versioning.**
 
-**Not started, and it must not start yet.** Build plan §36 and the Post-POC
-Product Expansion section both gate Phase 9 on a decision that is the user's:
+**Not started.** Nothing for it has been scaffolded, stubbed or prepared: no
+source schema for a sales, sample or assignment file; no reporting-period
+detection; no duplicate-upload detection; no coordinated monthly import; no
+bootstrap path; no endpoint; no frontend change; no new dependency.
 
-> Do not begin these phases until: 1. Phases 0-8 are complete. 2. The final POC
-> evaluation has been performed. 3. The POC receives a **GO** decision.
+Phase 10 turns the three recurring source files into safe, validated, versioned
+Data Library updates. It has the storage layer it needs and should not need to
+change it: `commit_version` already refuses a period that is already covered,
+already records the source hash Phase 10C's duplicate detection compares, and
+already keeps a superseded month readable.
 
-Conditions 1 and 2 are now met. Condition 3 is not — Phase 8 records a
-**recommendation** of GO with its evidence (see
-**Completed → Phase 8 → build plan §36**), and a recommendation is not the
-decision. Nothing for Phase 9 has been scaffolded, stubbed or prepared: no Data
-Library module, no dataset model, no persistence, no new dependency, no
-placeholder.
+### Phase 9 is complete
 
-### Phase 8 is complete
-
-Every exit criterion build plan Phase 8 lists, checked against what is actually
+Every exit criterion build plan Phase 9 lists, checked against what is actually
 in the repository:
 
-| Criterion                               | Evidence                                                                                                                                    |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| 8.1 clean setup test                    | performed from an empty container; four documented commands, no undocumented step                                                           |
-| 8.2 README                              | rewritten; every item §8.2 lists is present and every command in it was executed                                                            |
-| 8.3 startup workflow                    | `npm run dev` starts both, ready in 1 s; the production path checked too; nothing needed documenting as unreliable                          |
-| 8.4 complete acceptance test            | 51/51 in real Chromium — both Actions end to end, both exports verified by reopening them, and the validation case proving no false success |
-| 8.5 extensibility proof                 | 20/20 with a three-slot, two-output Action and **zero** frontend change; the code sweep found nothing Action-specific in `src/`             |
-| §35 final POC evaluation                | scored, with the counterweight for each score                                                                                               |
-| §36 Go / Revise / Stop                  | GO recommended, with the two outstanding user-owned validations named                                                                       |
-| §37 Definition of Done                  | audited line by line; three lines superseded by Phase 6 and recorded as Deviation 60                                                        |
-| `docs/implementation-status.md` updated | this entry                                                                                                                                  |
+| Criterion                               | Evidence                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 9A Data Library contract                | `DataLibrary`, an interface of exactly 9A's seven operations, independent of `RunStore`; three datasets with stable logical IDs      |
+| 9B dataset version model                | every field 9B lists, mapped item by item in the class docstring; ForgeXL-generated UUID version IDs                                 |
+| 9C local persistent storage             | Parquet + JSON records under `data/library/`; atomic staging-and-rename; no database; no path exposed                                |
+| 9D immutable historical versions        | no delete or update in the interface; the old version's bytes identical after replacement; supersession recorded with a reason       |
+| 9E account ownership snapshots          | `account_assignments` is a snapshot kind; a snapshot must state its period; three months retrieved independently                     |
+| 9F persistence verification             | all seven proofs, two of them in a **separate Python process**                                                                       |
+| no Monthly Sales Rep Report logic       | none written; nothing calls the library; no route, no Action and no frontend file touched                                            |
+| `docs/implementation-status.md` updated | this entry                                                                                                                          |
 
-### What a Phase 9 session inherits
+### What a Phase 10 session inherits
 
-- **The GO decision is outstanding** and gates everything. Do not begin Phase 9
-  without it.
-- **The two-machine acceptance (Known Issue 64)** and **the Mac performance run
-  (Known Issue 82)** are still owed and still need hardware no session so far
-  has had. Neither is a code change; both are the user's to perform. See Known
-  Issue 84.
 - **A clean container is the normal starting condition.** `backend/.venv/` and
-  `node_modules/` will not exist. The README now documents the four commands
-  that rebuild them.
-- **The architectural rule Phase 9 must respect** is already written down:
-  `RunStore` is runtime state and the Data Library is business data, and they
-  are not the same thing (build plan, "Architectural Rule: Run State and
-  Business Data Are Different"). The DataFrame-first Action contract must
-  survive unchanged — `docs/architecture.md` §6 describes the seam.
-- **`main` is two commits behind** (see below), not seven. Merging is still the
-  user's to do.
+  `node_modules/` will not exist. `README.md` documents the four commands that
+  rebuild them; they were followed exactly this session and needed nothing else.
+- **The suite must report 1,475 passed**, zero failures, zero skips, zero
+  xfails.
+- **The Data Library is ready and is connected to nothing** (Known Issue 86).
+  Phase 10's work is the ingestion layer above it:
+  `app.services.data_library.commit_version(dataset_id, DatasetCommit)` is the
+  call it will make, and `DatasetCommit.from_upload(frame, filename=..., payload=...)`
+  builds the argument from what the existing parser already produces.
+- **Three Phase 9 rules Phase 10 will meet immediately**, all deliberate and
+  all recorded as deviations: a period that already has a live version must be
+  re-committed as an explicit replacement with a reason (Deviation 65), a
+  snapshot must state its period (Deviation 66), and provenance —
+  filename, byte size, SHA-256 — is required on every commit.
+- **Phase 10C's duplicate detection has what it needs**: `source_sha256` is on
+  every committed version and `content_hash()` is the single definition of it.
+- **Reporting-period detection is Phase 10B's, not Phase 9's.** The library
+  validates a period and records it; it does not derive one from data. That is
+  by design.
+- **The Run pipeline still writes nothing**, and the tests that prove it are
+  untouched. Do not let ingestion change that: an uploaded file should be
+  parsed in memory exactly as it is now, and only the *parsed frame* should
+  reach the library.
+- **A test that touches the library gets an empty one automatically.** The
+  autouse `data_library` fixture in `conftest.py` redirects
+  `DATA_LIBRARY` at a temporary directory. Do not construct a
+  `LocalDataLibrary(config.LIBRARY_DIRECTORY)` in a test — that writes into the
+  repository.
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-8-validation-nzgez2
-    Descends from:  d3a0676  "phase 7 complete"
+    Current branch: claude/forgexl-phase-9-n9d431
+    Descends from:  60817e8  "phase 8 complete"
 
-**`main` has caught up substantially since the Phase 7 entry was written.**
-`origin/main` is now at `8bfe29f` ("fixed problems prior to starting Phase 6I")
-rather than `70c41b1`, so it carries 6D through 6H and the pre-6I repairs. Two
-commits remain unmerged — `2513e0e` (6I) and `d3a0676` (Phase 7) — and both are
-ancestors of this branch, so nothing is skipped or duplicated. Known Issue 75
-is reduced accordingly but not closed: a session inspecting `main` alone would
-still miss 6I and Phase 7.
+`origin/main` is at `8bfe29f` ("fixed problems prior to starting Phase 6I").
+Three commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7) and
+`60817e8` (Phase 8) — and all three are ancestors of this branch, so nothing is
+skipped or duplicated. Known Issue 75 stands, one commit larger: a session
+inspecting `main` alone would miss 6I, Phase 7 and Phase 8. Merging is the
+user's to do.
 
-Phase 8's diff is three files: `README.md` (rewritten), one docstring paragraph
-in `backend/app/actions/base.py`, and this document — plus one file rename.
-`package.json`, `package-lock.json` and `backend/requirements.txt` are
-untouched, and **nothing under `src/` changed**.
+Phase 9's diff is five new files (two backend modules, three test modules),
+eight modified files and one rename. `package.json`, `package-lock.json` and
+`backend/requirements.txt` are untouched, and **nothing under `src/` changed**.
 
 ### Before writing any code, verify the repository is intact
 
-Run these in order. The first two catch different failures and neither
-substitutes for the other.
+Run these in order. They catch different failures and none substitutes for
+another.
 
     git show --name-status HEAD                   # FIRST — does the last phase entry match its own commit?
     cd backend && .venv/bin/python -m pytest      # catches most of the rest at once
@@ -7042,23 +7686,23 @@ substitutes for the other.
     md5sum backend/tests/*.py backend/app/*.py backend/app/*/*.py | awk '{print $1}' | sort | uniq -d
     npm run build
 
-The suite must report **1335 passed, zero xfails**. Every other line must
+The suite must report **1475 passed, zero xfails**. Every other line must
 produce no output, and the build must succeed.
 
-**The first line is new, and it is first for a reason.** Phase 8 found that
-`backend/tests/test_mixed_xlsv_round_trip.py` was _still_ misspelled after two
-consecutive phases recorded the rename as done — `git log --diff-filter=R`
-shows the rename in neither commit. That is the eighth instance of this family
-(Known Issues 10, 31, 32, 37, 38, 70, 77, 83) and the second where a phase
-entry described work that is not in the tree.
+**And one check that belongs at the end of your phase, not the start.** Phase 9
+found that the same file rename had been recorded as done by three consecutive
+phases and was in none of their commits (Known Issue 85). Every one of those
+phases ran `git mv` and reported truthfully from `git status`; what none of them
+did was check the commit afterwards. So:
 
-**A green suite is necessary and not sufficient.** pytest collects `test_*.py`
-by glob, so a misspelled test filename runs exactly as well as a correct one,
-and a dead duplicate module that nothing imports is invisible to it. Reading
-the last phase's "Files created / modified / renamed / deleted" lists against
-`git show --name-status` for its commit is what catches these, and it takes
-one command.
+    # AFTER committing, before reporting the phase complete:
+    git show --name-status HEAD
+
+Confirm that every file your report lists as created, modified, renamed or
+deleted actually appears there. A staged rename that never reaches the commit
+is invisible to the whole check list above — pytest collects `test_*.py` by
+glob, so a misspelled test filename runs exactly as well as a correct one.
 
 If the environment is fresh — no `backend/.venv/`, no `node_modules/` — rebuild
 it with the four commands in `README.md`. That path was exercised end to end in
-Phase 8.1 and needs nothing beyond what is written there.
+Phase 8.1 and again in Phase 9, and needs nothing beyond what is written there.

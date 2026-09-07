@@ -51,11 +51,22 @@ next-env.d.ts
 !.env.example
 .env.local
 
-# run artifacts
-# There are none. ForgeXL V1 keeps uploads, results and exports in memory and
-# writes nothing, so Phase 6I removed the `data/runs/` tree these rules used to
-# protect. Left as a rule so a directory reintroduced by accident is not
-# committed; see docs/architecture.md.
+# local data
+# Two different things live under this rule, and neither may ever be committed.
+#
+#   run artifacts       There are none. ForgeXL keeps uploads, results and
+#                       exports in memory and writes nothing, so Phase 6I
+#                       removed the `data/runs/` tree this rule used to
+#                       protect. Kept so a directory reintroduced by accident
+#                       is not committed.
+#
+#   data/library/       The persistent Data Library added in Phase 9: real
+#                       company sales history, sample history and account
+#                       ownership. It is deliberately ignored in full — this
+#                       is business data, not source, and it belongs on the
+#                       machine that produced it and nowhere else.
+#
+# See docs/architecture.md.
 data/
 
 # python backend
