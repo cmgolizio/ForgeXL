@@ -235,21 +235,30 @@ class DuplicateColumnsError(InputValidationError):
     code = "DUPLICATE_COLUMNS"
 
 
-class RunValidationError(WorkbenchError):
-    """One or more validation issues stopped a Run before it executed.
+class IssueReportingError(WorkbenchError):
+    """Base for an error that carries a list of :class:`ValidationIssue`.
 
-    A single issue is reported directly, in the shape build plan section 22
-    documents. Several issues are reported together under ``details.issues``;
-    the manifest always records the complete list either way.
+    Two of these exist — one for a Run's inputs, one for a monthly ingestion —
+    and both report a list the same way, because it is the same question: what
+    was wrong with what the user supplied.
+
+    A single issue is reported **as itself**, in the shape build plan section
+    22 documents, so the UI branches on the specific code (``MISSING_COLUMNS``)
+    rather than on a generic wrapper. Several issues are reported together
+    under ``details.issues``. Either way the complete list stays available on
+    ``.issues``, so a manifest or an import report records all of them.
     """
 
-    code = "VALIDATION_FAILED"
-    http_status = 422
+    #: The message used when several issues are reported at once. A subclass
+    #: sets it to say which input failed.
+    summary_message: str = "The uploaded data failed validation."
 
     def __init__(self, issues: Iterable[ValidationIssue]) -> None:
         collected = tuple(issues)
         if not collected:
-            raise ValueError("RunValidationError requires at least one issue.")
+            raise ValueError(
+                f"{type(self).__name__} requires at least one issue."
+            )
         self.issues = collected
 
         if len(collected) == 1:
@@ -262,9 +271,22 @@ class RunValidationError(WorkbenchError):
             self.code = only.code
         else:
             super().__init__(
-                "The uploaded data failed validation.",
+                self.summary_message,
                 details={"issues": [issue.model_dump() for issue in collected]},
             )
+
+
+class RunValidationError(IssueReportingError):
+    """One or more validation issues stopped a Run before it executed.
+
+    A single issue is reported directly, in the shape build plan section 22
+    documents. Several issues are reported together under ``details.issues``;
+    the manifest always records the complete list either way.
+    """
+
+    code = "VALIDATION_FAILED"
+    http_status = 422
+    summary_message = "The uploaded data failed validation."
 
 
 class InvalidDatasetCommitError(WorkbenchError):
@@ -283,6 +305,30 @@ class InvalidDatasetCommitError(WorkbenchError):
 
     code = "INVALID_DATASET_COMMIT"
     http_status = 422
+
+
+class IngestionValidationError(IssueReportingError):
+    """One or more issues stopped a monthly file from reaching the Data Library.
+
+    The ingestion counterpart of :class:`RunValidationError`, and constructed
+    the same way: one issue is reported **as itself**, so a client sees
+    ``SOURCE_SCHEMA_MISMATCH`` or ``MULTIPLE_REPORTING_PERIODS`` rather than a
+    generic wrapper; several are reported together under ``details.issues``.
+
+    Every refusal in :mod:`app.services.ingestion` arrives through this one
+    class, and each issue's ``code`` names the specific failure — the same
+    convention :mod:`app.services.runner` already uses for ``MIXED_COLUMN_TYPES``
+    and ``UNEXPECTED_INPUT``, which are issue codes without an exception class
+    of their own.
+
+    Nothing has been written to the Data Library when this is raised. Build
+    plan 10F requires every check to run before the first commit, so a refusal
+    always means the library is exactly as it was.
+    """
+
+    code = "INGESTION_VALIDATION_FAILED"
+    http_status = 422
+    summary_message = "The uploaded file cannot be imported."
 
 
 class ExportTooLargeError(WorkbenchError):

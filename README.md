@@ -171,8 +171,20 @@ Change the location with `FORGEXL_LIBRARY_DIRECTORY`. The directory is created
 when the first version is committed, not at startup, and it is safe to back up
 by copying. See [`docs/architecture.md`](docs/architecture.md) §5a.
 
-Nothing in the application writes to it yet: the storage layer exists (build
-plan Phase 9) and the monthly ingestion that fills it is Phase 10.
+**What fills it** is the monthly ingestion layer (build plan Phase 10): the
+three recurring exports — sales, samples and the account-assignment list — are
+parsed, checked against their canonical schemas, placed in a reporting month
+read from the data rather than from the filename, and committed as one version
+per month. All three are validated before any of them is stored, so a bad file
+means nothing is written at all, and re-uploading a month's export is refused
+rather than counted twice.
+
+The accepted columns and every refusal are documented in
+[`docs/monthly-source-schemas.md`](docs/monthly-source-schemas.md). Ingestion is
+reachable in-process; the monthly reporting screen that drives it is a later
+phase, so there is no button for it in the UI yet.
+
+Running an Action still writes nothing — the two are separate systems.
 
 ---
 

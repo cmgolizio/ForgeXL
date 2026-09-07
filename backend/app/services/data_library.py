@@ -848,6 +848,17 @@ def list_datasets() -> list[Dataset]:
     return DATA_LIBRARY.list_datasets()
 
 
+def ensure_dataset(definition: DatasetDefinition) -> Dataset:
+    """Ensure `definition` is recorded in the application's Data Library.
+
+    Idempotent. Added in Phase 10 so monthly ingestion can make sure the
+    dataset it is about to commit into exists without reaching through
+    :data:`DATA_LIBRARY` itself — the same wrapper every other operation on
+    this interface already has.
+    """
+    return DATA_LIBRARY.ensure_dataset(definition)
+
+
 def commit_version(dataset_id: str, commit: DatasetCommit) -> DatasetVersion:
     """Commit a new version of `dataset_id` to the application's Data Library."""
     return DATA_LIBRARY.commit_version(dataset_id, commit)

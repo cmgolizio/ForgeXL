@@ -257,12 +257,92 @@ checked for shape before they are used to build a path, so neither an uploaded
 filename nor a client-supplied string can steer a read or a write out of the
 library root (build plan 9B).
 
-### Not yet wired to anything
+### What reaches it
 
-Phase 9 built the layer and stopped there. Nothing imports it from a route, a
-runner or the frontend, and `ensure_known_datasets()` is called deliberately
-rather than at import, so a library that has never been written to stays
-absent. Ingestion is Phase 10; library-backed Action inputs are Phase 11.
+Phase 9 built the layer and left it connected to nothing. **Phase 10 added the
+one thing that writes to it**: the monthly ingestion service in §5b. Nothing
+else does — no route, no Action, and not the Run pipeline, which still writes
+nothing at all. `ensure_known_datasets()` is still never called at import, so a
+library that has never been ingested into stays absent.
+
+Library-backed Action *inputs* — an Action reading a stored dataset version —
+are Phase 11 and do not exist yet.
+
+---
+
+## 5b. Monthly ingestion (Phase 10)
+
+The layer between the parser and the Data Library. It is what protects stored
+business data from malformed, duplicated, partial or period-mismatched uploads.
+
+```text
+uploaded bytes
+    ↓  app/services/parser.py            the Run pipeline's parser, unchanged
+Polars DataFrame
+    ↓  app/models/source_schemas.py      canonical schemas          (10A)
+    ↓  app/services/reporting_period.py  which month, from the data (10B)
+    ↓  app/services/ingestion.py         rows, duplicates, commit   (10C–10G)
+app/services/data_library.py             versioned Parquet          (9C)
+```
+
+**It uses the Run pipeline's parser, deliberately.** One implementation reads
+an ingested file and an uploaded one, so the extension rules, the
+worksheet-ambiguity refusal and the duplicate-column refusal apply identically
+to both and cannot drift apart.
+
+**Nothing in Phase 9 changed to accommodate it.** No model, interface or stored
+record gained a field; the only addition to `data_library.py` is an
+`ensure_dataset` wrapper matching the module's existing convention. Ingestion
+is built entirely on `commit_version` and the derived queries the library
+already offered.
+
+### The four properties that make it safe
+
+- **The month comes from the data, never the filename.** `Invoice Date` decides
+  it for sales and samples. A file named `September Sales.csv` holding August
+  rows is August, and a monthly import that was told "September" refuses it.
+- **Ambiguity is refused, not resolved.** A date column that two declared
+  formats read differently — `03/04/2026` is 4 March or 3 April — is reported
+  and an explicit format is required. Guessing would move rows into the wrong
+  month, which is the failure the layer exists to prevent.
+- **Everything is checked before anything is written.** All three files in a
+  monthly cycle are validated first, so "September sales committed but the
+  September ownership snapshot silently failed" cannot happen by a file being
+  wrong. A refusal leaves the library exactly as it was.
+- **The stored frame is the uploaded frame.** No column renamed, added,
+  reordered, coerced or dropped. The month, the date range, the parser engine
+  and the source hash are metadata *on the version*, never written into rows.
+
+### Two entry points
+
+| Path                  | Shape                                         | Rule                                                       |
+| --------------------- | --------------------------------------------- | ---------------------------------------------------------- |
+| Historical bootstrap  | one file, many months → one version per month | One-time, into an empty dataset (10G)                      |
+| Recurring monthly     | three files, one month                        | Validate all three, then commit all three (10F)            |
+
+After the bootstrap the ordinary workflow adds one reporting period at a time
+and the history is reused — the user never re-uploads it.
+
+A duplicate is the same bytes committed for the same month. The period is part
+of that match because identical bytes mean different things for the two dataset
+kinds: a history file's bytes decide its month, while an unchanged ownership
+snapshot is legitimately byte-identical from one month to the next.
+
+Correcting a committed month is deliberate and separate: commit a replacement
+naming the version it supersedes and why (9D). The old version stays readable,
+so the report built from it can still be reproduced.
+
+The accepted schemas, every refusal and every warning are documented in
+[`monthly-source-schemas.md`](monthly-source-schemas.md). The
+account-assignment schema is **provisional and marked UNCONFIRMED**; that
+document says what to change to confirm it.
+
+### No HTTP surface
+
+Phase 10 adds no route. `FROZEN_ROUTES` in `test_contract_freeze.py` is
+byte-identical, and the published API is exactly what Phase 8 froze. The
+monthly reporting workflow UI is build plan Phase 15A; ingestion is reachable
+in-process, which is what its own phase asks for.
 
 ---
 
@@ -316,6 +396,14 @@ claiming, now demonstrated rather than asserted.
   is a lowercase identifier and a version ID is a UUID; anything else is
   `UNKNOWN_DATASET` / `UNKNOWN_DATASET_VERSION` / 404 rather than a directory
   lookup.
+- **A reporting month is read from data, never from a filename** (build plan
+  10B). An uploaded file's name is metadata here too: it supplies the extension
+  that chooses a parser and is recorded on the version, and it decides nothing
+  about which month the rows belong to.
+- **An ambiguous date column is refused, not resolved** (build plan 10B). Two
+  declared formats that read a column differently mean the file cannot say
+  which month it is, and an explicit choice is required. The same rule section
+  17 applies to a workbook with two data sheets.
 - **A committed dataset version is never rewritten** (build plan 9D). The Data
   Library interface offers no way to delete or edit one, a period can only be
   re-committed as an explicit supersession with a reason, and a commit is
@@ -400,4 +488,5 @@ whole proof of concept exists to demonstrate.
 | What must be built, and in what order                                                             | `docs/build-plan.md`                   |
 | What has been built and verified, phase by phase                                                  | `docs/implementation-status.md`        |
 | Which components were filesystem-coupled before Phase 6, and what the frozen public contracts are | `docs/phase-6a-compatibility-audit.md` |
+| The exact columns of the three monthly source files, and every ingestion refusal and warning      | `docs/monthly-source-schemas.md`       |
 | Known issues, limitations and deviations                                                          | `docs/implementation-status.md`        |
