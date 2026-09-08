@@ -12,7 +12,7 @@ This module models what the library holds. It does not decide where any of it
 is written: that belongs to :mod:`app.services.data_library`, so no business
 logic ever names a filesystem location (build plan 9A).
 
-Three kinds of value live here:
+Four kinds of value live here:
 
 * :class:`DatasetDefinition` — a logical dataset ForgeXL knows about, declared
   in code. The three the build plan requires are declared at the bottom of this
@@ -26,6 +26,9 @@ Three kinds of value live here:
   and which Pydantic could not validate anyway. The same reasoning that keeps
   :class:`~app.actions.base.ActionResult` and
   :class:`~app.models.run.RunResult` out of Pydantic.
+* :class:`DatasetSelector` — which version a caller wants, added in Phase 11.
+  Also a frozen dataclass: it is an internal value that is *resolved* before
+  anything is executed, and what a Run records is the version it resolved to.
 
 Identity rules, both of which exist so a client-supplied value can never become
 a filesystem path:
@@ -54,6 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.errors import (
     InvalidDatasetCommitError,
+    InvalidDatasetSelectorError,
     UnknownDatasetError,
     UnknownDatasetVersionError,
     WorkbenchError,
@@ -147,6 +151,157 @@ def parse_period(raw: str) -> str:
             details={"period": raw},
         )
     return raw
+
+
+class DatasetSelectorKind(str, Enum):
+    """How a caller names the dataset version it wants (build plan 11A, 11D).
+
+    Build plan 11D allows a *moving* concept at selection time and forbids one
+    at execution time: "A moving concept such as `latest` or `current` may be
+    used during input selection, but it must be resolved to immutable version
+    IDs before the Action executes." These three kinds are that distinction
+    made explicit — :attr:`LATEST` and :attr:`PERIOD` are questions the library
+    answers, :attr:`VERSION` is already the answer.
+    """
+
+    #: The newest live version of the dataset. Moving: what it names changes
+    #: as months are committed.
+    LATEST = "latest"
+
+    #: The live version for one reporting month. Moving only in the narrow
+    #: sense that a correction can supersede it (build plan 9D).
+    PERIOD = "period"
+
+    #: One exact committed version, by its ForgeXL-generated ID. Fixed: this
+    #: is what every other kind resolves *to*, and what a Run records.
+    VERSION = "version"
+
+
+#: Separates a selector's kind from its value, as in ``period:2026-09``.
+SELECTOR_SEPARATOR = ":"
+
+
+@dataclass(frozen=True)
+class DatasetSelector:
+    """Which version of a dataset an Action input should read.
+
+    Written as text because that is how it crosses the wire — one form field
+    beside the uploaded files on ``POST /api/runs``:
+
+    ==========================  ==========================================
+    text                        meaning
+    ==========================  ==========================================
+    ``latest``                  the newest live version
+    ``period:2026-09``          the live version for September 2026
+    ``version:<version id>``    that exact version, superseded or not
+    ==========================  ==========================================
+
+    A frozen dataclass rather than a Pydantic model for the same reason
+    :class:`DatasetCommit` is one: it is an internal value, and what reaches
+    the manifest is :meth:`as_text`, the canonical form of what was asked for.
+    The manifest records that *beside* the resolved version ID and never
+    instead of it (build plan 11C).
+
+    Nothing here reaches the filesystem. A period and a version ID are
+    validated by the same two functions every other caller uses, so a
+    selector cannot smuggle a path fragment into a library read.
+    """
+
+    kind: DatasetSelectorKind
+    value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is DatasetSelectorKind.LATEST:
+            if self.value is not None:
+                raise ValueError("The 'latest' selector takes no value.")
+        elif not self.value:
+            raise ValueError(f"A {self.kind.value} selector requires a value.")
+
+    @classmethod
+    def parse(cls, raw: str) -> DatasetSelector:
+        """Read a selector from the text a client submitted.
+
+        Surrounding whitespace is ignored and the keyword is matched
+        case-insensitively; the value is validated by :func:`parse_period` or
+        :func:`parse_version_id` and stored in its canonical form, so two
+        spellings of the same request record identically.
+
+        Raises:
+            InvalidDatasetSelectorError: the text is not one of the three
+                accepted forms, or its value is not a valid period or version
+                ID. Nothing is guessed: an unrecognised selector is refused
+                rather than resolved to a near match, exactly as an
+                unrecognised Action ID is (build plan Phase 2.4).
+        """
+        if not isinstance(raw, str) or not raw.strip():
+            raise InvalidDatasetSelectorError(
+                "Name the dataset version to use: 'latest', 'period:YYYY-MM' "
+                "or 'version:<version id>'.",
+                details={"selector": raw},
+            )
+
+        text = raw.strip()
+        keyword, separator, value = text.partition(SELECTOR_SEPARATOR)
+        keyword = keyword.strip().lower()
+        value = value.strip()
+
+        if not separator:
+            if keyword == DatasetSelectorKind.LATEST.value:
+                return cls(kind=DatasetSelectorKind.LATEST)
+            raise cls._unreadable(raw)
+
+        if keyword == DatasetSelectorKind.PERIOD.value:
+            with _as_selector_failure(raw):
+                return cls(kind=DatasetSelectorKind.PERIOD, value=parse_period(value))
+
+        if keyword == DatasetSelectorKind.VERSION.value:
+            with _as_selector_failure(raw):
+                return cls(
+                    kind=DatasetSelectorKind.VERSION, value=parse_version_id(value)
+                )
+
+        raise cls._unreadable(raw)
+
+    @staticmethod
+    def _unreadable(raw: str) -> InvalidDatasetSelectorError:
+        return InvalidDatasetSelectorError(
+            f"{raw.strip()!r} does not name a dataset version. Use 'latest', "
+            "'period:YYYY-MM' or 'version:<version id>'.",
+            details={"selector": raw},
+        )
+
+    def as_text(self) -> str:
+        """The canonical text form, which is what a Run records as requested."""
+        if self.value is None:
+            return self.kind.value
+        return f"{self.kind.value}{SELECTOR_SEPARATOR}{self.value}"
+
+    @property
+    def is_moving(self) -> bool:
+        """Whether this selector can name a different version over time.
+
+        True for everything but :attr:`DatasetSelectorKind.VERSION`. It is the
+        reason build plan 11D exists: a moving selector is fine to *ask* with
+        and must never be what a Run records having *used*.
+        """
+        return self.kind is not DatasetSelectorKind.VERSION
+
+
+@contextmanager
+def _as_selector_failure(raw: str) -> Iterator[None]:
+    """Report a bad period or version ID as a bad selector.
+
+    :func:`parse_period` and :func:`parse_version_id` raise the errors that
+    suit their own callers — a refused commit and an unknown version. Inside a
+    selector neither is what happened: the client's *reference* is unreadable,
+    which is one failure with one code, whichever half of it is wrong.
+    """
+    try:
+        yield
+    except WorkbenchError as error:
+        raise InvalidDatasetSelectorError(
+            error.message, details={"selector": raw, **error.details}
+        ) from error
 
 
 def content_hash(payload: bytes) -> str:

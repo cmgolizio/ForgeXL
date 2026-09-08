@@ -184,7 +184,21 @@ The accepted columns and every refusal are documented in
 reachable in-process; the monthly reporting screen that drives it is a later
 phase, so there is no button for it in the UI yet.
 
-Running an Action still writes nothing — the two are separate systems.
+**What reads it** is an Action input slot that declares itself library-backed
+(build plan Phase 11). Such a slot names the dataset it reads; the Run names
+which version — `latest`, `period:2026-09`, or an exact `version:<id>` — and
+that reference is resolved to one immutable version *before* the Action runs.
+The Run records the version it resolved to, so committing a newer month later
+never changes what an earlier Run says it used, and naming that recorded
+version reproduces the original result exactly.
+
+The Action itself is unchanged by any of this: it receives dataframes keyed by
+its input slots and cannot tell an uploaded one from a stored one. No Action
+shipped today reads the library, so there is no version picker in the UI yet
+either — that comes with the monthly reporting screen.
+
+Running an Action still writes nothing — reading a stored version is a read,
+and the two systems stay separate.
 
 ---
 
@@ -228,7 +242,8 @@ src/components/          React components (plain JavaScript, no TypeScript)
 src/lib/                 Frontend API paths and display formatters
 backend/app/actions/     The Action contract, the registry, and each Action
 backend/app/api/         FastAPI routes
-backend/app/services/    Parsing, the Run pipeline, results, preview, export
+backend/app/services/    Parsing, the Run pipeline, results, preview, export,
+                         the Data Library and its ingestion and input resolution
 backend/tests/           The test suite and its synthetic fixture system
 docs/                    Build plan, architecture, implementation status
 scripts/                 Backend launcher and the LAN address helper
@@ -246,3 +261,8 @@ scripts/                 Backend launcher and the LAN address helper
 
 Nothing in the frontend changes. An Action declaring three input slots renders
 three upload areas on its own.
+
+To read stored history instead of an upload, declare the slot with
+`source=ActionInputSource.LIBRARY` and the `dataset_id` it reads. The runner
+resolves the version and hands your `run(inputs)` an ordinary dataframe — an
+Action never opens a Data Library file itself.

@@ -24,7 +24,7 @@ current implementation in depth, and several of them are expected to be
 rewritten as the runtime changes. This module is the part that must not need
 rewriting.
 
-**Amended four times.** The freeze passed unchanged through 6B, 6C and 6D.
+**Amended five times.** The freeze passed unchanged through 6B, 6C and 6D.
 
 *Phase 6E* is the phase build plan Phase 6 always intended to change the
 manifest: 6E.1 requires result metadata and 6E.5 requires an audit summary,
@@ -65,11 +65,31 @@ the schema field lists and the manifest version.
 added a whole subsystem and no HTTP surface, because build plan Phase 10
 describes none. The monthly reporting workflow is build plan 15A.
 
-Everything else in this module — the Action inventory, the metric keys, the
-preview limits, the determinism checks — is untouched across all five
-amendments and still passing. Each amended entry says below exactly what
-changed and why, so the change stays a recorded decision rather than a quiet
-edit.
+*Phase 11* makes four amendments, and every one of them is an addition:
+
+* :data:`FROZEN_SCHEMA_FIELDS` — ``ActionInput`` gains ``source`` and
+  ``dataset_id`` (build plan 11A) and ``RunManifest`` gains ``library_inputs``
+  (11C). Both additions default to what the code already meant, so the
+  manifest schema version stays at 2 and every field already frozen keeps its
+  order and its meaning.
+* :data:`FROZEN_ACTIONS` — each registered Action's input slot now pins
+  ``source`` as ``upload`` and ``dataset_id`` as null. This is the assertion
+  form of build plan 11A's instruction not to change either proof Action:
+  converting one later fails here.
+* :data:`FROZEN_ERRORS` — one new code, ``INVALID_DATASET_SELECTOR``, plus the
+  three Phase 9 library errors that only became reachable from a request in
+  this phase.
+* :data:`FORBIDDEN_ACTION_IMPORTS` — the Data Library modules, because build
+  plan 11B says an Action must not open library files itself.
+
+`FROZEN_ROUTES` is byte-identical again: a library-backed input is a field in
+the existing ``POST /api/runs`` form, not a route of its own.
+
+Everything else in this module — the metric keys, the preview limits, the
+determinism checks, the Action inventory's identities and outputs — is
+untouched across every one of those amendments and still passing. Each amended entry says
+below exactly what changed and why, so the change stays a recorded decision
+rather than a quiet edit.
 """
 
 from __future__ import annotations
@@ -92,18 +112,22 @@ from app.actions.registry import ActionRegistry, DuplicateActionIdError
 from app.errors import (
     ActionExecutionError,
     AmbiguousWorkbookError,
+    DataLibraryError,
     DuplicateColumnsError,
     EmptyDatasetError,
     ExportTooLargeError,
     FileParseError,
     IngestionValidationError,
     InputValidationError,
+    InvalidDatasetSelectorError,
     InvalidRequestError,
     MissingArtifactError,
     MissingColumnsError,
     MissingInputError,
     RunValidationError,
     UnknownActionError,
+    UnknownDatasetError,
+    UnknownDatasetVersionError,
     UnknownOutputError,
     UnknownRunError,
     UnsupportedExtensionError,
@@ -115,6 +139,7 @@ from app.models.schemas import (
     MANIFEST_SCHEMA_VERSION,
     ActionDefinition,
     ActionInput,
+    ActionInputSource,
     ActionListResponse,
     ActionOutput,
     ActionReference,
@@ -154,6 +179,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "required": True,
                 "accepted_extensions": (".csv", ".xlsx"),
                 "required_columns": (),
+                "source": ActionInputSource.UPLOAD,
+                "dataset_id": None,
             },
         ),
         "outputs": (
@@ -185,6 +212,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                     "Selection",
                     "Volume",
                 ),
+                "source": ActionInputSource.UPLOAD,
+                "dataset_id": None,
             },
         ),
         "outputs": (
@@ -252,12 +281,31 @@ FROZEN_ERRORS: tuple[tuple[type[WorkbenchError], str, int], ...] = (
     # one class; the specific failure travels as the issue's own code, which is
     # what a single-issue error reports as itself. Nothing above moved.
     (IngestionValidationError, "INGESTION_VALIDATION_FAILED", 422),
+    # Added in Phase 11. `INVALID_DATASET_SELECTOR` is new; the other three
+    # existed from Phase 9 and had no HTTP surface to reach until an Action
+    # could read the Data Library, which is what Phase 11 built. Pinning them
+    # now is what keeps a library failure from quietly becoming a different
+    # status: a reference naming nothing is the user's input (422 through the
+    # Run's validation) or a missing dataset/version (404 on its own), while a
+    # library that cannot be *read* stays a 500 and is never reported as a bad
+    # request. Nothing already listed above moved.
+    (InvalidDatasetSelectorError, "INVALID_DATASET_SELECTOR", 422),
+    (UnknownDatasetError, "UNKNOWN_DATASET", 404),
+    (UnknownDatasetVersionError, "UNKNOWN_DATASET_VERSION", 404),
+    (DataLibraryError, "DATA_LIBRARY_ERROR", 500),
     (ActionExecutionError, "ACTION_FAILED", 500),
 )
 
 #: Field names of every model the API returns or the manifest records.
 FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
     (
+        # Amended in Phase 11: build plan 11A requires an input slot to be
+        # able to originate from a Data Library dataset version as well as
+        # from an uploaded file. The six frozen fields are all still here, in
+        # their original order and meaning; the two additions default to
+        # exactly what every Action written before Phase 11 already meant —
+        # `source` to "upload", `dataset_id` to null — so no existing Action
+        # and no existing client changed.
         ActionInput,
         (
             "id",
@@ -266,6 +314,8 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "required",
             "accepted_extensions",
             "required_columns",
+            "source",
+            "dataset_id",
         ),
     ),
     (ActionOutput, ("id", "label", "description", "formats")),
@@ -316,6 +366,14 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
         # Amended in Phase 6E: build plan 6E.5 requires an assembled audit
         # summary. `audit` is derived from the fields above it, so nothing
         # already frozen changed meaning.
+        #
+        # Amended again in Phase 11: build plan 11C requires a Run that used
+        # persistent data to record the exact dataset versions it used.
+        # `library_inputs` sits beside `inputs` rather than inside it, because
+        # an uploaded file and a committed dataset version are identified by
+        # different facts. It defaults to empty, so a manifest for an
+        # upload-only Run — every Run either registered Action can produce —
+        # is what it was, and `MANIFEST_SCHEMA_VERSION` stays at 2.
         RunManifest,
         (
             "schema_version",
@@ -327,6 +385,7 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "completed_at",
             "duration_ms",
             "inputs",
+            "library_inputs",
             "validation",
             "outputs",
             "metrics",
@@ -373,6 +432,16 @@ FORBIDDEN_ACTION_IMPORTS: frozenset[str] = frozenset(
         "app.services.parser",
         "app.services.preview",
         "app.services.runner",
+        # Added in Phase 11. Build plan 11B: "Actions must not open Data
+        # Library files themselves." Before this phase there was nothing for
+        # an Action to reach into — the library was connected to ingestion and
+        # to nothing else — so the rule had nothing to pin. Now that a slot can
+        # be filled from persistent storage, the resolution happens in the
+        # runner and the Action still receives only DataFrames.
+        "app.services.data_library",
+        "app.services.ingestion",
+        "app.services.input_resolution",
+        "app.models.library",
         "app.config",
     }
 )
@@ -533,6 +602,12 @@ def test_each_action_declares_its_frozen_input_slots(entry) -> None:
         # Order matters: it is the order the Product Master presents, and the
         # order the UI lists as "required columns".
         assert slot.required_columns == expected["required_columns"]
+        # Build plan 11A: "Do not require changes to Exact Duplicate Remover
+        # or Product Master Builder merely because library-backed inputs now
+        # exist." Both stay upload-backed, and pinning it here is what would
+        # catch a later phase quietly converting one.
+        assert slot.source is expected["source"]
+        assert slot.dataset_id == expected["dataset_id"]
 
 
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
@@ -929,6 +1004,8 @@ def test_get_actions_serves_the_frozen_inventory(api_client) -> None:
             assert slot["required_columns"] == list(
                 expected_slot["required_columns"]
             )
+            assert slot["source"] == expected_slot["source"].value
+            assert slot["dataset_id"] == expected_slot["dataset_id"]
         assert [output["id"] for output in entry["outputs"]] == [
             output["id"] for output in expected["outputs"]
         ]

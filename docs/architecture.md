@@ -1,8 +1,9 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 9 — the first phase of the post-POC expansion.
+**Status:** current as of Phase 11 — the third phase of the post-POC expansion.
 Phases 0–8 built and validated the proof of concept; Phase 9 added the
-persistent Data Library described in §5a and changed nothing else.
+persistent Data Library described in §5a, Phase 10 the monthly ingestion layer
+in §5b, and Phase 11 the library-backed Action inputs in §5c.
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -15,7 +16,8 @@ memory.**
 Since Phase 9 there is one thing ForgeXL does keep: a local **Data Library** of
 business data (sales history, sample history, account ownership snapshots) that
 outlives a Run and is deliberately not part of a Run at all. §5a describes it.
-Nothing in the Run path below reads or writes it.
+Since Phase 11 an Action input slot may be filled from it — §5c — and that is a
+**read**: a Run still writes nothing, to the library or anywhere else.
 
 ---
 
@@ -76,6 +78,7 @@ from a client component is a build error, and none of its variables is a
 | Parsing                  | `backend/app/services/parser.py`       | Bytes → Polars DataFrame. CSV, XLSX, worksheet-ambiguity rules.                   |
 | Run state                | `backend/app/services/run_store.py`    | Where a Run lives. Five methods, one implementation in V1.                        |
 | Persistent data          | `backend/app/services/data_library.py` | Versioned business datasets that outlive a Run. Seven methods. See §5a.           |
+| Input resolution         | `backend/app/services/input_resolution.py` | A dataset reference → one immutable version → a DataFrame. See §5c.          |
 | Results                  | `backend/app/services/results.py`      | Measuring a result table: schema, row counts, columns added/dropped.              |
 | Preview                  | `backend/app/services/preview.py`      | Paginated slices of a retained result frame.                                      |
 | Export                   | `backend/app/services/export.py`       | CSV/XLSX bytes from a result frame, generated per request.                        |
@@ -93,8 +96,10 @@ file changes, because the entire UI is generated from `GET /api/actions`.
 ## 3. The processing boundary
 
 ```text
-named uploaded inputs
-    ↓  parser
+named uploaded inputs            named library dataset references
+    ↓  parser                        ↓  input resolution
+    └───────────────┬────────────────┘
+                    ↓
 named DataFrame(s)          {slot_id: pl.DataFrame}
     ↓  Action Registry
 Action.run(inputs)
@@ -102,11 +107,15 @@ Action.run(inputs)
 result DataFrame(s)         {output_id: pl.DataFrame}
 ```
 
-An Action receives a mapping of parsed frames keyed by its own declared input
-slot IDs, and returns a mapping of frames keyed by its declared output IDs,
-plus its own metrics. It never sees a path, a filename, an `UploadFile`, or an
-HTTP object. Both registered Actions were already written this way and needed
-no conversion during the Phase 6 migration.
+An Action receives a mapping of frames keyed by its own declared input slot
+IDs, and returns a mapping of frames keyed by its declared output IDs, plus its
+own metrics. It never sees a path, a filename, an `UploadFile`, an HTTP object,
+or — since Phase 11 — a dataset version. Both registered Actions were already
+written this way and needed no conversion during the Phase 6 migration, and
+none during Phase 11 either.
+
+The two arrows into that mapping are the point of §5c: an Action cannot tell
+which of them filled a slot.
 
 A Run may produce one primary result table and any number of secondary ones. An
 Action that needs only one declares only one.
@@ -163,7 +172,9 @@ Concretely, in the shipped V1:
 - The backend has **no configured data directory at all.** Phase 6I removed
   `DATA_DIRECTORY` and `RUNS_DIRECTORY` along with the last of the on-disk
   model, so there is no setting that could reintroduce a write location by
-  accident.
+  accident. `LIBRARY_DIRECTORY` (§5a) is the one place the backend writes, and
+  nothing in the Run path writes there — since Phase 11 a Run may *read* a
+  committed version, which changes nothing about this list.
 
 **Restarting the backend clears run history.** This is authorised behaviour
 (build plan Phase 6, rules 14–15), not corruption. A Run created before the
@@ -265,8 +276,9 @@ else does — no route, no Action, and not the Run pipeline, which still writes
 nothing at all. `ensure_known_datasets()` is still never called at import, so a
 library that has never been ingested into stays absent.
 
-Library-backed Action _inputs_ — an Action reading a stored dataset version —
-are Phase 11 and do not exist yet.
+**Phase 11 added the one thing that reads it from a Run**: input resolution,
+§5c. It is a read and only a read — no Action, no route and no Run writes to
+the library, and the writer is still ingestion alone.
 
 ---
 
@@ -346,6 +358,87 @@ in-process, which is what its own phase asks for.
 
 ---
 
+## 5c. Library-backed Action inputs (Phase 11)
+
+An Action input slot declares where its data comes from. There are two
+sources, and an Action written before Phase 11 declares neither and means the
+first one:
+
+| `source`   | filled by                                | slot also declares |
+| ---------- | ---------------------------------------- | ------------------ |
+| `upload`   | a file submitted with the Run            | `accepted_extensions` |
+| `library`  | one committed Data Library version       | `dataset_id`       |
+
+The two are mutually exclusive on the model itself: a library slot that
+accepted file extensions, or an upload slot that named a dataset, is refused
+when the Action is declared rather than when it runs.
+
+```text
+POST /api/runs
+    action_id      = monthly_report
+    sales_file     = <uploaded file>          an upload slot
+    sales_history  = "period:2026-09"         a library slot
+        ↓  app/services/input_resolution.py
+    sales_history  -> version 4f27d4bb-…      one immutable version
+        ↓  load_version
+    sales_history  -> pl.DataFrame
+        ↓
+    Action.run({"sales_file": …, "sales_history": …})
+```
+
+**Which dataset is read is declared by the Action; which version is chosen per
+Run.** The client never names a dataset, so no client-supplied string decides
+what gets opened. It names a version, in one of three forms:
+
+| reference                | means                                              |
+| ------------------------ | -------------------------------------------------- |
+| `latest`                 | the live version with the greatest reporting month  |
+| `period:2026-09`         | the live version for that month                     |
+| `version:<version id>`   | that exact version, superseded or not               |
+
+`latest` is the greatest **month**, not the most recent commit. The two differ
+exactly when an old month is corrected: restating March after June was imported
+commits a March version last, and answering "latest" with March would be wrong.
+
+### Reproducible Runs
+
+The first two forms move; the third does not. Build plan 11D allows a moving
+form at selection and forbids one at execution, so resolution happens once,
+before the Action runs, and the Run records **both**: `requested` (`latest`)
+and `version_id` (what that resolved to). A Run therefore says what it was
+asked for and what it actually read.
+
+The consequence is the reason the phase exists. Committing a newer version, or
+superseding the one a Run used, cannot change what that Run says it used — the
+record is a resolved ID, not a question. Re-running with
+`version:<recorded id>` reproduces the original result against the original
+source state, and a superseded version stays loadable by ID forever.
+
+### What did not change
+
+- **The Action contract.** `Action.run(inputs)` still takes
+  `{slot_id: pl.DataFrame}`. An Action cannot tell the two sources apart, and
+  `test_contract_freeze.py` refuses a Data Library import inside an Action
+  module (build plan 11B).
+- **The HTTP surface.** No route was added. A library-backed slot is a text
+  field beside the uploaded files in the existing `POST /api/runs` form, and
+  `FROZEN_ROUTES` is byte-identical.
+- **The two proof Actions.** Both are still upload-backed, asserted in the
+  frozen inventory (build plan 11A).
+- **Validation.** A stored version is held to the same required-column and
+  emptiness checks as an upload. Being stored earns no trust.
+- **The Run pipeline writes nothing.**
+
+### Not built
+
+There is no frontend control for choosing a dataset version, because no
+registered Action has a library-backed slot and build plan Phase 11 describes
+no UI. Choosing versions in the browser belongs to the monthly reporting
+workflow of build plan 15A, together with the endpoints it would need to list
+datasets and versions.
+
+---
+
 ## 6. The extension point for future persistence
 
 The DataFrame-first Action contract is deliberately independent of where
@@ -396,6 +489,12 @@ claiming, now demonstrated rather than asserted.
   is a lowercase identifier and a version ID is a UUID; anything else is
   `UNKNOWN_DATASET` / `UNKNOWN_DATASET_VERSION` / 404 rather than a directory
   lookup.
+- **A dataset reference is refused, not interpreted** (`INVALID_DATASET_SELECTOR`
+  / 422, added in Phase 11). `latest`, `period:YYYY-MM` and
+  `version:<version id>` are the three accepted forms; `current`, `newest` or
+  a bare month is reported rather than matched to a near neighbour, the same
+  way an unrecognised Action ID is. A reference also never names the dataset —
+  the Action declares that — so no client string chooses what gets opened.
 - **A reporting month is read from data, never from a filename** (build plan
   10B). An uploaded file's name is metadata here too: it supplies the extension
   that chooses a parser and is recorded on the version, and it decides nothing
@@ -478,6 +577,14 @@ slots, the results view and the export buttons are all built from
 `GET /api/actions` and the Run manifest, so an Action with three input slots
 renders three upload areas with no frontend edit. This is the property the
 whole proof of concept exists to demonstrate.
+
+An input slot that should read stored business data instead of an upload adds
+two fields to its declaration — `source=ActionInputSource.LIBRARY` and
+`dataset_id` — and nothing else. The Action's `run(inputs)` is identical either
+way, and it must not import `app.services.data_library`: resolving a version is
+the runner's job (§5c). Note that the browser has no version picker yet, so
+such an Action is driven in-process or by naming the version in the request
+form until build plan 15A builds one.
 
 ---
 

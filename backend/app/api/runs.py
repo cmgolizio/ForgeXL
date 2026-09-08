@@ -20,6 +20,12 @@ Phase 6F completes the download side (6F.6): every export is offered under the
 ForgeXL filename convention, built from the Run's own record, and a Run with
 several result tables can be downloaded as one workbook. No response carries a
 server path, because there is no server path to carry (6F.8).
+
+Phase 11 adds no route and changes no response shape. A library-backed input
+slot is filled by a text field beside the uploaded files, naming which stored
+dataset version to read; the manifest gains ``library_inputs`` recording the
+exact versions the Run resolved to (build plan 11C). A Run using only uploads
+is byte-identical to what it was.
 """
 
 from __future__ import annotations
@@ -59,12 +65,15 @@ _DOWNLOAD_MEDIA_TYPES = {
 
 @router.post("/runs", response_model=RunManifest)
 async def create_run(request: Request) -> RunManifest:
-    """Execute one Action against uploaded files.
+    """Execute one Action against its inputs.
 
-    The request is ``multipart/form-data`` carrying ``action_id`` plus one file
-    field per Action input slot, named with that slot's ID. Files are submitted
-    under their slot names rather than as one anonymous list, so an Action with
-    several inputs needs no special handling (build plan 3.12).
+    The request is ``multipart/form-data`` carrying ``action_id`` plus one
+    field per Action input slot, named with that slot's ID. An upload-backed
+    slot carries a file; a library-backed slot carries text naming the stored
+    version to read — ``latest``, ``period:YYYY-MM`` or
+    ``version:<version id>`` (build plan 11A). Both are submitted under their
+    slot names rather than as one anonymous list, so an Action with several
+    inputs needs no special handling (build plan 3.12).
 
     The multipart body is parsed here and nowhere else. Nothing upstream reads
     it: the same-origin transport in front of this endpoint forwards the stream
@@ -94,12 +103,26 @@ async def create_run(request: Request) -> RunManifest:
             if isinstance(value, UploadFile)
         }
 
+        # Every remaining text field names a Data Library version for one of
+        # the Action's library-backed input slots (build plan 11A). It is a
+        # *reference*, not data: which dataset is read is declared by the
+        # Action, and this only says which version of it. A field naming a
+        # slot the Action does not read that way is reported as an ignored
+        # reference by the runner, exactly as a stray file is.
+        dataset_references = {
+            field: value
+            for field, value in form.multi_items()
+            if not isinstance(value, UploadFile) and field != ACTION_ID_FIELD
+        }
+
         # Runs inside the form context: the uploaded streams stay open until
         # the runner has read them into memory (build plan 6C.3). Nothing the
         # user uploads is written to the server's filesystem.
         # Keep the response synchronous while allowing health/preview requests
         # to proceed during CPU-bound parsing and Action execution.
-        outcome = await run_in_threadpool(execute_run, action, uploads)
+        outcome = await run_in_threadpool(
+            execute_run, action, uploads, dataset_references
+        )
         return outcome.manifest
 
 
