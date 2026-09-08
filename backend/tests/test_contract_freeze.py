@@ -54,8 +54,19 @@ failure that previously had no code at all: before this phase a duplicated
 column was silently renamed by the parser and an over-long cell was silently
 truncated by the workbook writer, so there was nothing for the table to pin.
 
+*Phase 10* adds one entry to :data:`FROZEN_ERRORS`:
+``INGESTION_VALIDATION_FAILED``, the single class every monthly-ingestion
+refusal arrives through. Like 6F's route and 7's two codes, this is an
+**addition and not a change** — every code, class and status already listed is
+untouched, and so are `FROZEN_ROUTES`, the Action inventory, the metric keys,
+the schema field lists and the manifest version.
+
+`FROZEN_ROUTES` is byte-identical, which is the point worth stating: Phase 10
+added a whole subsystem and no HTTP surface, because build plan Phase 10
+describes none. The monthly reporting workflow is build plan 15A.
+
 Everything else in this module — the Action inventory, the metric keys, the
-preview limits, the determinism checks — is untouched across all four
+preview limits, the determinism checks — is untouched across all five
 amendments and still passing. Each amended entry says below exactly what
 changed and why, so the change stays a recorded decision rather than a quiet
 edit.
@@ -85,6 +96,7 @@ from app.errors import (
     EmptyDatasetError,
     ExportTooLargeError,
     FileParseError,
+    IngestionValidationError,
     InputValidationError,
     InvalidRequestError,
     MissingArtifactError,
@@ -236,6 +248,10 @@ FROZEN_ERRORS: tuple[tuple[type[WorkbenchError], str, int], ...] = (
     # listed above moved.
     (DuplicateColumnsError, "DUPLICATE_COLUMNS", 422),
     (ExportTooLargeError, "EXPORT_TOO_LARGE", 422),
+    # Added in Phase 10. Every monthly-ingestion refusal arrives through this
+    # one class; the specific failure travels as the issue's own code, which is
+    # what a single-issue error reports as itself. Nothing above moved.
+    (IngestionValidationError, "INGESTION_VALIDATION_FAILED", 422),
     (ActionExecutionError, "ACTION_FAILED", 500),
 )
 

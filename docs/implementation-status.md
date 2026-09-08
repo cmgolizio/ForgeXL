@@ -1,17 +1,22 @@
 # Implementation Status
 
-Last Updated: 2026-09-06
+Last Updated: 2026-09-07
 Current Phase: None
-Last Completed Phase: Phase 9 — Persistent Data Library Foundation.
-**Phase 9 is complete.** It is the first phase of the post-POC expansion; the
-user's GO decision on the proof of concept was given by assigning it. Phase 10
-is not started; nothing for it has been scaffolded, stubbed or prepared.
+Last Completed Phase: Phase 10 — Monthly Dataset Ingestion and Versioning.
+**Phase 10 is complete.** It is the second phase of the post-POC expansion.
+Phase 11 is not started; nothing for it has been scaffolded, stubbed or
+prepared — no Action knows the Data Library exists, and the runner does not
+import it.
 
 > **Architecture document.** `docs/architecture.md` was created in Phase 6I
 > (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
 > persistence behaviour and the extension point for future persistence. Phase 9
-> added §5a, the persistent Data Library. This file remains the phase-by-phase
-> record.
+> added §5a, the persistent Data Library, and Phase 10 added §5b, the monthly
+> ingestion layer above it. This file remains the phase-by-phase record.
+>
+> **Source schemas.** `docs/monthly-source-schemas.md` was created in Phase 10A
+> and is the authoritative description of the three recurring source files. The
+> account-assignment schema in it is **provisional and marked UNCONFIRMED**.
 
 > **Build plan note.** `docs/build-plan.md` was revised in commit `259615d`
 > ("changed build plan. Updated architecture"). Phase 6 is no longer
@@ -29,6 +34,360 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 10 — Monthly Dataset Ingestion and Versioning
+
+Both authoritative documents were read in full and the repository was inspected
+before anything was edited. The session began in a **fresh ephemeral
+container**: `backend/.venv/` and `node_modules/` did not exist and were rebuilt
+with the four commands `README.md` documents, which worked exactly as written.
+
+Phase 10 turns the three recurring source files into safe, validated, versioned
+Data Library updates. It sits **entirely on top of Phase 9**: no model, no
+interface and no stored record gained a field, which is what the Phase 9 entry
+predicted it should need.
+
+#### The baseline was clean — the first time in four phases
+
+The check list the Phase 9 entry prescribes was run before any Phase 10 work,
+and every line passed:
+
+| Check                           | Result                                                       |
+| ------------------------------- | ------------------------------------------------------------ |
+| `git show --name-status HEAD`   | matches the Phase 9 report **including the rename** (`R100`) |
+| `pytest` (baseline)             | **1,475 passed** — the documented figure exactly             |
+| `git branch -r`                 | `main` and this branch                                       |
+| hyphenated module names         | none                                                         |
+| duplicate-content modules (md5) | none                                                         |
+| `npm run build`                 | exit 0, same three routes                                    |
+
+**Known Issue 85's family did not recur.** `backend/tests/test_mixed_xlsx_round_trip.py`
+is correctly spelled in the tree _and_ in commit `63e69fb`. The fix that worked
+is the one Phase 9 identified: check the commit, not `git status`. That check
+was run again at the end of this phase — see the bottom of this entry.
+
+One inaccuracy in the Phase 9 entry was found and is recorded as Known Issue 89:
+it states `package.json` is untouched, and commit `63e69fb` modifies it.
+
+---
+
+#### 10A — Canonical source schemas
+
+`backend/app/models/source_schemas.py` declares the three schemas. **A column
+name now appears in this repository exactly once** — no service, route, test or
+fixture spells one of its own; the test fixtures read
+`SALES_SOURCE_SCHEMA.column_names` rather than retyping the header, so a
+fixture cannot test itself.
+
+**The sales and sample schemas are confirmed.** The user supplied the header
+row verbatim from the real exports, and the two exports are identical:
+
+    Invoice Date, Invoice Type, Invoice Number, Customer, Cust Type,
+    Sales Person, SKU, Vintage, Supplier, Producer, Selection, Volume,
+    Quantity, Item Price, Total Price
+
+They are nonetheless **two schema objects targeting two datasets**, because
+build plan 10D requires sales and samples to stay distinct "even if their
+source schemas overlap". One shared object used for both is how that
+distinction quietly stops being real.
+
+**The account-assignment schema is provisional and marked UNCONFIRMED.** The
+user was explicit about this. `confirmed=False` is part of the declaration
+rather than a comment, a test asserts it, and
+`docs/monthly-source-schemas.md` says what to change to confirm it. Two choices
+make it as harmless as a provisional schema can be: its two column names
+(`Customer`, `Sales Person`) are taken **verbatim from the confirmed schema**
+rather than invented, and it declares a _minimum_ of two columns rather than a
+whole file — so a real export carrying ten more still imports.
+
+**There is no aliasing mechanism at all**, and a test asserts the absence.
+Build plan 10A permits normalisation only if it is "explicitly specified,
+deterministic, and tested"; having none satisfies that in the strongest way.
+Seven spellings of `Sales Person` — `Salesperson`, `sales person`,
+`SALES PERSON`, `Sales  Person`, leading and trailing space, `Sales_Person` —
+are each asserted to be reported as missing rather than matched.
+
+Two judgements are recorded as Deviations 68 and 69: a **missing** required
+column fails the import, an **extra** column is a warning and is kept and
+stored. Refusing extras would block a month over a column nothing reads;
+ignoring them would hide the source-schema change build plan 13H wants
+surfaced.
+
+---
+
+#### 10B — Reporting period detection
+
+`backend/app/services/reporting_period.py`. Build plan 10B lists six situations
+that must be detected; four are about one file and live here, and the two that
+need more than one file or the library are in `ingestion.py`:
+
+| 10B requires                       | Where                                            |
+| ---------------------------------- | ------------------------------------------------ |
+| wrong month uploaded               | `UNEXPECTED_REPORTING_PERIOD`                    |
+| file spanning an unexpected period | `MULTIPLE_REPORTING_PERIODS`                     |
+| empty reporting period             | `EMPTY_REPORTING_PERIOD`                         |
+| future-dated rows                  | `FUTURE_DATED_ROWS`                              |
+| duplicate monthly upload           | `ingestion.py` — a question about the library    |
+| mismatched periods between files   | `ingestion.py` — the layer that sees three files |
+
+**The month comes from `Invoice Date`, never the filename.** A test uses a
+fixture _named_ for August and _dated_ September and asserts September wins.
+
+**Ambiguity is refused rather than resolved**, which is the part worth
+explaining. `%m/%d/%Y` and `%d/%m/%Y` are _both_ declared, precisely so the
+disagreement is visible: a format is accepted only if it reads every populated
+value, and when two accepted formats produce different dates for any row the
+file is refused as `AMBIGUOUS_DATE_FORMAT` with both readings in the message.
+`03/04/2026` is 4 March or 3 April, and preferring one would move rows into the
+wrong month — the exact failure this layer exists to prevent. Stating a format
+resolves it, which is build plan 10B's "require explicit user selection rather
+than guessing". In practice a month of invoices almost always contains a day
+past the 12th, which rules out one reading on its own.
+
+**Future-dated rows are an error, not a warning** (Deviation 70). A reporting
+month is imported after it has happened, and a mistyped future date silently
+decides which month a row lands in. `today` is injected rather than read from a
+clock, so the suite's result does not depend on when it runs — asserted by a
+test that gets both answers from the same file with two different `today`s.
+
+**A row with no date is refused, not dropped.** Excluding it would mean the
+committed month held fewer rows than the file did with nothing saying so
+(build plan section 3.3).
+
+**Nothing is repaired and the frame is never modified** — asserted for both
+upload formats by comparing the frame and its schema before and after.
+
+---
+
+#### 10C / 10D — the monthly sales and sample commits
+
+`backend/app/services/ingestion.py`. Every step build plan 10C lists, in order:
+parse with the **existing ForgeXL parser**, validate the schema, validate the
+period, hash the source, refuse an already-imported file, validate the rows,
+commit the month as a new version. The commit's atomicity and immutability are
+Phase 9's and are untouched.
+
+Using the Run pipeline's own parser is deliberate: one implementation reads an
+ingested file and an uploaded one, so the extension rules, the
+worksheet-ambiguity refusal and the duplicate-column refusal apply identically
+to both and cannot drift apart.
+
+**The stored frame is the uploaded frame.** No column renamed, added,
+reordered, coerced or dropped; the month, date range, parser engine and source
+hash are metadata _on the version_. A test asserts `Château Margaux` and
+`Réserve` survive a round trip through Parquet with their accents.
+
+**Duplicate detection matches the content hash _and_ the reporting period**,
+and that pairing is a design decision the tests forced (Deviation 71). A
+dataset-wide hash match was written first and was wrong: account ownership
+often does not change from one month to the next, so October's export is
+byte-for-byte September's, and refusing it would force the user to perturb a
+correct file to record a true fact. For a history dataset the bytes decide the
+month, so the two rules are equivalent there. Both halves are pinned by a pair
+of tests.
+
+Samples commit through a **separate function to a separate dataset** (10D). It
+is not a `dataset_id` argument on one function, because the one-line way to
+fold samples into sales should not exist.
+
+A committed month can be corrected by an explicit replacement naming the
+version it supersedes and why; the superseded version stays loadable, which is
+what keeps the report built from it reproducible (9D).
+
+---
+
+#### 10E — the account assignment commit
+
+Committed as the snapshot for a month the caller states. The month is
+**required** here and is not read from rows, because the export states ownership
+as it stands and carries no date — build plan 10B's answer to a question the
+file genuinely cannot answer is an explicit choice, not a guess.
+
+The whole file is stored, not a narrowed copy: build plan 10E requires the full
+source snapshot, and a column dropped at ingest could not be recovered later. A
+test commits a snapshot with `Territory` and `Region` columns and asserts all
+four columns come back.
+
+Build plan 10E's checks, and whether each refuses or warns:
+
+| 10E lists                           | Result                                                         |
+| ----------------------------------- | -------------------------------------------------------------- |
+| required customer identifier        | refused — `SOURCE_SCHEMA_MISMATCH`                             |
+| required sales rep identifier       | refused — `SOURCE_SCHEMA_MISMATCH`                             |
+| duplicate customer assignments      | refused — `AMBIGUOUS_ACCOUNT_OWNERSHIP`, naming the two reps   |
+| blank customer names                | refused — `MISSING_ACCOUNT_ASSIGNMENT_FIELD`, with row numbers |
+| blank rep names                     | refused — same code                                            |
+| rows that cannot be assigned safely | the three above are what that means in practice                |
+
+An account listed **twice with the same rep** is accepted: it says one true
+thing twice, and refusing it would be a rule about tidiness. An account listed
+twice with _different_ reps is refused, because the one question the snapshot
+exists to answer then has two answers. Row numbers are 1-based spreadsheet
+rows — the header is row 1 — so they are the numbers a user sees in Excel.
+
+A blank rep on a **transaction** is only a warning: ownership for a report
+comes from the snapshot, not from the invoice line.
+
+Build plan 9E's scenario is tested through the ingestion front door: an account
+owned by Beth Comeaux in September and Kevin Wardell in November, with each
+month retrieved independently.
+
+---
+
+#### 10F — the coordinated monthly import
+
+`validate_reporting_cycle` and `import_reporting_cycle` are 10F's diagram
+split where 10F splits it — "validate all → show issues → commit" — because a
+caller shows the result before deciding to commit.
+
+**Validation failure commits nothing.** All three files are checked to
+completion first, so the misleading state 10F names in as many words —
+"September sales were committed successfully but the September ownership
+snapshot silently failed" — cannot be reached by a file being wrong. A test
+supplies two good files and one bad ownership snapshot and asserts all three
+datasets are still empty afterwards.
+
+**A month already committed is refused during validation, not at commit
+time.** The Data Library enforces this too (9D) and would refuse the write, but
+the cycle commits its three inputs in order — so a rule caught only at commit
+could store the first two and fail on the third. That is the partial state 10F
+exists to prevent, so the check moved a layer up.
+
+Two checks exist only at this layer, because only it sees more than one file:
+
+- `MISMATCHED_REPORTING_PERIODS` — build plan 10B's "mismatched periods between
+  related files".
+- `SAME_FILE_FOR_SEVERAL_DATASETS` — one file supplied for two slots, which
+  every per-file check would pass.
+
+With no month stated, the **sales file decides it** and the other two are
+checked against that; the snapshot, which has no date of its own, takes it.
+
+`ReportingCycleImport` distinguishes three outcomes and none is silent: `ok`,
+nothing committed, and `partial`. `partial` is reachable only by the library
+refusing a write after validation passed, and it is **not** rolled back —
+build plan 15C is explicit that valid committed source data survives a later
+failure, and a version that exists can simply be superseded.
+
+The import does not raise on refusal (Deviation 72): the returned report _is_
+the explanation 10F requires the user to receive, and an exception carries one
+issue where a caller needs all of them.
+
+---
+
+#### 10G — the historical bootstrap
+
+Accepts a file spanning several months and **commits one version per month**,
+not one version for the file. That is the whole model of the library: a version
+per period is what lets `current_version(dataset_id, period)` answer a question
+about September, what lets one wrong month be corrected on its own, and what
+lets the next monthly import add October without colliding with anything.
+
+It refuses a dataset that already holds versions — "one-time" is 10G's word.
+That precondition is also what stops the same bootstrap file being run twice,
+which a content-hash check could not do here: every partition of one bootstrap
+carries that file's hash by construction.
+
+It relaxes **exactly one rule** — several months — and no others. Tests assert
+a bootstrap still refuses a missing column and still refuses future-dated rows.
+A snapshot dataset cannot be bootstrapped at all: ownership has no history to
+load, and each month's snapshot is committed for the month it applies to.
+
+---
+
+#### The exit criterion, tested as one sentence
+
+Build plan Phase 10's exit criterion is one sentence, and
+`test_a_bootstrap_then_one_month_at_a_time` does exactly what it says:
+bootstrap June–July for both history datasets, then import August and then
+September as complete three-file cycles carrying **only that month**, then
+assert four live sales versions with one per month, no duplication, and every
+month's own rows still in it. It also concatenates them, which is what Phase 11
+will do.
+
+---
+
+#### What Phase 10 deliberately did not do
+
+- **No API endpoint, and `FROZEN_ROUTES` is byte-identical.** Build plan
+  Phase 10 never mentions a route or the frontend; the monthly reporting
+  workflow UI is 15A. Recorded as Deviation 73.
+- **No frontend change.** Nothing under `src/` was touched at all.
+- **No library-backed Action inputs.** `Action.run(inputs)` is untouched, no
+  Action knows the library exists, and the runner still does not import it.
+  Phase 11.
+- **No report logic.** No calculation, no rep roster, no workbook.
+- **No new dependency.** `package.json`, `package-lock.json` and
+  `backend/requirements.txt` are untouched.
+- **No change to Phase 9's model or interface.** One additive `ensure_dataset`
+  module-level wrapper in `data_library.py`, matching the convention every
+  other operation there already had.
+
+---
+
+#### Verification
+
+| Check                              | Result                                                                   |
+| ---------------------------------- | ------------------------------------------------------------------------ |
+| `pytest` (baseline, before work)   | **1,475 passed** — the documented figure                                 |
+| `pytest` (after Phase 10)          | **1,603 passed**, 0 failures, 0 skips, 0 xfails — 128 added              |
+| `npx pyright`                      | **0 errors, 0 warnings, 0 informations**                                 |
+| `npm run lint`                     | exit 0, silent                                                           |
+| `npm run build`                    | exit 0, compiled successfully, same three routes                         |
+| `npm run dev` + real HTTP          | both servers up; a Product Master Run through `/forge-api/*` succeeded   |
+| repository after that Run          | **no `data/` directory created** — the Run pipeline still writes nothing |
+| live ingestion, real library path  | bootstrap + a full three-file cycle, then a **cross-process** read back  |
+| re-running the same cycle          | refused, `DUPLICATE_SOURCE_FILE`, nothing persisted                      |
+| `.staging` after six commits       | **empty** — every commit published or left nothing                       |
+| `git status` during the live check | `data/` shows as ignored (`!!`), never untracked                         |
+
+The live check is the one thing no unit test can prove, because the suite
+redirects `DATA_LIBRARY` at a temporary directory. One was performed against
+the real `config.LIBRARY_DIRECTORY`: a three-month bootstrap, then a September
+cycle supplied as **XLSX** (so the workbook path was exercised end to end), then
+a **brand-new Python process** read back four live sales months, the sample
+month and the ownership snapshot — 15 columns intact, `Château Margaux` and
+`Bistro Lumière` with their accents, engine recorded as `fastexcel-calamine`,
+worksheet `Data`. The directory was removed afterwards and `git status`
+confirmed at every step that git never saw it.
+
+One correction to an earlier claim in this session: `.staging` being empty was
+stated before it had been checked, then actually checked. It is empty.
+
+**Files created**
+
+- `backend/app/models/source_schemas.py` — the three canonical schemas (10A)
+- `backend/app/services/reporting_period.py` — period detection (10B)
+- `backend/app/services/ingestion.py` — commits, coordinated import, bootstrap
+  (10C–10G)
+- `backend/tests/fixtures/monthly_sources.py` — synthetic monthly source files
+- `backend/tests/test_source_schemas.py` — 33 tests (10A)
+- `backend/tests/test_reporting_period.py` — 34 tests (10B)
+- `backend/tests/test_ingestion.py` — 59 tests (10C–10G)
+- `docs/monthly-source-schemas.md` — the 10A documentation deliverable
+
+**Files modified**
+
+- `backend/app/errors.py` — `IngestionValidationError`, and `RunValidationError`'s
+  issue-list construction extracted to a shared `IssueReportingError` base so
+  the two report a list of issues from one definition. `RunValidationError`'s
+  code, status and behaviour are unchanged and the frozen tests prove it.
+- `backend/app/services/data_library.py` — an `ensure_dataset` module-level
+  wrapper. Nothing else; no interface, model or record changed.
+- `backend/tests/test_contract_freeze.py` — one row added to `FROZEN_ERRORS`
+  for `INGESTION_VALIDATION_FAILED`, plus the amendment note the module's
+  convention requires. An **addition**: no frozen value moved, and
+  `FROZEN_ROUTES` is byte-identical. Recorded as Deviation 75.
+- `README.md` — the Data Library section, which said nothing writes to it
+- `docs/architecture.md` — §5b (monthly ingestion), §5a's "what reaches it",
+  two rules in §7, one row in §10
+- `docs/implementation-status.md`
+
+**Files deleted / renamed**
+
+- none
+
+---
 
 ### Phase 9 — Persistent Data Library Foundation
 
@@ -97,11 +456,11 @@ phase is built around.
 The three datasets build plan Phase 9 requires are declared in
 `backend/app/models/library.py` as `KNOWN_DATASETS`:
 
-| ID                    | Kind       | Why that kind                                                  |
-| --------------------- | ---------- | -------------------------------------------------------------- |
-| `sales_history`       | `history`  | Versions accumulate; a report reads every month it covers      |
+| ID                    | Kind       | Why that kind                                                   |
+| --------------------- | ---------- | --------------------------------------------------------------- |
+| `sales_history`       | `history`  | Versions accumulate; a report reads every month it covers       |
 | `sample_history`      | `history`  | A dataset of its own — never folded into sales (build plan 10D) |
-| `account_assignments` | `snapshot` | The whole truth as of one month (build plan 9E)                |
+| `account_assignments` | `snapshot` | The whole truth as of one month (build plan 9E)                 |
 
 **No filesystem location appears in any of it.** Callers name a dataset and a
 version by logical ID; where those live is `LocalDataLibrary`'s business.
@@ -114,23 +473,23 @@ version by logical ID; where those live is `LocalDataLibrary`'s business.
 The mapping is written into the class docstring so a reader can check it
 against the plan without leaving the file:
 
-| build plan 9B                | field                             |
-| ---------------------------- | --------------------------------- |
-| dataset ID                   | `dataset_id`                      |
-| version ID                   | `version_id`                      |
-| dataset type                 | `dataset_kind`                    |
-| reporting/effective period   | `period`                          |
-| created timestamp            | `created_at` (tz-aware UTC)       |
-| source filename              | `source_filename`                 |
-| source byte size             | `source_byte_size`                |
-| source content hash          | `source_sha256`                   |
-| row count                    | `row_count`                       |
-| column count                 | `column_count`                    |
-| column schema                | `column_schema` (`ColumnSchema`)  |
-| parser information           | `parser_engine`, `worksheet`      |
-| minimum / maximum date       | `min_date`, `max_date`            |
-| report month                 | `period` — see Deviation 63       |
-| replacement / supersession   | `supersedes`, `supersession_reason` |
+| build plan 9B              | field                               |
+| -------------------------- | ----------------------------------- |
+| dataset ID                 | `dataset_id`                        |
+| version ID                 | `version_id`                        |
+| dataset type               | `dataset_kind`                      |
+| reporting/effective period | `period`                            |
+| created timestamp          | `created_at` (tz-aware UTC)         |
+| source filename            | `source_filename`                   |
+| source byte size           | `source_byte_size`                  |
+| source content hash        | `source_sha256`                     |
+| row count                  | `row_count`                         |
+| column count               | `column_count`                      |
+| column schema              | `column_schema` (`ColumnSchema`)    |
+| parser information         | `parser_engine`, `worksheet`        |
+| minimum / maximum date     | `min_date`, `max_date`              |
+| report month               | `period` — see Deviation 63         |
+| replacement / supersession | `supersedes`, `supersession_reason` |
 
 `column_schema` reuses the existing `ColumnSchema` model and
 `results.column_schema()`, so a stored dataset is described exactly the way a
@@ -173,8 +532,8 @@ untouched. Polars already writes and reads Parquet.
         account_assignments/ …
         .staging/                       transient; a commit in progress
 
-**There is no separate index file.** A dataset *is* a directory holding
-`dataset.json`; a version *is* a directory holding `version.json`. The layout
+**There is no separate index file.** A dataset _is_ a directory holding
+`dataset.json`; a version _is_ a directory holding `version.json`. The layout
 is the catalogue, so there is no catalogue that can disagree with the data it
 describes. The cost is that `list_versions` reads one small JSON per version;
 at monthly granularity that is a few dozen files, and it is recorded as Known
@@ -216,18 +575,18 @@ Enforced three ways, not asserted once:
    that fails on an existing target.
 3. **A period that already has a live version can only be re-committed as an
    explicit replacement**, naming the version it supersedes and giving a
-   reason. Without that rule 9D would be satisfiable by *addition* rather than
+   reason. Without that rule 9D would be satisfiable by _addition_ rather than
    overwriting: two live versions of September, with nothing to say which is
    true. Recorded as Deviation 65, because the rule is an interpretation of
    9D rather than a sentence in it.
 
 Build plan 9D's four requirements, each with the test that proves it:
 
-| 9D requires                          | Proof                                                                       |
-| ------------------------------------ | --------------------------------------------------------------------------- |
-| preserve the old version             | the old version's bytes on disk are **byte-identical** before and after     |
-| create a new version                 | a new ID, loading the corrected rows                                        |
-| mark which version supersedes it     | `supersedes` on the new version; `superseded_version_ids()` derives the set |
+| 9D requires                           | Proof                                                                       |
+| ------------------------------------- | --------------------------------------------------------------------------- |
+| preserve the old version              | the old version's bytes on disk are **byte-identical** before and after     |
+| create a new version                  | a new ID, loading the corrected rows                                        |
+| mark which version supersedes it      | `supersedes` on the new version; `superseded_version_ids()` derives the set |
 | retain metadata explaining the change | `supersession_reason` — a version that supersedes without one is refused    |
 
 The reverse pointer is **derived, never written back**: marking the old record
@@ -281,7 +640,7 @@ as the cheaper form.
 | multiple versions of one dataset coexist                      | two months, both loadable after a reopen; adding one leaves the other's bytes identical                       |
 | an older version can be loaded explicitly                     | a superseded version still loads by ID, in-process and in a second process                                    |
 | replacing a period does not silently destroy the previous one | both version directories present; a re-commit without superseding is **refused**, not absorbed                |
-| account snapshots remain independently retrievable            | three months, each retrieved on its own; a second process reads the rep who owned the account *then*          |
+| account snapshots remain independently retrievable            | three months, each retrieved on its own; a second process reads the rep who owned the account _then_          |
 | invalid/corrupt commits leave no partially valid state        | seven tests — see below                                                                                       |
 
 The last row is the one worth expanding, because "no partially valid state"
@@ -290,7 +649,7 @@ has more than one failure mode:
 - **A refused commit writes nothing at all.** Every check runs before the first
   byte; after three different refusals the `versions/` directory does not exist.
 - **A commit that fails part-way leaves no version.** The failure is injected
-  *between* the two files a version consists of — the worst moment, with the
+  _between_ the two files a version consists of — the worst moment, with the
   Parquet payload written and its record not — and nothing of it appears where
   a version is looked for. Staging is left clean.
 - **A corrupt record is reported, not ignored.** Malformed JSON, a missing
@@ -366,7 +725,7 @@ The full check list, run against the repaired baseline and again at the end.
 
 The live check is worth stating precisely, because it is the one thing no unit
 test can prove: the suite redirects `DATA_LIBRARY` at a temporary directory, so
-only a real run against `config.LIBRARY_DIRECTORY` shows that the *default* is
+only a real run against `config.LIBRARY_DIRECTORY` shows that the _default_ is
 right. One was performed — three datasets created, one September version
 committed, then read back by a **brand-new Python process** — and the
 directory was removed afterwards. `git status` confirmed at every step that
@@ -3390,6 +3749,9 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           library.py          Data Library records: Dataset, DatasetVersion,
                               DatasetCommit, dataset/version identity,
                               KNOWN_DATASETS                          (9A/9B)
+          source_schemas.py   the canonical schemas of the three recurring
+                              source files. The only place a source column
+                              name is spelled                          (10A)
         services/
           __init__.py
           run_store.py        RunStore, InMemoryRunStore, RUN_STORE       (6B)
@@ -3410,6 +3772,10 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           preview.py          paginated slices of a result frame          (6D)
           results.py          measuring a result table: schema, row counts,
                               columns added and dropped                   (6E)
+          reporting_period.py which month a file covers, read from its date
+                              column; refuses an ambiguous one         (10B)
+          ingestion.py        monthly commits, the coordinated three-file
+                              cycle, the historical bootstrap     (10C-10G)
       tests/
         __init__.py
         conftest.py           quarantine (an empty cwd, autouse), Run Store,
@@ -3420,6 +3786,9 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               6H fixture system:
           spreadsheets.py       Table / Workbook, the scenario catalogue,
                                 large_table()                           (6H)
+          monthly_sources.py    synthetic sales / sample / assignment files,
+                                built on Table so each renders as either
+                                upload format                           (10)
           action_cases.py       known input -> Action -> expected output (6H)
         test_actions.py       Action contract + registry
         test_api.py           /health and /api/actions
@@ -3473,6 +3842,13 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               lock                                (9A/9C-9E)
         test_library_persistence.py  9F's seven proofs; two of them in a
                               separate Python process                     (9F)
+        test_source_schemas.py  exact column matching, no aliasing, the
+                              provisional schema's UNCONFIRMED mark      (10A)
+        test_reporting_period.py  the month from the data not the filename;
+                              ambiguity refused; every 10B condition      (10B)
+        test_ingestion.py     monthly commits, duplicates, ownership
+                              checks, the three-file cycle, the
+                              bootstrap, and the exit criterion      (10C-10G)
       benchmarks/             NOT collected by pytest (testpaths=tests and
                               the test_*.py glob). Run directly:
                               `.venv/bin/python -m tests.benchmarks.run`
@@ -3671,8 +4047,8 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/`          | Exists (`main.py`, `config.py`)                                                                                          |
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`; the hyphenated duplicate was removed in Phase 7)                      |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
-| `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B)                                                                                          |
-| `backend/app/services/` | Exists (run_store, data_library, storage, parser, runner, export, preview, results)                                                    |
+| `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B)                                                                    |
+| `backend/app/services/` | Exists (run_store, data_library, storage, parser, runner, export, preview, results)                                      |
 | `backend/tests/`        | Exists (32 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
 | `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
 | `data/library/`         | The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.         |
@@ -3818,6 +4194,110 @@ Local addresses (verified running):
 
 ## Tests
 
+### Backend test suite (Phase 10)
+
+    cd backend && .venv/bin/python -m pytest
+    1603 passed, 2 warnings in 16.27s
+
+Run against the committed tree before any Phase 10 edit — **1,475 passed**, the
+documented figure exactly — and again at the end. No failures, no skips, no
+xfails. The two warnings are the upstream ones recorded as Known Issue 7 and
+are deliberately unsuppressed.
+
+**128 tests added.** 127 of them are in three new modules; the 128th is the
+`FROZEN_ERRORS` row for `INGESTION_VALIDATION_FAILED`, which is the one edit
+Phase 10 made to an existing test module. No existing test's _behaviour_
+changed: Phase 10 added a layer above the Data Library rather than altering
+anything beneath it.
+
+| Module                           | Tests | Covers                                         |
+| -------------------------------- | ----- | ---------------------------------------------- |
+| `tests/test_source_schemas.py`   | 33    | 10A — the canonical schemas and exact matching |
+| `tests/test_reporting_period.py` | 34    | 10B — deriving the month from the data         |
+| `tests/test_ingestion.py`        | 60    | 10C–10G — commits, the cycle, the bootstrap    |
+
+`tests/fixtures/monthly_sources.py` builds every source file in memory from
+Python literals, and reads its header from `SALES_SOURCE_SCHEMA.column_names`
+rather than retyping it — a fixture that spelled a column its own way would be
+testing the fixture. It is deliberately not added to `spreadsheets.CATALOGUE`,
+whose sweeps assert every entry is read and returned unchanged; several
+fixtures here exist to be refused. Same reasoning as Deviation 58.
+
+Writing the tests found two real defects and one test mistake:
+
+- **The duplicate check was dataset-wide**, which refused an unchanged
+  ownership snapshot re-used for a later month. Fixed to match hash **and**
+  period; see Deviation 71 and the pair of tests that now pin both halves.
+- **A period already committed was caught only by the Data Library**, at commit
+  time. Found by re-reading the coordinated import adversarially rather than by
+  a failing test: the cycle commits its three inputs in order, so if the
+  _third_ input's month was already stored, the first two would land and the
+  third would fail — build plan 10F's misleading state, reached by a rule that
+  was enforced one layer too late. The check moved into validation as
+  `PERIOD_ALREADY_COMMITTED`, and
+  `test_a_cycle_whose_third_input_is_already_committed_commits_nothing` is the
+  regression test. The library's own rule remains as the backstop. When the
+  same _file_ is re-uploaded both rules apply and the more specific
+  `DUPLICATE_SOURCE_FILE` is reported.
+- Several tests assumed `list_versions` returns `[]` for a dataset that has
+  never been written to. It raises, which is Phase 9's documented behaviour;
+  the tests were wrong and were corrected.
+
+### Type checking (Phase 10)
+
+    npx pyright
+    0 errors, 0 warnings, 0 informations
+
+### Frontend static checks (Phase 10)
+
+    npm run lint     exit 0, no output
+    npm run build    exit 0, compiled successfully
+
+Three routes, unchanged: `/`, `/_not-found`, `/forge-api/[...path]`. **Nothing
+under `src/` was modified in this phase**, and `FROZEN_ROUTES` in
+`test_contract_freeze.py` is byte-identical.
+
+### Phase 10 live verification over real HTTP
+
+`npm run dev`, then a real Product Master Builder Run submitted through the
+same-origin proxy at `127.0.0.1:3000/forge-api/api/runs`:
+
+    run_id      b8da70a1-815f-461d-80c5-59a6b884aa7a
+    status      succeeded, duration_ms 5
+    preview     2 rows from 3 uploaded, accents intact
+    data/       NOT CREATED
+
+The last line is the point: Phase 10 introduced a layer that writes to disk, and
+the Run pipeline still writes nothing. The two systems are separate.
+
+### Phase 10 verification of the real default library location (not a test)
+
+The suite redirects `DATA_LIBRARY` at a temporary directory, so only a run
+against the real `config.LIBRARY_DIRECTORY` shows the default is right.
+
+    library directory   /home/user/ForgeXL/data/library
+    bootstrap           [('2026-06', 1), ('2026-07', 2), ('2026-08', 3)]
+    cycle (XLSX x3)     ok, committed sales_history, sample_history,
+                        account_assignments
+    same cycle again    not persisted, DUPLICATE_SOURCE_FILE
+    .staging            empty after six commits
+    parquet files       6 — one per committed version
+
+Then, in a **brand-new Python process** with nothing in memory:
+
+    sales_history        [('2026-06',1), ('2026-07',2), ('2026-08',3), ('2026-09',4)]
+    sample_history       [('2026-09', 2)]
+    account_assignments  [('2026-09', 3)]
+
+September's sales read back with all 15 columns, `Château Margaux` intact,
+`parser_engine` `fastexcel-calamine`, `worksheet` `Data`; the ownership snapshot
+read back with `Bistro Lumière` intact. The September cycle was supplied as
+**XLSX**, so the workbook path was exercised end to end rather than only the
+CSV one.
+
+The directory was removed afterwards. `git status --short --ignored` showed
+`!! data/` at every step — ignored, never untracked.
+
 ### Backend test suite (Phase 9)
 
     cd backend && .venv/bin/python -m pytest
@@ -3834,11 +4314,11 @@ persistence to an application whose defining property is that it writes
 nothing: every Phase 6/7 assertion that a Run touches no filesystem is
 untouched and still passing.
 
-| Module                        | Tests | Covers                                                          |
-| ----------------------------- | ----: | --------------------------------------------------------------- |
-| `test_library_models.py`      |    61 | 9B — records, identity, periods, supersession, JSON round trip  |
-| `test_data_library.py`        |    52 | 9A, 9C, 9D, 9E — the seven operations, layout, immutability     |
-| `test_library_persistence.py` |    27 | 9F — the seven required proofs                                  |
+| Module                        | Tests | Covers                                                         |
+| ----------------------------- | ----: | -------------------------------------------------------------- |
+| `test_library_models.py`      |    61 | 9B — records, identity, periods, supersession, JSON round trip |
+| `test_data_library.py`        |    52 | 9A, 9C, 9D, 9E — the seven operations, layout, immutability    |
+| `test_library_persistence.py` |    27 | 9F — the seven required proofs                                 |
 
 Two of them run a **separate Python interpreter** against the library
 directory, so "survives a backend restart" is proved by a process that has
@@ -3871,14 +4351,14 @@ Identical to Phase 8's, and necessarily so: **Phase 9 modified no file under
 `npm run dev`, then a real Product Master Builder Run driven through the
 same-origin proxy with `curl`:
 
-| Check                                         | Result                                                                          |
-| --------------------------------------------- | ------------------------------------------------------------------------------- |
-| `GET /forge-api/health`                       | `{"status":"ok"}`                                                               |
-| `GET /forge-api/api/actions`                  | both Actions, unchanged                                                         |
-| `POST /forge-api/api/runs`                    | `succeeded`; metrics `input_rows 3, output_rows 2, duplicate_product_rows_removed 1` |
-| preview                                       | `Château Lafite`, `Sélection`, `Weingut Müller` intact                          |
-| CSV download                                  | correct, accents preserved                                                      |
-| **repository after the whole Run**            | **no `data/` directory created**                                                |
+| Check                              | Result                                                                               |
+| ---------------------------------- | ------------------------------------------------------------------------------------ |
+| `GET /forge-api/health`            | `{"status":"ok"}`                                                                    |
+| `GET /forge-api/api/actions`       | both Actions, unchanged                                                              |
+| `POST /forge-api/api/runs`         | `succeeded`; metrics `input_rows 3, output_rows 2, duplicate_product_rows_removed 1` |
+| preview                            | `Château Lafite`, `Sélection`, `Weingut Müller` intact                               |
+| CSV download                       | correct, accents preserved                                                           |
+| **repository after the whole Run** | **no `data/` directory created**                                                     |
 
 The last line is the point. The Data Library exists in the code and the Run
 path still writes nothing at all — nothing calls `ensure_known_datasets()` on
@@ -3889,14 +4369,14 @@ import, at startup, or from a route.
 The suite redirects `DATA_LIBRARY` at a temporary directory, so no test can
 prove the **default** setting is right. That was checked by hand, once:
 
-| Step                                                       | Result                                                                 |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `config.LIBRARY_DIRECTORY`                                 | `/home/user/ForgeXL/data/library`                                      |
-| exists before                                              | `False`                                                                |
-| `ensure_known_datasets()` then one September commit        | three `dataset.json`, one `version.json`, one `data.parquet`           |
-| **a brand-new Python process** reads it                    | `[('2026-09', 1, 'sept.csv')]`, rows `[{'Account': 'Acme', ...}]`      |
-| `git status` while it existed                              | `data/` **never appeared** — the ignore rule holds                     |
-| afterwards                                                 | directory removed; `git status --ignored` clean of it                  |
+| Step                                                | Result                                                            |
+| --------------------------------------------------- | ----------------------------------------------------------------- |
+| `config.LIBRARY_DIRECTORY`                          | `/home/user/ForgeXL/data/library`                                 |
+| exists before                                       | `False`                                                           |
+| `ensure_known_datasets()` then one September commit | three `dataset.json`, one `version.json`, one `data.parquet`      |
+| **a brand-new Python process** reads it             | `[('2026-09', 1, 'sept.csv')]`, rows `[{'Account': 'Acme', ...}]` |
+| `git status` while it existed                       | `data/` **never appeared** — the ignore rule holds                |
+| afterwards                                          | directory removed; `git status --ignored` clean of it             |
 
 ### Backend test suite (Phase 8)
 
@@ -6833,6 +7313,63 @@ keeps its existing phase ownership.
     two concurrent backends are not a supported configuration; a file lock
     would be the fix if that ever changes.
 
+**Added in Phase 10:**
+
+89. **The Phase 9 entry says `package.json` is untouched, and the commit
+    modifies it.**
+    `git show 63e69fb -- package.json` shows a `"test"` script added:
+    `(cd backend && .venv/bin/python -m pytest)`. The Phase 9 entry states
+    twice that `package.json` is untouched.
+
+    Harmless in substance — the script is correct and useful, and it is what
+    `npm test` now runs — but it is the _inverse_ of the Known Issue 85 family:
+    there, work reported as done was missing from the commit; here, work in the
+    commit is missing from the report. The same cause and the same fix apply,
+    and the fix worked this time: `git show --name-status HEAD` after
+    committing, read against the report. Phase 10 ran it and its lists match.
+
+90. **The account-assignment source schema is provisional.**
+    Marked `confirmed=False`, asserted by a test, and documented in
+    `docs/monthly-source-schemas.md` with the procedure to confirm it. The
+    user was explicit that it should be built this way.
+
+    What is _not_ at risk: the shape of the ingestion layer, which reads a
+    schema and names no column of its own. Confirming it is an edit to one
+    declaration plus one test assertion.
+
+    What **is** at risk until it is confirmed: a real export whose account or
+    rep column is spelled differently will be refused with
+    `SOURCE_SCHEMA_MISMATCH` naming `Customer` / `Sales Person` as missing.
+    That is the intended failure — it reports rather than guesses — but it will
+    happen on the first real file if the guess is wrong. Two choices minimise
+    the blast radius: the names are taken verbatim from the confirmed
+    transaction schema rather than invented, and only two columns are required,
+    so extra columns in the real export do not add to the risk.
+
+91. **The ingestion layer is reachable in-process and from nowhere else.**
+    Deliberate, and the direct successor to Known Issue 86: build plan Phase 10
+    describes no route and no UI, and the monthly reporting workflow is 15A. A
+    reader who starts the application will find no way to import a month, and
+    that is correct for this phase. `FROZEN_ROUTES` is byte-identical.
+
+92. **`FUTURE_DATED_ROWS` refuses a month rather than warning about it.**
+    A single mistyped invoice date in the future — `2027-09-04` for
+    `2026-09-04` — refuses the whole file. That is deliberate (Deviation 70):
+    the row would otherwise be committed into a month that has not happened,
+    and the month a row lands in is the one thing this layer exists to get
+    right. But it is strict, the fix is on the source side, and if real exports
+    turn out to carry legitimately future-dated rows this is the first rule to
+    revisit. The check takes an injected `today`, so relaxing it is local.
+
+93. **Reading a stored history means reading one Parquet file per month.**
+    The Data Library stores a version per reporting period, so a report
+    covering two years reads 24 files and concatenates them. That is the right
+    storage model — it is what makes one month correctable and
+    `current_version(period)` answerable — and at monthly granularity the cost
+    is small. It compounds Known Issue 87, which is about the metadata reads;
+    both would matter together only if Phase 13's report generation resolves
+    periods in a loop. Measure before optimising.
+
 **Added in Phase 6I:**
 
 70. **Committed state that could not import — the sixth instance, this time a
@@ -7513,7 +8050,7 @@ failed` as an example and says explicitly: "Use existing equivalent status
     disagree, and a version whose two months disagreed would be unreproducible
     in exactly the way build plan 9E exists to prevent. For a monthly history
     version the reporting period **is** the report month; for a snapshot it is
-    the month the snapshot is effective for. The *actual* date extremes found
+    the month the snapshot is effective for. The _actual_ date extremes found
     in the data are recorded separately, as `min_date` and `max_date`, which is
     the distinct fact 9B also asks for.
 
@@ -7571,6 +8108,92 @@ failed` as an example and says explicitly: "Use existing equivalent status
     be a different thing in a different place. `DATA_DIRECTORY`,
     `RUNS_DIRECTORY` and `FORGEXL_DATA_DIRECTORY` remain deleted.
 
+**Added in Phase 10:**
+
+68. **A missing required column fails an import; an unexpected extra column is
+    a warning and is kept.** Build plan 10A fixes the accepted schemas and
+    forbids guessing, but does not say what happens to a column the schema does
+    not declare.
+
+    Refusing extras would block a month over a column nothing reads — exports
+    gain columns, and a report that does not read them is unaffected. Ignoring
+    them silently would hide a source-schema change, which build plan 13H lists
+    among the conditions that make a report unreliable. So the column is
+    reported (`UNEXPECTED_SOURCE_COLUMNS`) and **stored with the rest of the
+    file**, which build plan 10E requires anyway: a column dropped at ingest
+    could not be recovered later.
+
+69. **Column order is recorded but not required.** The canonical order in
+    `docs/monthly-source-schemas.md` is the order the export produces. A file
+    that reorders its columns has lost nothing, and refusing it would be a rule
+    about presentation rather than about data. Presence is matched exactly;
+    position is not matched at all.
+
+70. **Future-dated rows are an error rather than a warning.** Build plan 10B
+    lists them among the situations to "detect" without saying which way.
+
+    A reporting month is imported after it has happened, so a date after today
+    is wrong, and a wrong date silently decides which month a row lands in —
+    the failure this whole layer exists to prevent. Warning and committing
+    anyway would put rows in a month that has not occurred. See Known Issue 92
+    for the cost of the strictness.
+
+71. **A duplicate is the same bytes committed for the same reporting period,
+    not the same bytes anywhere in the dataset.** Build plan 10C.5 says to
+    "detect an already-imported identical file" without qualifying it by
+    period.
+
+    Dataset-wide was implemented first and a test caught it. Account ownership
+    often does not change from one month to the next, so October's assignment
+    export is byte-for-byte September's, and refusing it would force the user
+    to perturb a correct file in order to record a true fact. For a _history_
+    dataset the bytes decide the month, so identical bytes are always the same
+    month and the two rules are equivalent — 10C.5's intent is met exactly. The
+    period only ever narrows the rule for a _snapshot_, where the month comes
+    from the caller instead of from the data.
+
+72. **The coordinated monthly import returns its refusal instead of raising.**
+    Build plan 10F requires the user to "receive a clear explanation of what
+    was and was not persisted". A returned `ReportingCycleImport` is that
+    explanation, and it carries every issue from all three files at once; an
+    exception carries one issue where a caller needs all of them. The
+    single-file commit functions do raise, because there the one issue is the
+    whole story.
+
+73. **Phase 10 adds no HTTP route, so ingestion has no user-facing surface
+    yet.** Build plan Phase 10 describes no endpoint, no frontend and no UI;
+    build plan 15A is the "Monthly Reports" workflow surface, and 15A says the
+    frontend "may orchestrate existing backend capabilities" — which is what
+    this phase built. Adding a route now would mean amending `FROZEN_ROUTES`
+    during a phase that did not ask for it, which is exactly what Phase 6I's
+    note warns against. It is byte-identical. See Known Issue 91.
+
+74. **`RunValidationError`'s constructor body moved to a shared base class.**
+    Phase 10 needed the same "one issue is reported as itself, several are
+    reported together" behaviour for ingestion, and writing it twice would have
+    been two definitions of one rule. `IssueReportingError` now holds it and
+    both `RunValidationError` and `IngestionValidationError` inherit it.
+
+    **No contract changed**: the code (`VALIDATION_FAILED`), the status (422),
+    the message, the details shape and the single-issue behaviour are all
+    identical, and every `test_contract_freeze.py` assertion about
+    `RunValidationError` passes without being touched. (That module _was_
+    edited in this phase, for the unrelated addition in Deviation 75; no
+    assertion about `RunValidationError` was among the edits.) Recorded because
+    a frozen behaviour's implementation moved, and the value of that module
+    comes from every change near it being visible as a decision.
+
+75. **`test_contract_freeze.py` was amended a fifth time — one added error
+    code.** `INGESTION_VALIDATION_FAILED` is the class every monthly-ingestion
+    refusal arrives through, and the freeze table's purpose is to pin every
+    error the backend reports with the status the API boundary returns.
+
+    An addition, like 6F's route and Phase 7's two codes: nothing already in
+    the table moved, and `FROZEN_ROUTES`, the Action inventory, the metric
+    keys, the schema field lists and the manifest version are all untouched.
+    `FROZEN_ROUTES` being byte-identical after a phase that added a whole
+    subsystem is the fact worth recording.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -7595,83 +8218,93 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 10 — Monthly Dataset Ingestion and Versioning.**
+**Phase 11 — Library-Backed Action Inputs and Reproducible Runs.**
 
-**Not started.** Nothing for it has been scaffolded, stubbed or prepared: no
-source schema for a sales, sample or assignment file; no reporting-period
-detection; no duplicate-upload detection; no coordinated monthly import; no
-bootstrap path; no endpoint; no frontend change; no new dependency.
+**Not started.** Nothing for it has been scaffolded, stubbed or prepared:
+`ActionInput` is unchanged, no Action knows the Data Library exists, the runner
+does not import it, and no Run records a dataset version.
 
-Phase 10 turns the three recurring source files into safe, validated, versioned
-Data Library updates. It has the storage layer it needs and should not need to
-change it: `commit_version` already refuses a period that is already covered,
-already records the source hash Phase 10C's duplicate detection compares, and
-already keeps a superseded month readable.
+Phase 11 lets an ordinary Action consume an exact version of a persistent
+dataset without becoming storage-aware. It has what it needs and should not
+need to change anything beneath it: `load_version(dataset_id, version_id)`
+returns a DataFrame, which is exactly what `Action.run(inputs)` already takes,
+and `current_version(dataset_id, period)` is the "latest" concept 11D says must
+be resolved to an immutable ID _before_ the Action executes.
 
-### Phase 9 is complete
+### Phase 10 is complete
 
-Every exit criterion build plan Phase 9 lists, checked against what is actually
+Every exit criterion build plan Phase 10 lists, checked against what is actually
 in the repository:
 
-| Criterion                               | Evidence                                                                                                                            |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 9A Data Library contract                | `DataLibrary`, an interface of exactly 9A's seven operations, independent of `RunStore`; three datasets with stable logical IDs      |
-| 9B dataset version model                | every field 9B lists, mapped item by item in the class docstring; ForgeXL-generated UUID version IDs                                 |
-| 9C local persistent storage             | Parquet + JSON records under `data/library/`; atomic staging-and-rename; no database; no path exposed                                |
-| 9D immutable historical versions        | no delete or update in the interface; the old version's bytes identical after replacement; supersession recorded with a reason       |
-| 9E account ownership snapshots          | `account_assignments` is a snapshot kind; a snapshot must state its period; three months retrieved independently                     |
-| 9F persistence verification             | all seven proofs, two of them in a **separate Python process**                                                                       |
-| no Monthly Sales Rep Report logic       | none written; nothing calls the library; no route, no Action and no frontend file touched                                            |
-| `docs/implementation-status.md` updated | this entry                                                                                                                          |
+| Criterion                               | Evidence                                                                                                                                        |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 10A canonical source schemas            | `source_schemas.py` + `docs/monthly-source-schemas.md`; sales/samples confirmed verbatim, assignments marked UNCONFIRMED; no aliasing, asserted |
+| 10B reporting period detection          | month read from `Invoice Date`, not the filename; all four single-file conditions refused; ambiguity requires an explicit format                |
+| 10C monthly sales commit                | all seven steps in order; a repeat upload of one file is refused; the month commits as one new version                                          |
+| 10D monthly samples commit              | a separate function to a separate dataset; both coexist for one month                                                                           |
+| 10E account assignment commit           | snapshot for a stated month; ambiguous ownership, blank account and blank rep all refused; the **full** file stored                             |
+| 10F coordinated monthly import          | validate-all-then-commit; one bad file commits none of the three; the report names what was and was not persisted                               |
+| 10G historical bootstrap                | one version **per month** from a multi-month file; one-time into an empty dataset; relaxes only the multi-month rule                            |
+| **exit criterion, as one sentence**     | `test_a_bootstrap_then_one_month_at_a_time` — bootstrap, then two monthly cycles carrying only that month, no duplication                       |
+| `docs/implementation-status.md` updated | this entry                                                                                                                                      |
 
-### What a Phase 10 session inherits
+### What a Phase 11 session inherits
 
 - **A clean container is the normal starting condition.** `backend/.venv/` and
   `node_modules/` will not exist. `README.md` documents the four commands that
   rebuild them; they were followed exactly this session and needed nothing else.
-- **The suite must report 1,475 passed**, zero failures, zero skips, zero
+- **The suite must report 1,603 passed**, zero failures, zero skips, zero
   xfails.
-- **The Data Library is ready and is connected to nothing** (Known Issue 86).
-  Phase 10's work is the ingestion layer above it:
-  `app.services.data_library.commit_version(dataset_id, DatasetCommit)` is the
-  call it will make, and `DatasetCommit.from_upload(frame, filename=..., payload=...)`
-  builds the argument from what the existing parser already produces.
-- **Three Phase 9 rules Phase 10 will meet immediately**, all deliberate and
-  all recorded as deviations: a period that already has a live version must be
-  re-committed as an explicit replacement with a reason (Deviation 65), a
-  snapshot must state its period (Deviation 66), and provenance —
-  filename, byte size, SHA-256 — is required on every commit.
-- **Phase 10C's duplicate detection has what it needs**: `source_sha256` is on
-  every committed version and `content_hash()` is the single definition of it.
-- **Reporting-period detection is Phase 10B's, not Phase 9's.** The library
-  validates a period and records it; it does not derive one from data. That is
-  by design.
+- **The ingestion layer is reachable in-process and from nowhere else**
+  (Known Issue 91). Phase 11 does not need a route either — 11A–11E are all
+  about the Action input contract — and adding one would again mean amending
+  `FROZEN_ROUTES` in a phase that did not ask for it.
+- **The account-assignment schema is provisional** (Known Issue 90). If the
+  user supplies the real header, confirming it is an edit to one declaration
+  in `source_schemas.py`, one assertion in `test_source_schemas.py`, and one
+  table in `docs/monthly-source-schemas.md`. Nothing else names those columns.
+- **Do not let library-backed inputs change what an Action receives.** Build
+  plan 11B is explicit that an Action must not open a library file itself: the
+  runner or an input-resolution service resolves a reference to a DataFrame
+  first. `Action.run(inputs)` keeps taking `{slot_id: DataFrame}`.
+- **11C and 11D are the same requirement seen twice.** A Run must record the
+  resolved immutable version ID, never `latest` or `current`. `current_version`
+  is where a moving concept becomes a fixed one, and it must be called before
+  execution, not during it.
 - **The Run pipeline still writes nothing**, and the tests that prove it are
-  untouched. Do not let ingestion change that: an uploaded file should be
-  parsed in memory exactly as it is now, and only the *parsed frame* should
-  reach the library.
+  untouched — including a Phase 10 one that runs a full three-file import and
+  asserts the working directory is still empty. Do not let library-backed
+  inputs change that: a version is _read_ from the library, and nothing about a
+  Run is written to it.
 - **A test that touches the library gets an empty one automatically.** The
-  autouse `data_library` fixture in `conftest.py` redirects
-  `DATA_LIBRARY` at a temporary directory. Do not construct a
+  autouse `data_library` fixture in `conftest.py` redirects `DATA_LIBRARY` at a
+  temporary directory. Do not construct a
   `LocalDataLibrary(config.LIBRARY_DIRECTORY)` in a test — that writes into the
   repository.
+- **`tests/fixtures/monthly_sources.py` builds committed history cheaply.**
+  `bootstrap_history(SALES_HISTORY.id, source(ms.months((...))))` gives a
+  dataset with several live monthly versions in one call, which is what a
+  Phase 11 test needs to resolve a specific old version against.
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-9-n9d431
-    Descends from:  60817e8  "phase 8 complete"
+    Current branch: claude/forgexl-phase-10-29w9l9
+    Descends from:  63e69fb  "phase 9 complete"
 
 `origin/main` is at `8bfe29f` ("fixed problems prior to starting Phase 6I").
-Three commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7) and
-`60817e8` (Phase 8) — and all three are ancestors of this branch, so nothing is
-skipped or duplicated. Known Issue 75 stands, one commit larger: a session
-inspecting `main` alone would miss 6I, Phase 7 and Phase 8. Merging is the
-user's to do.
+Four commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7), `60817e8`
+(Phase 8) and `63e69fb` (Phase 9) — and all four are ancestors of this branch,
+so nothing is skipped or duplicated. Known Issue 75 stands, one commit larger:
+a session inspecting `main` alone would miss 6I, Phase 7, Phase 8 and Phase 9.
+Merging is the user's to do.
 
-Phase 9's diff is five new files (two backend modules, three test modules),
-eight modified files and one rename. `package.json`, `package-lock.json` and
-`backend/requirements.txt` are untouched, and **nothing under `src/` changed**.
+Phase 10's diff is 14 files: eight new (three backend modules, one fixture
+module, three test modules, one document) and six modified, with no deletion
+and no rename. Confirmed against `git show --name-status HEAD` in both
+directions — every file the report lists is in the commit, and every file in
+the commit is in the report. `package.json`, `package-lock.json` and `backend/requirements.txt` are
+untouched, and **nothing under `src/` changed**.
 
 ### Before writing any code, verify the repository is intact
 
@@ -7686,23 +8319,26 @@ another.
     md5sum backend/tests/*.py backend/app/*.py backend/app/*/*.py | awk '{print $1}' | sort | uniq -d
     npm run build
 
-The suite must report **1475 passed, zero xfails**. Every other line must
+The suite must report **1603 passed, zero xfails**. Every other line must
 produce no output, and the build must succeed.
 
 **And one check that belongs at the end of your phase, not the start.** Phase 9
-found that the same file rename had been recorded as done by three consecutive
-phases and was in none of their commits (Known Issue 85). Every one of those
-phases ran `git mv` and reported truthfully from `git status`; what none of them
-did was check the commit afterwards. So:
+found the same file rename recorded as done by three consecutive phases and
+present in none of their commits (Known Issue 85). Phase 10 ran the fix that
+issue prescribes and it worked — the rename is in `63e69fb`, and Phase 10's own
+reported file lists were checked against `git show --name-status HEAD` before
+this entry was finalised. Keep doing it:
 
     # AFTER committing, before reporting the phase complete:
     git show --name-status HEAD
 
 Confirm that every file your report lists as created, modified, renamed or
-deleted actually appears there. A staged rename that never reaches the commit
-is invisible to the whole check list above — pytest collects `test_*.py` by
-glob, so a misspelled test filename runs exactly as well as a correct one.
+deleted actually appears there — **and the reverse**, that every file in the
+commit appears in your report. Phase 10 found the inverse failure in Phase 9's
+entry (Known Issue 89): a `package.json` change that is in the commit and not
+in the report. Read the list both ways.
 
 If the environment is fresh — no `backend/.venv/`, no `node_modules/` — rebuild
 it with the four commands in `README.md`. That path was exercised end to end in
-Phase 8.1 and again in Phase 9, and needs nothing beyond what is written there.
+Phase 8.1 and again in Phases 9 and 10, and needs nothing beyond what is
+written there.
