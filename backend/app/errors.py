@@ -96,8 +96,34 @@ class UnknownOutputError(WorkbenchError):
     http_status = 404
 
 
+class UnknownArtifactError(WorkbenchError):
+    """The Run exists but produced no artifact with the requested ID.
+
+    The artifact counterpart of :class:`UnknownOutputError`, and separate from
+    it for the same reason build plan 12A keeps the two concepts apart: a
+    result table and a finished file are different things, and reporting a
+    missing report as "unknown output" would send a client looking for a table
+    that was never asked for.
+    """
+
+    code = "UNKNOWN_ARTIFACT"
+    http_status = 404
+
+
 class MissingArtifactError(WorkbenchError):
-    """The manifest lists the artifact but the file is not on disk."""
+    """The Run's record lists the data but the Run no longer holds it.
+
+    Named for the on-disk model this application had until Phase 6D, where it
+    meant "the manifest lists the artifact but the file is not on disk". There
+    is no disk now, and the condition it reports is the memory equivalent: a
+    Run whose result has been released, or a failed Run, which records what it
+    attempted and holds none of it.
+
+    Distinct from :class:`UnknownOutputError` and
+    :class:`UnknownArtifactError`, which mean the Run never produced the thing
+    at all. "It was never made" and "it is no longer here" are different
+    answers and a client that retried would want to know which it got.
+    """
 
     code = "MISSING_ARTIFACT"
     http_status = 404

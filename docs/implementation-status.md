@@ -1,20 +1,21 @@
 # Implementation Status
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-15
 Current Phase: None
-Last Completed Phase: Phase 11 — Library-Backed Action Inputs and Reproducible
-Runs.
-**Phase 11 is complete.** It is the third phase of the post-POC expansion.
-Phase 12 is not started; nothing for it has been scaffolded, stubbed or
-prepared — `ActionResult` still carries only dataframes, no artifact type
-exists, and there is no ZIP anywhere in the backend.
+Last Completed Phase: Phase 12 — Rich Artifact Output Framework.
+**Phase 12 is complete.** It is the fourth phase of the post-POC expansion.
+Phase 13 is not started; nothing for it has been scaffolded, stubbed or
+prepared — there is no report specification, no reporting Action, no rep
+roster and no calculation engine anywhere in the backend, and no registered
+Action produces an artifact.
 
 > **Architecture document.** `docs/architecture.md` was created in Phase 6I
 > (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
 > persistence behaviour and the extension point for future persistence. Phase 9
 > added §5a, the persistent Data Library, Phase 10 added §5b, the monthly
-> ingestion layer above it, and Phase 11 added §5c, library-backed Action
-> inputs. This file remains the phase-by-phase record.
+> ingestion layer above it, Phase 11 added §5c, library-backed Action inputs,
+> and Phase 12 added §5d, the rich artifact output framework. This file
+> remains the phase-by-phase record.
 >
 > **Source schemas.** `docs/monthly-source-schemas.md` was created in Phase 10A
 > and is the authoritative description of the three recurring source files. The
@@ -36,6 +37,316 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 12 — Rich Artifact Output Framework
+
+Both authoritative documents were read in full and the repository was inspected
+before anything was edited. The session began in a **fresh ephemeral
+container**: `backend/.venv/` and `node_modules/` did not exist and were rebuilt
+with the four commands `README.md` documents, which worked exactly as written.
+
+Phase 12 gives a Run a second kind of result. Until now everything an Action
+produced was a table: a Polars frame, previewed, paged and exported as CSV or
+XLSX on request. A finished report is not a table, and build plan 12A is
+explicit that it must not be pretended into one — "Do not pretend a finished
+workbook containing layout, formatting, multiple report sections, and
+presentation logic is merely another DataFrame." So an Action may now also
+return **artifacts**: finished bytes, downloaded as they are, under names the
+Action chose.
+
+**Every addition defaults to what the code already meant.** `ActionResult`
+gained one field, `RunManifest` gained one, and both default to empty, so every
+Action and every manifest written before this phase means exactly what it meant
+then. `MANIFEST_SCHEMA_VERSION` stays at 2 for the second phase running, and
+`FROZEN_ACTIONS` is byte-identical: neither proof Action was touched, and the
+contract freeze now *asserts* that neither produces an artifact.
+
+#### The baseline was clean, for the third phase running
+
+The check list the Phase 11 entry prescribes was run before any Phase 12 work,
+and every line passed:
+
+| Check                           | Result                                            |
+| ------------------------------- | ------------------------------------------------- |
+| `git show --name-status HEAD`   | matches the Phase 11 report in both directions    |
+| `pytest` (baseline)             | **1,665 passed** — the documented figure exactly  |
+| `git branch -r`                 | `main` and this branch                            |
+| hyphenated module names         | none                                              |
+| duplicate-content modules (md5) | none                                              |
+| `npm run build`                 | exit 0, same three routes                         |
+| `npm run lint`                  | exit 0, no output                                 |
+
+Known Issue 85's family did not recur: the Phase 11 report's file list matches
+its commit read both ways — 14 files, two added and twelve modified.
+
+---
+
+#### 12A — Dataset outputs and artifacts are different things
+
+Two concepts, side by side and deliberately not merged:
+
+```text
+tabular output    a Polars frame. Previewed, paged, exported as CSV or XLSX.
+artifact          finished bytes. Downloaded as they are, under their own name.
+```
+
+Modelling a report workbook as another `OutputMetadata` would have given it a
+`column_schema` it does not have, a preview endpoint that could not render it,
+and a CSV export that would have thrown its formatting away. That is asserted
+rather than argued: `test_an_artifact_carries_no_row_or_column_counts` fails if
+`ArtifactMetadata` ever grows a row count, a column list or a format list.
+
+`app.models.artifact.Artifact` is a frozen dataclass — plain Python, not
+Pydantic, for the same reason `ActionResult` is: it carries bytes, which are
+never serialised into a response body. `to_metadata()` is the single boundary
+where it becomes API-facing data.
+
+---
+
+#### 12B — Extending `ActionResult` safely
+
+One field, appended:
+
+```python
+artifacts: Sequence[Artifact] = ()
+```
+
+**Appended rather than inserted beside `outputs`, where it belongs by
+meaning.** Inserting it would have changed what a positional
+`ActionResult(frames, metrics)` constructs, and an addition must not silently
+re-point an existing call. `test_positional_construction_still_means_what_it_meant`
+is the regression test.
+
+`__post_init__` freezes the sequence into a tuple and refuses a collision
+inside it — see 12E. Nothing else about the class changed, and
+`test_a_table_only_manifest_is_unchanged_in_every_other_respect` asserts that a
+Run producing only tables serialises to what it serialised before.
+
+---
+
+#### 12C — Artifact metadata
+
+`ArtifactMetadata` carries exactly the six facts build plan 12C names and
+nothing else:
+
+```text
+id  ·  label  ·  filename  ·  media_type  ·  size_bytes  ·  artifact_type
+```
+
+**There is no path, because there is none to expose.** An artifact lives in the
+Run's memory, travelling inside `RunResult` beside the result frames, so
+forgetting the Run releases both — `test_forgetting_the_run_releases_the_bytes`
+proves it with a `weakref`, the same way Phase 6I proved it for a 300,000-row
+frame. `test_no_manifest_value_looks_like_a_path` sweeps every serialised
+manifest value for a path fragment.
+
+`size_bytes` is **measured from the payload**, never declared by whatever
+produced it, so it cannot disagree with what downloads;
+`test_the_reported_size_is_the_downloaded_size` checks the two against each
+other over HTTP.
+
+`ArtifactType` is coarse and closed — `workbook`, `archive`, `document`,
+`text`, `other` — for the same reason `ColumnKind` is: a client needs to know
+which icon and which wording to use, not which revision of a file format it
+holds. The precise type travels beside it as the media type, which is what a
+browser reads.
+
+**Artifacts are not persisted, and the Data Library did not become a report
+archive.** No model, interface or stored record in the library gained a field,
+for the third phase running.
+
+---
+
+#### 12D — Rich XLSX rendering
+
+`backend/app/services/workbook.py`, a module of its own. A report is described
+declaratively and rendered:
+
+```python
+render_workbook([
+    Sheet(name="Detail", frame=rows, title="…", subtitle="…",
+          columns=(Column("Revenue", format=CellFormat.CURRENCY), …),
+          total_row={"Revenue": 56550.25},
+          conditional_formats=(ConditionalFormat("Revenue", ConditionalRule.NEGATIVE_RED),),
+          table_style="Table Style Medium 2")
+])
+```
+
+Every item build plan 12D lists is implemented and verified **by reopening the
+rendered bytes**, never by trusting the call that wrote them. The module
+docstring carries the table mapping each item to its test.
+
+**It is not a second workbook writer**, which is what the Phase 11 hand-off
+asked for. Every rule Phases 6F and 7 established still applies and is applied
+from its original home: the workbook options of 6F.2, the capacity check of 7B
+(`check_fits_worksheet`), the worksheet-naming rules of 6F.5
+(`worksheet_names`) and the release rule of 6F.7 all come from
+`app.services.export`. There is one set of rules, not two.
+
+Two rules are this module's own, and both are load-bearing.
+
+**It calculates nothing.** Build plan 12D: "Do not implement business
+calculations in the XLSX formatting layer." A sheet is handed a frame and, if
+it wants one, a totals row whose values the caller has already worked out. The
+layer chooses fonts, widths and number formats — never a number.
+`test_a_total_is_whatever_the_caller_supplied` renders a total of 999,999 over
+a column summing to 413 and asserts the file says 999,999: a weighted average,
+a prior-year figure and a sum are all legitimate totals, and only the caller
+knows which it calculated.
+
+**It writes no formula.** The totals row holds literal values, not
+`=SUBTOTAL(109,…)`. This was a real decision and it went the other way at
+first. xlsxwriter's table totals, and Polars' `column_totals`, both write a
+formula; a formula means the file *shows* one number and *stores* another, and
+Polars, openpyxl or a preview pane reading it back would show a third thing —
+build plan §3.3's "valid-looking data" in a new costume.
+`test_no_worksheet_in_a_rendered_report_holds_a_formula` sweeps every worksheet
+in the archive for `<f>`.
+
+Two implementation facts were established by measurement rather than assumed,
+because guessing either would have produced a silently wrong file:
+
+- **Polars takes `column_widths` in pixels, not character units.** Passing a
+  character width produced columns about a seventh of their intended size.
+  Widths are reasoned about here in Excel's own unit and converted at the
+  boundary by `_width_pixels`, with the factor confirmed against a rendered
+  workbook.
+- **`openpyxl.column_dimensions` invents a default for a column inside a
+  stored range.** A `<col min="1" max="2">` entry is keyed under `A` only, so
+  asking for `B` returns 13.0 rather than the width in the file. The width
+  tests read the worksheet XML directly, and the reason is in the module
+  docstring so the next reader does not "fix" them.
+
+---
+
+#### 12E — Multiple artifacts per Run
+
+One Action, many files, and the Run keeps them in the order the Action listed
+them. The IDs and filenames come from the data, so the framework has to make
+that safe — and **the two are treated differently on purpose**:
+
+| | built by | on a collision |
+| --- | --- | --- |
+| artifact **ID** — an internal handle in a URL | `artifact_ids()` | numbered apart |
+| artifact **filename** — what the user receives | `artifact_filename()` | the Run fails |
+
+A filename is what the user asked for, so renaming one behind their back would
+hand them a file called something they did not choose (build plan §3.3). An ID
+is a handle nobody reads, so two rows reducing to the same token get distinct
+ones — the same split `worksheet_names()` has made since 6F.5. Filenames are
+compared **case-insensitively**, because macOS and Windows treat two names
+differing only in case as one file and an archive holding both loses one of
+them on extraction.
+
+An ID folds accents away because it is a token; a filename keeps them exactly,
+because it is a name. `Château Réal` becomes the ID `chateau-real` and the file
+`Château Réal - September 2026.xlsx`.
+
+**`artifact_ids()` was added mid-phase, and finding out that it was missing is
+the reason the live verification exists.** The first end-to-end run through a
+real browser failed with `ACTION_FAILED`, because the demo Action had derived
+an ID from a rep's name by hand and produced `château-réal`, which
+`ARTIFACT_ID_PATTERN` correctly refuses for a URL path segment. The framework
+was right to refuse it; what was missing was the sanctioned way for an Action
+to avoid the mistake. Build plan 12E asks for IDs that are "collision-safe and
+deterministic", and leaving every Action to reinvent slug-safety would not have
+delivered that. The test Action in the suite had passed only because its names
+were ASCII.
+
+---
+
+#### 12F — The batch ZIP
+
+`backend/app/services/archive.py`. A Run's artifacts become one archive, built
+in a memory buffer that is released with the call — no temporary file, not even
+in `/tmp`.
+
+The safety rule is the phase's sharpest edge and is enforced twice.
+`check_artifact_filename` refuses a separator, a `..`, a leading dot, a control
+character, a reserved Windows device name and a trailing dot or space **when
+the artifact is constructed**, and the archive writer checks again on the way
+in. Checking twice is deliberate: the first check protects the
+`Content-Disposition` header, the second protects the user's filesystem when
+they extract the archive. `test_the_writer_checks_the_filename_again`
+constructs an artifact past the model's own guard to prove the writer does not
+rely on someone else having checked.
+
+The archive is **deterministic**. Entries are stamped with the Run's own
+completion time rather than with "now", recorded in order, and given explicit
+permissions, so re-downloading a bundle returns byte-identical output. A
+timestamp before 1980 — which the ZIP format cannot record — is clamped rather
+than left to wrap into the 2040s.
+
+---
+
+#### 12G — The artifact API and the frontend
+
+Two routes, the first added since Phase 6F:
+
+```text
+GET /api/runs/{run_id}/artifacts/{artifact_id}/download
+GET /api/runs/{run_id}/artifacts/download/zip
+```
+
+The ZIP route is declared **first** in the module so the reading order matches
+the matching order, and `test_the_zip_route_is_not_shadowed_by_the_artifact_route`
+pins it.
+
+A single artifact arrives under **the Action's own filename** — that is the
+point of an artifact — while the bundle takes ForgeXL's own convention,
+`forgexl-<action>-<timestamp>.zip`, because nobody chose a name for it and
+inventing one from the first report inside would be a guess.
+
+`Content-Disposition` gained RFC 6266 / RFC 5987 handling, and **only for names
+that need it**: an ASCII filename — which is every generated export filename,
+by construction — is sent in the single quoted parameter it has always been
+sent in, so no existing download's header changed. A non-ASCII name adds
+`filename*=UTF-8''…` beside it. The percent-encoder is six lines of this
+module rather than `urllib.parse.quote`, because `test_local_exposure.py`
+forbids the backend importing any part of `urllib` and that blanket rule is
+worth more than the six lines.
+
+Three new errors' worth of distinction, of which one is new code:
+`UNKNOWN_ARTIFACT` (404) for an artifact a Run never produced, kept separate
+from `UNKNOWN_OUTPUT` because build plan 12A keeps tables and files apart, and
+from `MISSING_ARTIFACT` because "never made" and "no longer held" are different
+answers to a client that would retry.
+
+The frontend gained one component,
+`src/components/workbench/ArtifactDownloads.jsx`, and it is **entirely
+generic**: every line comes from `manifest.artifacts`, nothing branches on an
+Action ID, an artifact ID or a filename, and build plan 12G's "Do not hardcode
+sales-rep names into the frontend" is satisfied by there being nothing to
+hardcode. It renders nothing when a Run produced no artifacts, which is every
+Run either registered Action can produce, and the "Download All" link appears
+only above one file — a bundle of one is a slower way to fetch the file on the
+line above it.
+
+It sits **outside** the output-specific section: artifacts belong to the Run,
+not to the selected result table, so switching tables does not change them. It
+is also deliberately separate from `ExportButtons`: an export is a result table
+rendered into a format on request, an artifact is a file the Action produced,
+and putting them under one heading would suggest they are alternatives.
+
+---
+
+#### What the exit criterion actually proves
+
+> A test Action can generate multiple polished XLSX artifacts plus a ZIP bundle
+> through generic ForgeXL infrastructure.
+
+`TestThePhase12ExitCriterion` walks that sentence clause by clause against a
+`_RepReportsAction` that is **not registered** — build plan 12B is explicit
+that no Action has to produce artifacts, and neither proof Action was changed.
+It asserts three workbooks, each with two worksheets, a title above the table,
+`$#,##0.00;($#,##0.00)` on the revenue column, a frozen header and a bold
+totals row; then the ZIP holding all three; then that the Run's tabular side is
+untouched; then that the working directory is still empty.
+
+The same thing was then done for real, over HTTP and in a real browser, with a
+four-rep file including an accented name — see **Tests**.
+
+---
 
 ### Phase 11 — Library-Backed Action Inputs and Reproducible Runs
 
@@ -3965,6 +4276,14 @@ Frontend files:
                                    (renamed from ExportButton.jsx in 6G: the
                                    file was misnamed and no importer resolved
                                    — see Known Issue 61)
+    src/components/workbench/ArtifactDownloads.jsx   (12G)
+                                   the files a Run produced: one row per
+                                   artifact with its label, filename, kind and
+                                   size, a download link each, and a
+                                   "Download All" ZIP link above one file.
+                                   Renders nothing when a Run produced none,
+                                   which is every Run either registered
+                                   Action can produce.
     public/.gitkeep
 
 (The 6E components were added to the repository in Phase 6E but this list was
@@ -4004,7 +4323,11 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         models/
           __init__.py
           schemas.py          every Pydantic schema
-          run.py              the logical Run, RunResult, run IDs   (6B/6D)
+          run.py              the logical Run, RunResult, run IDs   (6B/6D);
+                              RunResult also carries the Run's artifacts (12C)
+          artifact.py         a finished file a Run produced: the Artifact
+                              value, the flat-filename rule, and the ID and
+                              filename builders            (12A-12C, 12E, 12F)
           library.py          Data Library records: Dataset, DatasetVersion,
                               DatasetCommit, dataset/version identity,
                               KNOWN_DATASETS                          (9A/9B)
@@ -4028,6 +4351,14 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
           export.py           CSV/XLSX bytes from a result frame          (6D);
                               check_fits_worksheet refuses a result the
                               XLSX format cannot hold                    (7B)
+          workbook.py         report-quality XLSX rendering: sheets, styled
+                              headers, number formats, widths, heights,
+                              frozen panes, filters, tables, conditional
+                              formats and literal totals. Calculates nothing
+                              and writes no formula; reuses export.py's
+                              options, capacity check and naming rules  (12D)
+          archive.py          a Run's artifacts -> one ZIP, built in memory,
+                              flat entry names, deterministic bytes     (12F)
           preview.py          paginated slices of a result frame          (6D)
           results.py          measuring a result table: schema, row counts,
                               columns added and dropped                   (6E)
@@ -4116,6 +4447,15 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_library_inputs.py  library-backed input slots: the extended
                               contract, resolution, provenance,
                               determinism and every clear failure    (11A-11E)
+        test_artifacts.py     the artifact model, the extended result
+                              contract, artifact metadata, many artifacts
+                              per Run, collision rules, filename safety and
+                              the release rule         (12A-12C, 12E, 12F)
+        test_workbook.py      the report renderer: every 12D item, verified
+                              by reopening the rendered bytes            (12D)
+        test_artifact_download.py  the two artifact routes, the batch ZIP,
+                              its safety and determinism, and the Phase 12
+                              exit criterion end to end            (12F/12G)
       benchmarks/             NOT collected by pytest (testpaths=tests and
                               the test_*.py glob). Run directly:
                               `.venv/bin/python -m tests.benchmarks.run`
@@ -4204,9 +4544,11 @@ responses of its own, neither of them FastAPI's:
                             The manifest carries result metadata on every
                             output and a derived `audit` summary (6E), plus
                             `library_inputs` naming the exact dataset
-                            versions the Run read (11C);
-                            `schema_version` is still 2 — every Phase 11
-                            addition has a default.
+                            versions the Run read (11C) and, since Phase 12,
+                            `artifacts` describing any finished files the
+                            Action produced beside its tables (12A-12C);
+                            `schema_version` is still 2 — every Phase 11 and
+                            Phase 12 addition has a default.
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
@@ -4266,6 +4608,33 @@ responses of its own, neither of them FastAPI's:
                             404 unknown Run, or a Run with no result
                                 (MISSING_ARTIFACT) — a failed Run included
 
+    GET  /api/runs/{run_id}/artifacts/{artifact_id}/download   (new in 12G)
+                        ->  200 attachment | 404
+                            One finished file the Action produced, offered
+                            under the Action's own filename and the
+                            artifact's own media type. The bytes are what
+                            the Run has held since it executed; nothing is
+                            rendered here and nothing is read from disk.
+                            A non-ASCII filename is carried by an RFC 6266
+                            `filename*` parameter beside the ASCII one; an
+                            ASCII filename is sent exactly as every export
+                            filename has been since 6F.6.
+                            404 unknown Run (UNKNOWN_RUN), an artifact this
+                                Run never produced (UNKNOWN_ARTIFACT), or
+                                one it no longer holds (MISSING_ARTIFACT)
+
+    GET  /api/runs/{run_id}/artifacts/download/zip             (new in 12F)
+                        ->  200 attachment | 404
+                            Every artifact of the Run as one ZIP, one flat
+                            entry each, in the order the Action listed them.
+                            Assembled in memory and deterministic: entries
+                            are stamped with the Run's completion time, so
+                            two downloads are byte-identical. Named
+                            forgexl-<action>-<YYYYMMDD-HHMMSS>.zip — the
+                            bundle is ForgeXL's file, not the Action's.
+                            404 unknown Run, or a Run that produced no
+                                artifact (MISSING_ARTIFACT)
+
 Every error body has the shape build plan section 22 specifies:
 
     {"error": {"code": "...", "message": "...", "details": {...}}}
@@ -4293,6 +4662,11 @@ library-backed input slot possible; no registered Action uses one, because
 build plan 11A explicitly says neither proof Action should have to change. The
 first Action that reads the Data Library is build plan Phase 13's monthly
 report.
+
+**Neither produces an artifact either, and the contract freeze pins that too.**
+Phase 12 made artifacts possible; build plan 12B is explicit that no Action has
+to produce one, and `test_no_registered_action_produces_artifacts` fails if a
+later phase quietly turns a deduplicator into a report.
 
 ### Adding an Action (the architecture being proven)
 
@@ -4343,14 +4717,14 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | Path                    | Status                                                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `src/app/`              | Exists (plan sketches root `app/`; `src/` retained per 1.1)                                                              |
-| `src/components/`       | Exists (`backend/`, `workbench/` — 6 Phase 5 components)                                                                 |
+| `src/components/`       | Exists (`backend/`, `workbench/` — 11 components; `ArtifactDownloads.jsx` added in 12G)                                  |
 | `src/lib/`              | Exists (`api.js`, `formatters.js`, `backend-origin.js` — 6G)                                                             |
 | `backend/app/`          | Exists (`main.py`, `config.py`)                                                                                          |
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`; the hyphenated duplicate was removed in Phase 7)                      |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
-| `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B)                                                                    |
-| `backend/app/services/` | Exists (run_store, data_library, ingestion, reporting_period, input_resolution, storage, parser, runner, export, preview, results) |
-| `backend/tests/`        | Exists (36 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
+| `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B, `artifact.py` — 12A)                                               |
+| `backend/app/services/` | Exists (run_store, data_library, ingestion, reporting_period, input_resolution, storage, parser, runner, export, workbook, archive, preview, results) |
+| `backend/tests/`        | Exists (39 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
 | `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
 | `data/library/`         | The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.         |
 | `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)                                                                        |
@@ -4500,6 +4874,172 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 12)
+
+    cd backend && .venv/bin/python -m pytest
+    1903 passed in 22.26s
+
+Run against the committed tree before any Phase 12 edit — **1,665 passed**, the
+documented figure exactly — and again at the end. No failures, no skips, no
+xfails, and the same two `StarletteDeprecationWarning` /
+`DeprecationWarning` entries the suite has carried since Phase 7.
+
+238 tests added, in three new modules plus three assertions in the freeze:
+
+| Module                          | Tests | Covers                                   |
+| ------------------------------- | ----- | ---------------------------------------- |
+| `tests/test_artifacts.py`       | 102   | 12A, 12B, 12C, 12E, and the 12F filename rule |
+| `tests/test_workbook.py`        | 88    | 12D, every listed item, by reopening the bytes |
+| `tests/test_artifact_download.py` | 43  | 12F, 12G, and the Phase 12 exit criterion |
+
+`tests/test_contract_freeze.py` went from 93 to 96 tests:
+`test_no_registered_action_produces_artifacts`,
+`test_an_action_may_use_the_report_renderer` and
+`test_the_artifact_type_values_are_frozen`.
+
+**Four failures appeared during the phase and all four were real.** They are
+recorded because each one changed the implementation:
+
+1. `test_schema_field_names_are_frozen[RunManifest]` — expected. `artifacts`
+   is a deliberate addition to a frozen contract and the freeze was amended to
+   record it.
+2. `test_the_backend_makes_no_outbound_http_client_available` — `from
+   urllib.parse import quote`. The test forbids `urllib` across the whole
+   backend source tree. `urllib.parse` cannot make a request, but the blanket
+   rule is worth keeping, so the percent-encoder was written out instead of
+   the import being excused.
+3. Eleven download-filename tests across `test_export_download.py`,
+   `test_hostile_input.py` and `test_runs_api.py` — the new
+   `Content-Disposition` emitted `filename*` unconditionally, changing a
+   header those tests parse exactly. The fix was not to loosen them: an ASCII
+   filename gains nothing from the extended parameter, so it is now emitted
+   only for a name that needs it and no existing download's header changed.
+4. `test_a_table_style_is_applied_when_asked_for` — xlsxwriter stores
+   "Table Style Medium 2" as `TableStyleMedium2`. The assertion was wrong, not
+   the code.
+
+### Type checking (Phase 12)
+
+    npx pyright
+    0 errors, 0 warnings, 0 informations
+
+Fourteen errors appeared first and every one was fixed rather than suppressed,
+except two deliberate `# type: ignore` comments in tests that pass a wrong type
+**on purpose** to prove it is refused. Two were in application code:
+`conditional_formats` needs a `cast` because Polars types the parameter with a
+`Mapping` key union and a `Mapping`'s key type is invariant, and
+`Series.str.len_chars().max()` is typed as any Python literal, so it is checked
+with `isinstance` rather than coerced.
+
+### Frontend static checks (Phase 12)
+
+    npm run lint     exit 0, no output
+    npm run build    exit 0, compiled successfully
+
+Three routes, unchanged: `/`, `/_not-found`, `/forge-api/[...path]`. This is
+the first phase since 6G to touch `src/`: one new component, one import and one
+element in `ActionRunner.jsx`, two URL builders in `lib/api.js` and one label
+helper in `lib/formatters.js`.
+
+### Phase 12 live verification over real HTTP
+
+`next dev` on `127.0.0.1:3000` and uvicorn on `127.0.0.1:8000`, with an extra
+artifact-producing Action registered **from a scratchpad module outside the
+repository** — no registered Action produces artifacts and Phase 12 was not
+going to add one. Every request below went through the same-origin proxy at
+`127.0.0.1:3000/forge-api/...`.
+
+The regression half first, proving an artifact-free Action is untouched:
+
+    product_master_builder   succeeded, schema_version 2
+    artifacts                []      (and audit.artifacts [])
+    outputs                  [("product_master", 2)]
+    metrics                  input_rows 3, output_rows 2,
+                             duplicate_product_rows_removed 1
+
+Then the artifact half, from a four-rep file including an accented name:
+
+    run_id      a47bee73-6a3e-4884-95bb-e429d227c731
+    status      succeeded, duration_ms 39
+    outputs     [("summary", 4)]
+    artifacts   beth-comeaux    Beth Comeaux - September 2026.xlsx     8372 B
+                kevin-wardell   Kevin Wardell - September 2026.xlsx    8340 B
+                jennifer-jones  Jennifer Jones - September 2026.xlsx   8332 B
+                chateau-real    Château Réal - September 2026.xlsx     8348 B
+    metrics     reports_written 4
+
+The downloads, and what was in them:
+
+    GET .../artifacts/chateau-real/download
+      200, content-type application/vnd.openxmlformats-...spreadsheetml.sheet
+      content-disposition: attachment;
+        filename="Ch?teau R?al - September 2026.xlsx";
+        filename*=UTF-8''Ch%C3%A2teau%20R%C3%A9al%20-%20September%202026.xlsx
+      worksheets   ["Château Réal Detail", "Château Réal Summary"]
+      A1           "Château Réal — September 2026"
+      A2           "Sales detail by region"
+      A4           "Region"                 (the table header)
+      C5           980.75, format $#,##0.00;($#,##0.00)
+      freeze panes A5
+      totals row   ["Total", 12, 980.75]
+
+    GET .../artifacts/download/zip
+      200, content-type application/zip
+      content-disposition: attachment;
+        filename="forgexl-rep-reports-20260915-074558.zip"
+      entries      the four filenames above, in the Action's order
+      integrity    testzip() clean
+      bundle entry == the single download, byte for byte
+
+The header is byte-identical direct from FastAPI on `:8000` and through the
+Next.js proxy on `:3000`, which is the proof that the transport-only handler
+forwards `Content-Disposition` unchanged.
+
+`data/` was **NOT CREATED**, `git status` showed only the intended files, and
+the repository root gained nothing.
+
+### Phase 12 browser verification (real headless Chromium)
+
+Against the running application, Playwright 1.56.1 driving the pre-installed
+Chromium. The file was supplied through the **real file chooser**, the Run
+started with a **real click**, and both downloads were **real link clicks**:
+
+    action selector     ["Select Action", "Exact Duplicate Remover",
+                         "Product Master Builder", "Rep Reports (demo)"]
+    workbench state     success
+    "Generated Files"   visible
+    listed files        Beth Comeaux - September 2026.xlsx
+                        Kevin Wardell - September 2026.xlsx
+                        Jennifer Jones - September 2026.xlsx
+                        Château Réal - September 2026.xlsx
+    first label         "Beth Comeaux — September 2026"
+    links               Download ×4, "Download All (4 files, ZIP)"
+    single download     Château Réal - September 2026.xlsx
+    bundle download     forgexl-rep-reports-20260915-074910.zip, 29,540 bytes
+    Export section      ["Download CSV", "Download Excel"] — still there,
+                        still separate
+    console errors      none
+
+And the regression, with an Action that produces no artifacts:
+
+    product_master_builder     workbench state success
+    "Generated Files" heading  0 occurrences
+    Export links               ["Download CSV", "Download Excel"]
+    first preview row          A-1 2021 Acme Château Réal Réserve 750ml
+    console errors             none
+
+**One finding worth recording, because it is an environment fact and not a
+bug.** The accented artifact first downloaded as `download` rather than under
+its name. The header was correct — the same header a browser accepts — and the
+cause was found by probing Chromium with five header variants against a
+throwaway server: `filename*=UTF-8''hello.txt` is honoured, and
+`filename*=UTF-8''Caf%C3%A9.txt` is not, in **this container**, which has `LANG`
+and `LC_ALL` unset. Chromium refuses a non-ASCII download name when it cannot
+determine a UTF-8 filesystem locale. Re-running with `LANG=C.UTF-8` produced
+`Café.txt` and, in the application, `Château Réal - September 2026.xlsx`. No
+application code was changed for it; the figures above are from the
+`LANG=C.UTF-8` run. Recorded as Known Issue 104.
 
 ### Backend test suite (Phase 11)
 
@@ -7985,6 +8525,76 @@ keeps its existing phase ownership.
     for an architecture document, not a README rewrite, so the architecture
     document was written and the README was left alone.
 
+99. **No registered Action produces an artifact, so no user can see one.**
+    Build plan 12B is explicit that artifacts stay optional and 12G asks only
+    for generic frontend support, so this is the phase working as specified
+    rather than a gap in it — but the consequence is worth stating plainly: a
+    user running ForgeXL today never sees the "Generated Files" section,
+    because neither proof Action produces a file. The whole framework is
+    exercised by tests, by an in-process Action, and by a scratchpad Action
+    during live verification. The first Action a user can reach that produces
+    one is build plan Phase 13's monthly report. Closing this is Phase 13's,
+    not a follow-up to Phase 12.
+
+100. **An artifact-only Action is not possible.** `RunResult.of()` still
+    requires at least one result table, so an Action that produces nothing but
+    files cannot be written: it must declare and return at least one output.
+    That is Phase 12 staying inside its scope — build plan 12B says the result
+    contract must be extended safely and that existing Actions must keep
+    working, and says nothing about relaxing the tabular requirement. It is
+    also not obviously wrong: a report Action that returns the table its
+    workbooks were rendered from gives the user something to preview and to
+    export as CSV, which a file-only Action would not. If Phase 13's report
+    genuinely has no table worth returning, the invariant is one line in
+    `RunResult.of()` plus the `MISSING_ARTIFACT` branches in `api/runs.py`.
+
+101. **Artifacts are held in memory for the life of the Run, uncapped.** A Run
+    producing forty rep workbooks holds forty workbooks' bytes until the Run
+    is forgotten, on top of its result frames. There is no size limit, no
+    streaming and no spill to disk, and there deliberately is not: build plan
+    12C says artifacts "may remain in runtime memory for a Run" and the whole
+    architecture rests on a Run writing nothing. A rendered workbook of a few
+    thousand rows is single-digit megabytes, so the realistic Phase 13 case is
+    comfortable. If a future report produces hundreds of large files, the
+    answer is a persistence decision (build plan §7: evidence first), not a
+    cap bolted on now.
+
+102. **The report renderer's conditional formats are four rules, not arbitrary
+    xlsxwriter dictionaries.** `ConditionalRule` is a closed enum —
+    negative-red, positive-green, data bar, three-colour scale — for the same
+    reason `CellFormat` is closed: consistent styling across reports is build
+    plan 12D's last item, and an escape hatch taking a raw format dictionary
+    would make it unenforceable. A rule Phase 13 needs and this set lacks is
+    one enum member and one dictionary entry.
+
+103. **`openpyxl`'s `column_dimensions` cannot be trusted for a width inside a
+    stored range, and the width tests say so.** xlsxwriter writes
+    `<col min="1" max="2" width="...">` when two adjacent columns share a
+    width, and `openpyxl` keys that under `A` only — asking for `B` silently
+    returns a default of 13.0 rather than the width in the file. This cost real
+    time during 12D, when correct widths read as wrong ones. The tests parse
+    the worksheet XML instead and the module docstring says why, so the next
+    reader does not "simplify" them back.
+
+104. **Chromium in this container refuses a non-ASCII download filename.**
+    `LANG` and `LC_ALL` are unset, so Chromium cannot determine a UTF-8
+    filesystem locale and falls back to naming the file `download`. The
+    `Content-Disposition` header ForgeXL sends is correct — RFC 6266 quoted
+    parameter plus RFC 5987 `filename*` — and the same header produces
+    `Château Réal - September 2026.xlsx` when the browser is launched with
+    `LANG=C.UTF-8`. Confirmed by probing Chromium with five header variants
+    against a throwaway server. It is an artefact of this ephemeral container
+    and would not appear on a developer's Mac; it is recorded so a future
+    session that sees `download` does not go looking for a bug in the header.
+
+105. **Nothing verifies a rendered report in Excel itself.** Every assertion
+    about a workbook is made by reopening it with `openpyxl` or `fastexcel`,
+    which is a strong check — a file ForgeXL could not itself ingest fails —
+    but neither is Excel. Number formats, conditional formats, table styles and
+    frozen panes are asserted as stored, not as displayed. Build plan 12D asks
+    for report-quality workbooks and this is the limit of what can be proved in
+    a Linux container with no Excel in it. Opening one Phase 13 report in real
+    Excel on the target Mac is worth doing once.
 ---
 
 ## Deviations From Build Plan
@@ -8787,6 +9397,82 @@ failed` as an example and says explicitly: "Use existing equivalent status
     could read the library. Pinning them now is what keeps a library failure
     from quietly changing status later.
 
+81. **The rich renderer is a module beside `export.py`, not code inside it.**
+    The Phase 11 hand-off note said build plan 12D's rendering "belongs beside
+    those rather than in a second workbook writer", and this is the reading
+    taken: `app/services/workbook.py` imports `WORKBOOK_OPTIONS`,
+    `check_fits_worksheet`, `worksheet_names` and `GENERAL_NUMBER_FORMAT` from
+    `export.py` and adds no second set of rules, but lives in its own module.
+    Folding ~400 lines of formatting into `export.py` would have doubled it and
+    mixed two jobs — "render this result table faithfully" and "render this
+    report attractively" — that want opposite defaults. The same argument
+    Phase 6E used to split `results.py` out of export and preview.
+
+82. **An Action may import `app.services.workbook`, and the contract freeze
+    says so deliberately.** `FORBIDDEN_ACTION_IMPORTS` is byte-identical —
+    `xlsxwriter` and `app.services.export` are still forbidden, so an Action
+    still cannot drive the spreadsheet engine — and `app.services.workbook` was
+    **not** added to it. Every entry on that list guards against an Action
+    touching the filesystem or reproducing a pipeline stage; a pure function
+    from already-calculated report data to bytes does neither, and it is the
+    sanctioned alternative to the import that *is* forbidden. Stated as an
+    assertion (`test_an_action_may_use_the_report_renderer`) rather than left
+    as an absence, so it reads as a decision rather than an oversight.
+
+83. **A totals row is literal values, and ForgeXL writes no formula anywhere.**
+    Build plan 12D asks for "readable totals". Both obvious mechanisms —
+    xlsxwriter's table `total_function` and Polars' `column_totals` — write
+    `=SUBTOTAL(...)`, which means the file shows one number and stores another,
+    and a reader that does not evaluate formulas shows a third. That is build
+    plan §3.3's "silently convert invalid data into valid-looking data", so the
+    totals row is written as ordinary styled cells beneath the table and the
+    caller supplies the figures. The consequence is that ForgeXL's totals do
+    not recalculate when a reader edits the sheet, which is the honest
+    behaviour for a generated report.
+
+84. **`MANIFEST_SCHEMA_VERSION` was not bumped again**, for the same reason
+    Phase 11 did not bump it (Deviation 77). `RunManifest.artifacts` and
+    `RunAudit.artifacts` both default to empty, so a manifest for a Run that
+    produced only tables is byte-identical to what it was and a version 2
+    manifest written before this phase still validates. Bumping would have
+    claimed an incompatibility that does not exist.
+
+85. **`Content-Disposition` gained a second parameter, but only for names that
+    need one.** The straightforward implementation emits `filename` and
+    `filename*` on every download; that changed the header for every export and
+    broke eleven tests that parse it exactly. The extended parameter carries no
+    information for an ASCII name, so it is emitted only for a non-ASCII one.
+    Every export download's header is unchanged, and those tests were left as
+    they were rather than loosened to accept a new shape.
+
+86. **The percent-encoder is written out rather than taken from
+    `urllib.parse.quote`.** `test_local_exposure.py` forbids the backend
+    importing any part of `urllib`, on the grounds that an application that
+    never imports an HTTP client cannot reach one by accident. `urllib.parse`
+    cannot make a request and the test is blunter than its own rationale — but
+    the blunt rule is enforceable and the six lines it costs are trivial, so
+    the rule was kept and the function written.
+
+87. **`artifact_ids()` was added beyond the literal text of build plan 12E.**
+    12E requires IDs that are "collision-safe and deterministic where
+    appropriate" and gives per-rep filenames as its example, so an Action is
+    expected to derive both from data. `artifact_filename()` alone left every
+    Action to reinvent URL-safe slugging and collision handling, and the first
+    live run proved it: a hand-rolled ID produced `château-réal` and failed the
+    Run. The helper is what makes 12E's requirement achievable rather than
+    merely stated.
+
+88. **`test_contract_freeze.py` was amended a seventh time — every part of it
+    an addition.** Two routes (`FROZEN_ROUTES`'s first change since Phase 6F),
+    one schema field (`RunManifest.artifacts`) plus the new `ArtifactMetadata`
+    model, and one error row (`UNKNOWN_ARTIFACT`). Nothing already frozen
+    moved: not an existing route, an error code already listed, a metric key, a
+    field's position or meaning, a limit, or the manifest version.
+    `FROZEN_ACTIONS` and `FORBIDDEN_ACTION_IMPORTS` are both byte-identical,
+    and three new tests pin why — that neither registered Action produces an
+    artifact, that the forbidden-import set is exactly what it was, and that
+    the artifact kinds are frozen.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -8811,97 +9497,111 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 12 — Rich Artifact Output Framework.**
+**Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine.**
 
-**Not started.** Nothing for it has been scaffolded, stubbed or prepared:
-`ActionResult` still carries only `outputs`, `metrics` and `rows_affected`; no
-artifact type, artifact metadata or artifact route exists; nothing in the
-backend imports `zipfile`; and `export.py` still renders one plain table per
-call, with no formatting beyond a bold header row.
+**Not started.** Nothing for it has been scaffolded, stubbed or prepared: there
+is no report specification document, no reporting Action, no rep roster, no
+reporting-period resolution beyond Phase 10B's month detection, and no
+calculation table of any kind. No registered Action reads the Data Library and
+none produces an artifact.
 
-Phase 12 separates *dataset outputs* from *artifacts* — finished files a Run
-produces, such as a formatted workbook — and gives a Run a way to return more
-than one of them. Read build plan 12A–12G in full before starting; the ordering
-matters, because 12B ("Extend `ActionResult` Safely") is what keeps every
-existing Action working while the result contract widens.
+Phase 13 is the first phase that uses all three of the post-POC foundations at
+once: it reads stored dataset versions through Phase 11's library-backed input
+slots, calculates a report, and hands the result out through Phase 12's
+artifacts. Read build plan 13A–13G in full before starting; 13A ("Create the
+Report Specification") comes first for a reason — the specification is what the
+calculation engine is checked against, and writing the engine first would leave
+nothing to check it with.
 
-### Phase 11 is complete
+### Phase 12 is complete
 
-Every exit criterion build plan Phase 11 lists, checked against what is actually
-in the repository:
+Every exit criterion build plan Phase 12 lists, checked against what is
+actually in the repository:
 
-| Criterion                               | Evidence                                                                                                                                              |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 11A extended input source metadata      | `ActionInput.source` / `dataset_id`, defaulting to `upload`; both proof Actions untouched **and pinned as upload-backed** in the contract freeze       |
-| 11B dataset reference resolution        | `app/services/input_resolution.py`; the runner resolves before executing; an Action importing the library fails `test_contract_freeze.py`              |
-| 11C explicit version provenance         | `RunManifest.library_inputs` records the resolved immutable version ID, the period and the source hash, **beside** what was requested — never instead  |
-| 11D preserve determinism                | `latest` / `period:` resolve to a fixed `DatasetVersion` before `_execute_action`; a later commit cannot change a recorded Run; verified live          |
-| 11E regression tests                    | `tests/test_library_inputs.py`, 58 tests; its docstring maps each of 11E's six items to its test                                                       |
-| **exit criterion, as one sentence**     | a stored dataset version reaches an Action as a DataFrame through the same pipeline an upload does, and no Action, Action module or Action test knows the library exists |
-| `docs/implementation-status.md` updated | this entry                                                                                                                                            |
+| Criterion                          | Evidence                                                                                                                                       |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| 12A dataset outputs vs artifacts   | `ArtifactMetadata` beside `OutputMetadata`, carrying none of a table's facts; `test_an_artifact_carries_no_row_or_column_counts`                |
+| 12B extend `ActionResult` safely   | `artifacts` appended with a default of `()`; both proof Actions untouched **and pinned as artifact-free** in the contract freeze                |
+| 12C artifact metadata              | exactly the six declared facts, no path anywhere, bytes held in `RunResult` and released with the Run (`weakref` test)                          |
+| 12D rich XLSX rendering            | `app/services/workbook.py`; every 12D item tested by reopening the rendered bytes; calculates nothing and writes no formula                     |
+| 12E multiple artifacts per Run     | one workbook per rep, in the Action's order; `artifact_ids()` / `artifact_filename()`; collisions numbered or refused, never silently renamed   |
+| 12F batch ZIP export               | `app/services/archive.py`; flat entry names checked twice; deterministic bytes; built in memory                                                 |
+| 12G artifact API and frontend      | two routes and `ArtifactDownloads.jsx`, entirely manifest-driven — no Action ID, artifact ID or name appears in any frontend file               |
+| **exit criterion, as one sentence** | a test Action produces three polished XLSX artifacts plus a ZIP bundle through generic infrastructure, verified in tests, over real HTTP and in a real browser |
+| `docs/implementation-status.md` updated | this entry                                                                                                                                 |
 
-### What a Phase 12 session inherits
+### What a Phase 13 session inherits
 
 - **A clean container is the normal starting condition.** `backend/.venv/` and
   `node_modules/` will not exist. `README.md` documents the four commands that
-  rebuild them; they were followed exactly this session and needed nothing else.
-- **The suite must report 1,665 passed**, zero failures, zero skips, zero
+  rebuild them; they were followed exactly this session and needed nothing
+  else.
+- **The suite must report 1,903 passed**, zero failures, zero skips, zero
   xfails.
-- **`ActionResult` is the thing Phase 12 changes, and it is a frozen
-  dataclass** in `app/actions/base.py` carrying `outputs`, `metrics` and
-  `rows_affected`. Build plan 12B says to extend it *safely*: every existing
-  Action returns only `outputs`, and every one of them must keep working
-  untouched. The Phase 11 precedent for this is `ActionInput.source` — a new
-  field whose default is what the old code already meant.
-- **`export.py` already generates XLSX in memory** with `xlsxwriter`, including
-  `check_fits_worksheet` and the multi-sheet workbook of 6F.4. Build plan 12D's
-  rich rendering belongs beside those rather than in a second workbook writer.
-- **Phase 12 will need a route, and that is the first one since Phase 6F.**
-  12G asks for artifact API support, so unlike Phases 9, 10 and 11 this one has
-  a reason to amend `FROZEN_ROUTES` — as an addition, with the amendment
-  recorded in `test_contract_freeze.py`'s docstring the way every previous one
-  is.
-- **A Run still writes nothing, and Phase 12 must not change that.** An
-  artifact is bytes generated per request from what the Run holds, exactly as
-  CSV and XLSX downloads are. `test_data_library.py` and
-  `test_library_inputs.py` both assert the working directory stays empty; keep
-  those passing.
-- **Nothing under `src/` has changed since Phase 6G.** Phases 7 through 11 are
-  all backend. 12G may be the first phase since to touch the frontend; if it
-  does, `npm run lint` and `npm run build` are the checks, and the headless
-  Chromium run recorded under **Tests** is the pattern for verifying it.
-- **Library-backed inputs are finished and should need nothing.** An Action
-  that reads stored data declares `source=ActionInputSource.LIBRARY` and a
-  `dataset_id`; the runner resolves the version. Phase 12 is about what comes
-  *out* of a Run and should not touch input resolution at all.
+- **Phase 13's Action is the first that uses both new foundations.** It
+  declares a library-backed input slot (`source=ActionInputSource.LIBRARY` plus
+  a `dataset_id`, Phase 11) and returns artifacts (Phase 12). Both halves
+  already work end to end and neither needs extending to be used.
+- **Render reports with `app.services.workbook`, and never with `xlsxwriter`
+  directly.** The contract freeze fails an Action that imports the engine. The
+  renderer takes `Sheet` and `Column` objects and **calculates nothing** — a
+  totals row's values are supplied by the caller, because the formatting layer
+  is forbidden from doing business arithmetic (build plan 12D). Phase 13's
+  calculation engine is where those figures come from.
+- **Name files with `artifact_ids()` and `artifact_filename()`.** Do not
+  hand-roll either. A hand-rolled ID is what failed the first live Run of this
+  phase; an ID is a URL token and a filename is a name, and the two helpers
+  keep the difference straight.
+- **A Run still writes nothing, and Phase 13 must not change that.** An
+  artifact is bytes an Action produced, held in memory and handed back.
+  `test_data_library.py`, `test_library_inputs.py` and `test_artifacts.py` all
+  assert the working directory stays empty; keep those passing.
+- **An Action must still declare at least one tabular output** (Known Issue
+  100). If Phase 13's report genuinely has no table worth returning, that is a
+  one-line invariant to revisit — with the reasoning recorded, not silently.
 - **A test that touches the library gets an empty one automatically.** The
   autouse `data_library` fixture in `conftest.py` redirects `DATA_LIBRARY` at a
   temporary directory. Do not construct a
   `LocalDataLibrary(config.LIBRARY_DIRECTORY)` in a test — that writes into the
   repository.
-- **Known Issues 94–98 are Phase 11's deliberate gaps.** None of them is
-  Phase 12's to close: 94 and 96 (no library-backed Action, no version picker)
-  belong to Phases 13 and 15A, and 98 (one version per slot) belongs to 13E.
+- **The frontend should need nothing.** `ArtifactDownloads.jsx` renders
+  whatever `manifest.artifacts` contains, so a report Action's files appear
+  with no `src/` change at all. That is the property to check rather than to
+  assume: if Phase 13 finds itself editing a frontend file, something has been
+  hardcoded that should not be.
+- **Known Issues 99–105 are Phase 12's deliberate gaps.** 99 (no registered
+  Action produces an artifact) is Phase 13's to close by existing. 100–102 are
+  scope boundaries with their reasoning recorded; 103 and 104 are environment
+  facts worth knowing before they cost time again; 105 (nothing opens a report
+  in real Excel) is worth doing once, on the target Mac, with a Phase 13
+  report.
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-11-pds3ad
-    Descends from:  3de2436  "phase 10 complete"
+    Current branch: claude/forgexl-phase-12-rr6hk2
+    Descends from:  2699cd2  "phase 11 complete"
 
 `origin/main` is at `8bfe29f` ("fixed problems prior to starting Phase 6I").
-Five commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7), `60817e8`
-(Phase 8), `63e69fb` (Phase 9) and `3de2436` (Phase 10) — and all five are
-ancestors of this branch, so nothing is skipped or duplicated. Known Issue 75
-stands, one commit larger: a session inspecting `main` alone would miss 6I and
-Phases 7 through 10. Merging is the user's to do.
+Six commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7), `60817e8`
+(Phase 8), `63e69fb` (Phase 9), `3de2436` (Phase 10) and `2699cd2` (Phase 11) —
+and all six are ancestors of this branch, so nothing is skipped or duplicated.
+Known Issue 75 stands, one commit larger again: a session inspecting `main`
+alone would miss 6I and Phases 7 through 11. Merging is the user's to do.
 
-Phase 11's diff is 14 files: two new (`backend/app/services/input_resolution.py`
-and `backend/tests/test_library_inputs.py`) and twelve modified, with no
-deletion and no rename. Confirmed against `git show --name-status HEAD` in both
-directions — every file the report lists is in the commit, and every file in
-the commit is in the report. `package.json`, `package-lock.json` and
-`backend/requirements.txt` are untouched, and **nothing under `src/` changed**.
+Phase 12's diff is 20 files: seven new (`backend/app/models/artifact.py`,
+`backend/app/services/workbook.py`, `backend/app/services/archive.py`,
+`backend/tests/test_artifacts.py`, `backend/tests/test_workbook.py`,
+`backend/tests/test_artifact_download.py` and
+`src/components/workbench/ArtifactDownloads.jsx`) and thirteen modified, with
+no deletion and no rename. `package.json`, `package-lock.json` and
+`backend/requirements.txt` are untouched — **Phase 12 added no dependency**;
+`zipfile` and `unicodedata` are standard library, and `xlsxwriter`, `openpyxl`
+and `polars` were already pinned.
+
+**`src/` changed for the first time since Phase 6G**: one new component, one
+import and one element in `ActionRunner.jsx`, two URL builders in `lib/api.js`
+and one label helper in `lib/formatters.js`.
 
 ### Before writing any code, verify the repository is intact
 
@@ -8914,17 +9614,16 @@ another.
     ls backend/app/models backend/app/services backend/app/api   # not src/app/
     ls backend/app/*.py backend/app/*/*.py backend/tests/*.py | grep -- -   # hyphens are not legal module names
     md5sum backend/tests/*.py backend/app/*.py backend/app/*/*.py | awk '{print $1}' | sort | uniq -d
+    npx pyright
     npm run build
 
-The suite must report **1665 passed, zero xfails**. Every other line must
-produce no output, and the build must succeed.
+The suite must report **1903 passed, zero xfails**, and pyright **0 errors**.
+Every other line must produce no output, and the build must succeed.
 
 **And one check that belongs at the end of your phase, not the start.** Phase 9
 found the same file rename recorded as done by three consecutive phases and
-present in none of their commits (Known Issue 85). Phase 10 ran the fix that
-issue prescribes and it worked — the rename is in `63e69fb` — and Phase 11 ran
-it twice: on Phase 10's commit before starting, and on its own before
-finalising this entry. Keep doing it:
+present in none of their commits (Known Issue 85). Phases 10, 11 and 12 all ran
+the fix that issue prescribes and it worked every time. Keep doing it:
 
     # AFTER committing, before reporting the phase complete:
     git show --name-status HEAD
@@ -8937,5 +9636,5 @@ in the report. Read the list both ways.
 
 If the environment is fresh — no `backend/.venv/`, no `node_modules/` — rebuild
 it with the four commands in `README.md`. That path was exercised end to end in
-Phase 8.1 and again in Phases 9, 10 and 11, and needs nothing beyond what is
+Phase 8.1 and again in Phases 9, 10, 11 and 12, and needs nothing beyond what is
 written there.

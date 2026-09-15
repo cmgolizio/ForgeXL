@@ -85,6 +85,37 @@ describes none. The monthly reporting workflow is build plan 15A.
 `FROZEN_ROUTES` is byte-identical again: a library-backed input is a field in
 the existing ``POST /api/runs`` form, not a route of its own.
 
+*Phase 12* makes three amendments, and every one of them is an addition:
+
+* :data:`FROZEN_ROUTES` — two routes for artifacts, one to download a single
+  file a Run produced and one to download every file as a ZIP (build plan 12F,
+  12G). The first addition to this inventory since Phase 6F, and for the same
+  kind of reason: a Run can now produce something no existing route could
+  return. Every route, method and shape already listed is untouched.
+* :data:`FROZEN_SCHEMA_FIELDS` — ``RunManifest`` gains ``artifacts``, and
+  :class:`ArtifactMetadata` is pinned as a new model. `artifacts` defaults to
+  empty, so a manifest for a Run that produced only tables — every Run either
+  registered Action can produce — is byte-identical to what it was, and
+  `MANIFEST_SCHEMA_VERSION` stays at 2.
+* :data:`FROZEN_ERRORS` — one new code, ``UNKNOWN_ARTIFACT``, for a Run that
+  produced no artifact under the requested ID. Reported separately from
+  ``UNKNOWN_OUTPUT`` because build plan 12A keeps result tables and artifacts
+  apart, and from ``MISSING_ARTIFACT`` because "never produced" and "no longer
+  held" are different answers. Nothing already listed moved.
+
+`FROZEN_ACTIONS` is byte-identical, and :func:`test_no_registered_action_produces_artifacts`
+pins the reason: build plan 12B requires that artifacts stay optional, and
+neither proof Action was changed to produce one.
+
+:data:`FORBIDDEN_ACTION_IMPORTS` is byte-identical too, and that is a decision
+rather than an oversight. ``xlsxwriter`` stays forbidden, so an Action still
+cannot drive the spreadsheet engine itself; ``app.services.workbook`` is
+deliberately **not** added, because it is the sanctioned way for an Action to
+describe a report and have it rendered — a pure in-memory function that opens
+no file and runs no pipeline stage, which is what every entry on that list
+actually guards against. :func:`test_an_action_may_use_the_report_renderer`
+states that as an assertion so it cannot be read as a gap.
+
 Everything else in this module — the metric keys, the preview limits, the
 determinism checks, the Action inventory's identities and outputs — is
 untouched across every one of those amendments and still passing. Each amended entry says
@@ -112,6 +143,7 @@ from app.actions.registry import ActionRegistry, DuplicateActionIdError
 from app.errors import (
     ActionExecutionError,
     AmbiguousWorkbookError,
+    UnknownArtifactError,
     DataLibraryError,
     DuplicateColumnsError,
     EmptyDatasetError,
@@ -143,6 +175,8 @@ from app.models.schemas import (
     ActionListResponse,
     ActionOutput,
     ActionReference,
+    ArtifactMetadata,
+    ArtifactType,
     ColumnKind,
     ColumnSchema,
     InputMetadata,
@@ -237,12 +271,15 @@ FROZEN_ACTION_IDS: tuple[str, ...] = tuple(
 #: methods it answers, exactly as the published OpenAPI schema reports them.
 #: Phase 6G changes the *browser-side* prefix, not these.
 #:
-#: **Added to once, in Phase 6F**, for the whole-Run workbook download build
+#: **Added to twice.** In Phase 6F, for the whole-Run workbook download build
 #: plan 6F.4 requires: an Action returning several tables has to be exportable
 #: as the one file a user expects, and a per-output route can only ever produce
-#: one worksheet. Every route already listed is untouched — this is an
-#: addition to the published surface, not a change to any part of it, which is
-#: the only kind of amendment this inventory should ever take.
+#: one worksheet. In Phase 12, for the two artifact downloads build plan 12F
+#: and 12G require: a Run can now produce finished files, and no route that
+#: renders a result table could return one. Every route already listed is
+#: untouched both times — these are additions to the published surface, not
+#: changes to any part of it, which is the only kind of amendment this
+#: inventory should ever take.
 FROZEN_ROUTES: dict[str, list[str]] = {
     "/health": ["get"],
     "/api/actions": ["get"],
@@ -252,6 +289,9 @@ FROZEN_ROUTES: dict[str, list[str]] = {
     "/api/runs/{run_id}/outputs/{output_id}/download/csv": ["get"],
     "/api/runs/{run_id}/outputs/{output_id}/download/xlsx": ["get"],
     "/api/runs/{run_id}/download/xlsx": ["get"],
+    # Added in Phase 12.
+    "/api/runs/{run_id}/artifacts/{artifact_id}/download": ["get"],
+    "/api/runs/{run_id}/artifacts/download/zip": ["get"],
 }
 
 #: Every error the backend reports, with the status the API boundary returns.
@@ -264,6 +304,12 @@ FROZEN_ERRORS: tuple[tuple[type[WorkbenchError], str, int], ...] = (
     (UnknownRunError, "UNKNOWN_RUN", 404),
     (UnknownOutputError, "UNKNOWN_OUTPUT", 404),
     (MissingArtifactError, "MISSING_ARTIFACT", 404),
+    # Added in Phase 12. A Run that produced no artifact under the requested
+    # ID is not the same as a Run whose result has been released, and neither
+    # is the same as an unknown *output*: build plan 12A keeps result tables
+    # and finished files apart, so their 404s stay apart too. Nothing already
+    # listed above moved.
+    (UnknownArtifactError, "UNKNOWN_ARTIFACT", 404),
     (UploadTooLargeError, "FILE_TOO_LARGE", 413),
     (InputValidationError, "INVALID_INPUT", 422),
     (MissingInputError, "MISSING_INPUT", 422),
@@ -361,6 +407,19 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "columns_removed",
         ),
     ),
+    (
+        # Added in Phase 12. Build plan 12C names exactly these six facts
+        # about an artifact and no others — and no path among them.
+        ArtifactMetadata,
+        (
+            "id",
+            "label",
+            "filename",
+            "media_type",
+            "size_bytes",
+            "artifact_type",
+        ),
+    ),
     (RunError, ("code", "message", "details")),
     (
         # Amended in Phase 6E: build plan 6E.5 requires an assembled audit
@@ -374,6 +433,13 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
         # different facts. It defaults to empty, so a manifest for an
         # upload-only Run — every Run either registered Action can produce —
         # is what it was, and `MANIFEST_SCHEMA_VERSION` stays at 2.
+        #
+        # Amended again in Phase 12: build plan 12A requires a Run to be able
+        # to report finished files beside its result tables. `artifacts` sits
+        # beside `outputs` rather than inside it, because a workbook carrying
+        # layout and formatting is not a DataFrame. It defaults to empty for
+        # the same reason `library_inputs` does, and the schema version stays
+        # at 2 for the same reason too.
         RunManifest,
         (
             "schema_version",
@@ -388,6 +454,7 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "library_inputs",
             "validation",
             "outputs",
+            "artifacts",
             "metrics",
             "error",
             "audit",
@@ -850,6 +917,79 @@ def test_an_action_executes_with_no_filesystem_available(
 
     assert set(result.outputs) == {output["id"] for output in entry["outputs"]}
     assert list(quarantine.iterdir()) == []
+
+
+def test_no_registered_action_produces_artifacts() -> None:
+    """Build plan 12B: an Action is never required to produce a file.
+
+    The assertion form of "do not require every Action to generate artifacts".
+    Phase 12 widened the result contract; neither proof Action was changed,
+    and a later phase that quietly converted one — making a report out of a
+    deduplicator — would fail here rather than pass unnoticed.
+    """
+    for entry in FROZEN_ACTIONS:
+        action = _action(entry["id"])
+        (slot,) = action.inputs
+        result = action.run({slot.id: _frame_for(action)})
+        assert result.artifacts == (), (
+            f"{entry['id']} produces artifacts. Build plan 12B keeps them "
+            "optional, and neither proof Action was asked to produce one."
+        )
+
+
+def test_an_action_may_use_the_report_renderer() -> None:
+    """The one service an Action is meant to reach for (build plan 12D).
+
+    `FORBIDDEN_ACTION_IMPORTS` exists to keep an Action away from the
+    filesystem and away from pipeline mechanics. ``app.services.workbook`` is
+    neither: it is a pure function from already-calculated report data to
+    bytes, and it is the sanctioned alternative to an Action importing
+    ``xlsxwriter``, which stays forbidden.
+
+    Asserted rather than left implicit so its absence from the forbidden list
+    reads as a decision. The rest of the list is pinned here too, so adding to
+    it — or quietly removing something from it — is a deliberate edit.
+    """
+    assert "app.services.workbook" not in FORBIDDEN_ACTION_IMPORTS
+    assert "app.models.artifact" not in FORBIDDEN_ACTION_IMPORTS
+    assert "xlsxwriter" in FORBIDDEN_ACTION_IMPORTS
+    assert "app.services.export" in FORBIDDEN_ACTION_IMPORTS
+    assert FORBIDDEN_ACTION_IMPORTS == frozenset(
+        {
+            "os",
+            "io",
+            "pathlib",
+            "shutil",
+            "tempfile",
+            "glob",
+            "fsspec",
+            "openpyxl",
+            "fastexcel",
+            "xlsxwriter",
+            "app.services",
+            "app.services.storage",
+            "app.services.export",
+            "app.services.parser",
+            "app.services.preview",
+            "app.services.runner",
+            "app.services.data_library",
+            "app.services.ingestion",
+            "app.services.input_resolution",
+            "app.models.library",
+            "app.config",
+        }
+    )
+
+
+def test_the_artifact_type_values_are_frozen() -> None:
+    """The artifact kinds a client may branch on (build plan 12C)."""
+    assert [kind.value for kind in ArtifactType] == [
+        "workbook",
+        "archive",
+        "document",
+        "text",
+        "other",
+    ]
 
 
 def test_the_action_run_signature_takes_named_frames() -> None:

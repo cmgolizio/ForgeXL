@@ -1,9 +1,10 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 11 — the third phase of the post-POC expansion.
-Phases 0–8 built and validated the proof of concept; Phase 9 added the
-persistent Data Library described in §5a, Phase 10 the monthly ingestion layer
-in §5b, and Phase 11 the library-backed Action inputs in §5c.
+**Status:** current as of Phase 12 — the fourth phase of the post-POC
+expansion. Phases 0–8 built and validated the proof of concept; Phase 9 added
+the persistent Data Library described in §5a, Phase 10 the monthly ingestion
+layer in §5b, Phase 11 the library-backed Action inputs in §5c, and Phase 12
+the rich artifact output framework in §5d.
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -18,6 +19,11 @@ business data (sales history, sample history, account ownership snapshots) that
 outlives a Run and is deliberately not part of a Run at all. §5a describes it.
 Since Phase 11 an Action input slot may be filled from it — §5c — and that is a
 **read**: a Run still writes nothing, to the library or anywhere else.
+
+Since Phase 12 an Action can also produce **artifacts**: finished files such as
+a formatted report workbook, beside the result tables it has always produced.
+§5d describes them. They live in the Run's memory and are downloaded from it;
+nothing about them reaches the filesystem either.
 
 ---
 
@@ -82,6 +88,8 @@ from a client component is a build error, and none of its variables is a
 | Results                  | `backend/app/services/results.py`          | Measuring a result table: schema, row counts, columns added/dropped.              |
 | Preview                  | `backend/app/services/preview.py`          | Paginated slices of a retained result frame.                                      |
 | Export                   | `backend/app/services/export.py`           | CSV/XLSX bytes from a result frame, generated per request.                        |
+| Report rendering         | `backend/app/services/workbook.py`         | Already-calculated report data → a formatted workbook. Calculates nothing. §5d.   |
+| Archiving                | `backend/app/services/archive.py`          | A Run's artifacts → one ZIP, built in memory with flat entry names. §5d.          |
 | Action contract          | `backend/app/actions/base.py`              | What an Action is: metadata plus `run(inputs)`.                                   |
 | Action registry          | `backend/app/actions/registry.py`          | Lookup by ID. No `if/elif` chain, no plugin loader, nothing loaded from disk.     |
 | Actions                  | `backend/app/actions/<action>.py`          | The transformation, and nothing else.                                             |
@@ -105,6 +113,7 @@ named DataFrame(s)          {slot_id: pl.DataFrame}
 Action.run(inputs)
     ↓
 result DataFrame(s)         {output_id: pl.DataFrame}
+artifacts (since Phase 12)  (Artifact, ...)   — finished files, §5d
 ```
 
 An Action receives a mapping of frames keyed by its own declared input slot
@@ -119,6 +128,11 @@ which of them filled a slot.
 
 A Run may produce one primary result table and any number of secondary ones. An
 Action that needs only one declares only one.
+
+Since Phase 12 it may also return artifacts. That half of the boundary is
+optional in the strongest sense — the field defaults to empty, so an Action
+written before the phase means exactly what it meant then, and neither
+registered Action produces one.
 
 ---
 
@@ -439,6 +453,120 @@ datasets and versions.
 
 ---
 
+## 5d. Rich artifacts (Phase 12)
+
+ForgeXL has always had one kind of result: a table. Phase 12 adds a second,
+because a finished report is not a DataFrame.
+
+```text
+tabular output    a Polars frame. Previewed, paged, exported as CSV or XLSX.
+artifact          finished bytes. Downloaded as they are, under their own name.
+```
+
+Build plan 12A: "Do not pretend a finished workbook containing layout,
+formatting, multiple report sections, and presentation logic is merely another
+DataFrame." Modelling one as an output would have given it a column schema it
+does not have, a preview endpoint that could not render it, and a CSV export
+that would throw its formatting away.
+
+### What an artifact is
+
+`app.models.artifact.Artifact` is a frozen dataclass: an ID, a label, a
+filename, a media type, a coarse type and the bytes. `ArtifactMetadata` is the
+same thing without the bytes, and it is what the manifest carries — the same
+split `OutputMetadata` already makes for a table. **No field holds a path**,
+because there is none: an artifact lives in the Run's memory for as long as the
+Run Store keeps the Run, travelling inside `RunResult` beside the result
+frames, so forgetting the Run releases both.
+
+### Where it comes from
+
+```text
+Action.run(inputs)
+    ↓  ActionResult(outputs=..., artifacts=(...))
+runner._collect_artifacts
+    ↓  metadata onto the Run, bytes into RunResult
+GET /api/runs/{run}/artifacts/{artifact}/download
+GET /api/runs/{run}/artifacts/download/zip
+```
+
+An Action renders its workbooks through `app.services.workbook`, which owns the
+spreadsheet engine — multiple worksheets, styled headers, currency,
+percentage, integer, decimal and date formats, measured column widths, row
+heights, frozen panes, filters, Excel tables, conditional formatting and a
+totals row. It is the sanctioned alternative to an Action importing
+`xlsxwriter`, which the contract freeze forbids.
+
+Two rules bound it, and both are in the module's own docstring:
+
+- **It calculates nothing.** A sheet is handed a frame and, if it wants one, a
+  totals row whose values the caller has already worked out. The layer chooses
+  fonts, widths and number formats, never a number (build plan 12D).
+- **It writes no formula.** A totals row holds literal values, not
+  `=SUBTOTAL(...)`. A formula would mean the file showed one number and stored
+  another, and a reader that does not evaluate formulas — Polars, openpyxl, a
+  preview pane — would show a third thing.
+
+It is not a second workbook writer: the workbook options, the capacity check of
+build plan 7B and the worksheet-naming rules of 6F.5 all come from
+`app.services.export`, so there is one set of rules rather than two.
+
+### Names, and why two kinds
+
+An Action producing one file per sales rep derives both an ID and a filename
+from data, and the two are treated differently on purpose:
+
+| | derived by | on a collision |
+| --- | --- | --- |
+| artifact **ID** — an internal handle in a URL | `artifact_ids()` | numbered apart |
+| artifact **filename** — what the user receives | `artifact_filename()` | the Run fails |
+
+A filename is what the user asked for, so renaming one behind their back would
+hand them a file called something they did not choose (build plan §3.3). An ID
+is a handle nobody reads, so two rows reducing to the same token get distinct
+ones — the same split `worksheet_names()` already makes.
+
+An ID folds accents to ASCII because it is a token; a filename keeps them
+exactly, because it is a name. `Château Réal` becomes the ID `chateau-real` and
+the file `Château Réal - September 2026.xlsx`, and the download header carries
+that name through RFC 6266's `filename*` parameter.
+
+### The batch archive
+
+`app.services.archive` bundles a Run's artifacts into one ZIP, in memory.
+Entry names are re-checked against the flat-filename rule on the way in — the
+model already refused a separator, a `..` or a control character when the
+artifact was built, and the archive writer does not rely on someone else having
+checked (build plan 12F). Entries are stamped with the Run's own completion
+time rather than with "now", so re-downloading a bundle returns the same bytes.
+
+### What did not change
+
+- **The Action contract.** `ActionResult.artifacts` defaults to empty. Every
+  Action written before Phase 12 is valid and unchanged, and the contract
+  freeze asserts that neither registered Action produces an artifact.
+- **`MANIFEST_SCHEMA_VERSION` stays at 2.** `RunManifest.artifacts` defaults to
+  empty, so a manifest written before this phase still validates.
+- **The Run pipeline writes nothing.** An artifact is bytes an Action produced,
+  held in memory and handed back; no file is created at any point.
+- **The tabular side.** Preview, per-output export and the whole-Run workbook
+  are untouched, and an artifact-producing Run uses all of them normally.
+
+### Not built
+
+No registered Action produces an artifact, so the frontend's "Generated Files"
+section renders for no Action that ships today. That is deliberate: build plan
+12B keeps artifacts optional and 12G asks only for generic support, which is
+what the section is — every line of it comes from `manifest.artifacts`. The
+first Action that produces one is build plan Phase 13's monthly report.
+
+Artifacts are also not persisted. They live and die with their Run, exactly as
+result frames do. The Data Library stores source and history data; build plan
+12C is explicit that it "does not automatically become a permanent report
+archive".
+
+---
+
 ## 6. The extension point for future persistence
 
 The DataFrame-first Action contract is deliberately independent of where
@@ -495,6 +623,12 @@ claiming, now demonstrated rather than asserted.
   a bare month is reported rather than matched to a near neighbour, the same
   way an unrecognised Action ID is. A reference also never names the dataset —
   the Action declares that — so no client string chooses what gets opened.
+- **An artifact filename is a flat name, never a path** (build plan 12F,
+  added in Phase 12). Separators, `..`, a leading dot, control characters,
+  reserved Windows device names and trailing dots or spaces are all refused
+  when the artifact is constructed, and checked again when it is written into
+  the ZIP. A filename reaches a `Content-Disposition` header and a ZIP entry
+  name, so it cannot be allowed to name a location in either.
 - **A reporting month is read from data, never from a filename** (build plan
   10B). An uploaded file's name is metadata here too: it supplies the extension
   that chooses a parser and is recorded on the version, and it decides nothing
@@ -585,6 +719,13 @@ way, and it must not import `app.services.data_library`: resolving a version is
 the runner's job (§5c). Note that the browser has no version picker yet, so
 such an Action is driven in-process or by naming the version in the request
 form until build plan 15A builds one.
+
+An Action that should produce finished files as well as tables returns them in
+`ActionResult.artifacts`, rendering each with `app.services.workbook` and
+naming each with `artifact_ids()` and `artifact_filename()` (§5d). Nothing else
+changes: no route, no service and no frontend file, because the artifact list,
+the per-file download links and the "Download All" bundle are all built from
+the Run manifest.
 
 ---
 

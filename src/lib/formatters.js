@@ -130,3 +130,23 @@ export function formatExportLabel(format) {
 export function isBlankCell(value) {
   return value === null || value === undefined;
 }
+
+/**
+ * Name an artifact kind the way a person would, e.g. `workbook` → `Excel`.
+ *
+ * The kinds come from the backend's own artifact metadata (build plan 12C).
+ * A kind this UI has never seen still gets a readable label rather than being
+ * dropped, the same rule the export formats and the Action metrics follow.
+ */
+const ARTIFACT_TYPE_LABELS = {
+  workbook: "Excel",
+  archive: "ZIP",
+  document: "PDF",
+  text: "Text",
+  other: "File",
+};
+
+export function formatArtifactTypeLabel(artifactType) {
+  const key = String(artifactType ?? "").toLowerCase();
+  return ARTIFACT_TYPE_LABELS[key] ?? formatMetricLabel(key) ?? "File";
+}

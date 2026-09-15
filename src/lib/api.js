@@ -149,6 +149,33 @@ export function runWorkbookUrl({ runId }) {
   return `${API_BASE_PATH}/api/runs/${encodeURIComponent(runId)}/download/xlsx`;
 }
 
+/**
+ * The address one artifact is downloaded from (build plan 12G).
+ *
+ * An artifact is a finished file the Run produced — a formatted report
+ * workbook, say — rather than a result table rendered on request. The backend
+ * names it through `Content-Disposition`, under the Action's own filename, so
+ * a report arrives called what its Action called it.
+ */
+export function artifactDownloadUrl({ runId, artifactId }) {
+  return (
+    `${API_BASE_PATH}/api/runs/${encodeURIComponent(runId)}` +
+    `/artifacts/${encodeURIComponent(artifactId)}/download`
+  );
+}
+
+/**
+ * The address a Run's complete artifact bundle is downloaded from (12F).
+ *
+ * Every artifact of the Run as one ZIP, one flat entry each. Only meaningful
+ * for a Run that produced more than one; the caller decides when to offer it.
+ */
+export function runArtifactsZipUrl({ runId }) {
+  return `${API_BASE_PATH}/api/runs/${encodeURIComponent(
+    runId,
+  )}/artifacts/download/zip`;
+}
+
 /** Report whether the backend answers `GET /health`. */
 export async function fetchHealth({ signal } = {}) {
   const payload = await request("/health", { signal });

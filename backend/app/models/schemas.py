@@ -12,6 +12,19 @@ where its data comes from (:class:`ActionInputSource`), and a Run records the
 exact dataset versions it read (:class:`LibraryInputMetadata`). Both are
 additions with defaults, so every Action and every manifest that existed
 before Phase 11 means exactly what it meant then (build plan 11A).
+
+Phase 12 adds the vocabulary for *artifacts* — finished files a Run produces,
+such as a formatted report workbook or a ZIP bundle (build plan 12A).
+:class:`ArtifactMetadata` describes one without carrying its bytes and without
+naming a filesystem path, exactly as :class:`OutputMetadata` describes a result
+table without carrying its rows. An artifact is deliberately **not** modelled
+as another :class:`OutputMetadata`: a workbook carrying layout, formatting and
+several report sections is not a DataFrame, and pretending otherwise would put
+a preview endpoint and a column schema on something that has neither.
+
+Like Phase 11's additions, every Phase 12 field defaults to what the code
+already meant — no artifacts — so :data:`MANIFEST_SCHEMA_VERSION` stays at 2
+and a manifest written before this phase still validates.
 """
 
 from __future__ import annotations
@@ -257,6 +270,33 @@ class ColumnKind(str, Enum):
     OTHER = "other"
 
 
+class ArtifactType(str, Enum):
+    """What kind of file an artifact is (build plan 12C).
+
+    Deliberately coarse and closed, for the same reason :class:`ColumnKind`
+    is: a client needs to know which icon and which wording to use, not which
+    revision of a file format it holds. The precise type travels beside this
+    as the artifact's media type, which is what a browser reads.
+
+    :attr:`OTHER` keeps the set complete: an artifact kind nobody has thought
+    of yet still describes itself rather than failing validation.
+    """
+
+    #: A spreadsheet workbook — in this application always XLSX.
+    WORKBOOK = "workbook"
+
+    #: A ZIP archive, such as the batch bundle of build plan 12F.
+    ARCHIVE = "archive"
+
+    #: A paginated document, e.g. the PDF report build plan 12A anticipates.
+    DOCUMENT = "document"
+
+    #: Plain text or delimited text, e.g. a generated CSV or a log.
+    TEXT = "text"
+
+    OTHER = "other"
+
+
 class ActionReference(BaseModel):
     """Identity of the Action a Run executed, captured at execution time.
 
@@ -424,6 +464,48 @@ class OutputMetadata(BaseModel):
     )
 
 
+class ArtifactMetadata(BaseModel):
+    """One finished file a Run produced, described without its bytes.
+
+    Build plan 12C names exactly these six facts, and this model carries those
+    and nothing else. In particular **there is no path**. An artifact lives in
+    the Run's memory, not in a directory, and is fetched by naming the Run and
+    the artifact — the same way a result table is (build plan 12C, 6F.8).
+
+    `filename` is the name the file is *offered* under when it is downloaded,
+    not a location: it is a single flat name, validated by
+    :func:`app.models.artifact.check_artifact_filename`, so it can never carry
+    a directory component into a ``Content-Disposition`` header or into a ZIP
+    entry (build plan 12F).
+
+    `size_bytes` is measured from the bytes themselves rather than declared by
+    whatever produced them, so it can never disagree with what downloads.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(
+        description=(
+            "Artifact ID, unique within its Run. Also the value the download "
+            "route takes."
+        )
+    )
+    label: str = Field(description="Human-readable name shown in the UI.")
+    filename: str = Field(
+        description=(
+            "The flat filename this artifact is downloaded as, e.g. "
+            "'Beth Comeaux - September 2026.xlsx'. Never a path."
+        )
+    )
+    media_type: str = Field(
+        description="IANA media type, e.g. 'application/zip'."
+    )
+    size_bytes: int = Field(description="Bytes the artifact actually holds.")
+    artifact_type: ArtifactType = Field(
+        description="Coarse category for presentation; see ArtifactType."
+    )
+
+
 class RunError(BaseModel):
     """Why a Run failed, in the same shape as an API error (section 22).
 
@@ -484,6 +566,23 @@ class AuditResult(BaseModel):
     column_count: int
 
 
+class AuditArtifact(BaseModel):
+    """One file the Run produced, as the audit reports it.
+
+    Beside :class:`AuditResult` rather than inside it, because a result table
+    and a finished file are different things (build plan 12A). Listing them
+    here keeps the audit honest: without it, the audit of a Run whose whole
+    purpose was to produce twelve workbooks would read as though it had
+    produced only the tables behind them.
+    """
+
+    artifact_id: str
+    label: str
+    filename: str
+    artifact_type: ArtifactType
+    size_bytes: int
+
+
 class RunAudit(BaseModel):
     """What happened during one Run (build plan 6E.5).
 
@@ -528,6 +627,13 @@ class RunAudit(BaseModel):
     primary_result_id: str | None = Field(
         default=None, description="Output ID of the primary result table."
     )
+    artifacts: tuple[AuditArtifact, ...] = Field(
+        default=(),
+        description=(
+            "The files this Run produced, empty for a Run that produced only "
+            "result tables (build plan 12B: artifacts are never required)."
+        ),
+    )
     warnings: tuple[ValidationIssue, ...] = ()
     errors: tuple[ValidationIssue, ...] = ()
     metrics: dict[str, Any] = Field(
@@ -564,6 +670,15 @@ class RunManifest(BaseModel):
     )
     validation: ValidationSummary
     outputs: tuple[OutputMetadata, ...] = ()
+    artifacts: tuple[ArtifactMetadata, ...] = Field(
+        default=(),
+        description=(
+            "Finished files this Run produced, beside its result tables "
+            "(build plan 12A-12C). Empty for a Run that produced only tables, "
+            "which is every Run either registered Action can produce — which "
+            "is why adding it did not change the manifest schema version."
+        ),
+    )
     metrics: dict[str, Any] = Field(
         default_factory=dict,
         description="Action-reported counts, e.g. {'duplicates_removed': 238}.",
