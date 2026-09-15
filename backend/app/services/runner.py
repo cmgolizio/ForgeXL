@@ -1,7 +1,8 @@
-"""The generic Run pipeline (build plan 3.7-3.9, 6B-6E and section 24).
+"""The generic Run pipeline (build plan 3.7-3.9, 6B-6E, Phase 11, section 24).
 
-    resolve Action -> record Run -> read input -> parse input -> validate input
-    -> execute Action -> keep the result frames -> finalize the Run
+    resolve Action -> record Run -> read input -> parse input
+    -> resolve library input -> validate input -> execute Action
+    -> keep the result frames -> finalize the Run
 
 Everything above belongs to the runner. An Action only transforms dataframes,
 so adding an Action never means reproducing any of this machinery.
@@ -10,17 +11,27 @@ The runner is deliberately independent of the web framework: it takes
 :class:`PendingUpload` objects carrying a filename and a readable stream, so
 the same pipeline is driven identically by the API and by tests.
 
-**The pipeline touches no filesystem.** Phase 6C moved uploads into memory;
-Phase 6D moved results there too, so the whole of build plan 6D's processing
-boundary now holds:
+**The pipeline writes nothing.** Phase 6C moved uploads into memory; Phase 6D
+moved results there too, so the whole of build plan 6D's processing boundary
+holds:
 
-    named uploaded inputs -> parser -> named DataFrame(s)
+    named uploaded inputs        -> parser
+    named library dataset refs   -> input resolution
+        -> named DataFrame(s)
         -> Action Registry -> Action -> result DataFrame(s)
 
 A Run needs no ``inputs/``, ``working/`` or ``exports/`` directory: nothing is
 saved and reopened, and no intermediary spreadsheet is written merely to be
 read back (build plan 6D.7). Exports are generated from the retained frames at
 download time by :mod:`app.services.export`.
+
+Since Phase 11 an input slot may instead be filled from the persistent Data
+Library. :mod:`app.services.input_resolution` turns the reference the client
+submitted into one exact immutable version and its rows *before* the Action
+runs, so the Action still receives ``{slot_id: DataFrame}`` and never learns
+that a library exists (build plan 11B). The version's identity is recorded on
+the Run, which is what makes the Run reproducible later (11C, 11D). That is a
+*read*: the Run pipeline still writes nothing, to the library or anywhere else.
 
 Run state is owned by :mod:`app.services.run_store` (build plan 6B). The runner
 records a Run when it starts and hands the store a new state at every
@@ -66,16 +77,19 @@ from app.errors import (
 )
 from app.models.run import Run, RunResult, now
 from app.models.schemas import (
+    ActionInputSource,
     ActionReference,
     InputMetadata,
+    LibraryInputMetadata,
     OutputMetadata,
     RunManifest,
     RunStatus,
     ValidationIssue,
     ValidationSummary,
 )
-from app.services import parser, results, run_store, storage
+from app.services import input_resolution, parser, results, run_store, storage
 from app.services.export import EXPORT_FORMATS
+from app.services.input_resolution import ResolvedLibraryInput
 from app.services.storage import BinarySource, LoadedUpload
 
 logger = logging.getLogger(__name__)
@@ -117,13 +131,21 @@ class RunOutcome:
 
 
 def execute_run(
-    action: Action, uploads: Mapping[str, PendingUpload]
+    action: Action,
+    uploads: Mapping[str, PendingUpload],
+    dataset_references: Mapping[str, str] | None = None,
 ) -> RunOutcome:
-    """Execute `action` against `uploads` and return the finalized Run.
+    """Execute `action` against its inputs and return the finalized Run.
 
     Args:
         action: The Action to run, already resolved from the registry.
         uploads: Submitted files keyed by input slot ID.
+        dataset_references: Data Library references keyed by input slot ID,
+            for the Action's library-backed slots (build plan 11A). Each is
+            text — ``latest``, ``period:YYYY-MM`` or ``version:<version id>``.
+            Omitted entirely by an Action with no such slot, which is why the
+            parameter has a default: a caller written before Phase 11 keeps
+            working unchanged.
 
     Raises:
         UploadTooLargeError: an upload exceeded the configured limit.
@@ -137,10 +159,11 @@ def execute_run(
     action_reference = ActionReference(
         id=action.id, version=action.version, name=action.name
     )
+    references = dict(dataset_references or {})
 
     # Computed once, before anything can fail, so a Run that is rejected still
     # reports a submitted-but-unused slot.
-    warnings = tuple(_unexpected_slot_warnings(action, uploads))
+    warnings = tuple(_unexpected_slot_warnings(action, uploads, references))
 
     run = run_store.create_run(
         Run.create(action_reference, created_at=created_at, warnings=warnings)
@@ -148,7 +171,8 @@ def execute_run(
     try:
         loaded, input_issues = _read_and_check_slots(action, uploads)
         parsed, parse_issues = _parse_inputs(action, loaded)
-        issues = [*input_issues, *parse_issues]
+        resolved, library_issues = _resolve_library_slots(action, references)
+        issues = [*input_issues, *parse_issues, *library_issues]
         warnings += tuple(
             ValidationIssue(
                 code="MIXED_COLUMN_TYPES",
@@ -165,23 +189,34 @@ def execute_run(
         )
 
         input_records = tuple(_input_metadata(loaded, parsed))
+        library_records = tuple(item.as_metadata() for item in resolved.values())
         # The uploaded bytes have served their purpose: everything downstream
         # works from the dataframes and this metadata. Releasing them here
         # keeps a Run from holding a second copy of every input for the rest
         # of its life.
         loaded.clear()
 
-        if not issues:
-            issues.extend(_validate_datasets(action, parsed))
-            issues.extend(action.validate(_frames_by_slot(parsed)))
+        # One mapping of named frames, whichever source filled each slot. From
+        # here down nothing distinguishes an uploaded input from a stored one,
+        # which is what build plan 11B means by an Action still receiving
+        # DataFrames.
+        frames = _frames_by_slot(parsed, resolved)
 
-        run = run_store.update_run(run.with_changes(inputs=input_records))
+        if not issues:
+            issues.extend(_validate_datasets(action, frames))
+            issues.extend(action.validate(frames))
+
+        run = run_store.update_run(
+            run.with_changes(inputs=input_records, library_inputs=library_records)
+        )
 
         if issues:
             raise RunValidationError(issues)
 
-        result = _execute_action(action, _frames_by_slot(parsed))
-        outputs, tables = _collect_outputs(action, result, input_records)
+        result = _execute_action(action, frames)
+        outputs, tables = _collect_outputs(
+            action, result, input_records, library_records
+        )
 
         completed_at = now()
         run = run_store.update_run(
@@ -232,11 +267,17 @@ def _read_and_check_slots(
     Reading the bytes is the first thing done with an accepted file, and the
     only thing done with it here: the file is not written anywhere, so there
     is nothing to clean up when a later slot turns out to be invalid.
+
+    Library-backed slots are skipped: no file is submitted for one, and
+    :func:`_resolve_library_slots` is what fills it (build plan 11B).
     """
     loaded: dict[str, LoadedUpload] = {}
     issues: list[ValidationIssue] = []
 
     for slot in action.inputs:
+        if slot.source is ActionInputSource.LIBRARY:
+            continue
+
         upload = uploads.get(slot.id)
 
         if upload is None or not upload.filename:
@@ -315,22 +356,29 @@ def _parse_inputs(
 
 
 def _validate_datasets(
-    action: Action, parsed: Mapping[str, parser.ParsedFile]
+    action: Action, frames: Mapping[str, pl.DataFrame]
 ) -> list[ValidationIssue]:
     """Check emptiness and required columns (build plan 3.7).
 
     Column names are compared exactly. ``Sales Person`` is never treated as
     equivalent to ``Salesperson``: the mismatch is reported so the user can fix
     the file, rather than guessed at.
+
+    Since Phase 11 this reads the resolved frames rather than the parsed
+    uploads, so a library-backed slot is held to exactly the same schema the
+    Action declares. A stored dataset is not trusted more than an uploaded one
+    for having been stored.
     """
     issues: list[ValidationIssue] = []
 
     for slot in action.inputs:
-        parsed_file = parsed.get(slot.id)
-        if parsed_file is None:
+        frame = frames.get(slot.id)
+        if frame is None:
             continue
 
-        if parsed_file.row_count == 0:
+        columns = tuple(frame.columns)
+
+        if frame.height == 0:
             issues.append(
                 EmptyDatasetError(
                     f"{slot.label} contains no data rows.",
@@ -338,21 +386,86 @@ def _validate_datasets(
                 ).as_validation_issue(slot.id)
             )
 
-        present = set(parsed_file.columns)
+        present = set(columns)
         missing = [name for name in slot.required_columns if name not in present]
         if missing:
             issues.append(
                 MissingColumnsError(
-                    "The uploaded file is missing required columns.",
+                    _missing_columns_message(slot.source),
                     details={
                         "slot_id": slot.id,
                         "missing_columns": missing,
-                        "found_columns": list(parsed_file.columns),
+                        "found_columns": list(columns),
                     },
                 ).as_validation_issue(slot.id)
             )
 
     return issues
+
+
+def _missing_columns_message(source: ActionInputSource) -> str:
+    """Say which thing is missing the columns, without changing the old wording.
+
+    The uploaded-file sentence is the one every existing client and test has
+    seen since Phase 3 and is returned unchanged. A library-backed slot has no
+    uploaded file to name, so telling the user to check one would send them
+    looking for something that does not exist.
+    """
+    if source is ActionInputSource.LIBRARY:
+        return "The stored dataset version is missing required columns."
+    return "The uploaded file is missing required columns."
+
+
+def _resolve_library_slots(
+    action: Action, references: Mapping[str, str]
+) -> tuple[dict[str, ResolvedLibraryInput], list[ValidationIssue]]:
+    """Resolve every library-backed slot to an exact version (build plan 11B).
+
+    Runs before the Action does, so what executes is always a fixed immutable
+    version rather than a moving concept (build plan 11D). The resolution
+    itself belongs to :mod:`app.services.input_resolution`; this is the stage
+    that applies it per slot and collects the failures.
+
+    A reference that names nothing the library holds becomes a validation
+    issue and fails the Run with the specific code that says why — a bad
+    selector, an unknown dataset or an unknown version (build plan 11E,
+    "missing library data fails clearly"). A library that cannot be *read* is
+    a different thing entirely and is deliberately not caught here: it
+    propagates as the 500 it is, so a corrupt store is never reported to the
+    user as though they had asked for the wrong month.
+    """
+    resolved: dict[str, ResolvedLibraryInput] = {}
+    issues: list[ValidationIssue] = []
+
+    for slot in action.inputs:
+        if slot.source is not ActionInputSource.LIBRARY:
+            continue
+
+        reference = references.get(slot.id)
+        if reference is None or not str(reference).strip():
+            if slot.required:
+                issues.append(
+                    MissingInputError(
+                        f"{slot.label} is required. Name the stored version "
+                        "to use: 'latest', 'period:YYYY-MM' or "
+                        "'version:<version id>'.",
+                        details={
+                            "slot_id": slot.id,
+                            "label": slot.label,
+                            "dataset_id": slot.dataset_id,
+                        },
+                    ).as_validation_issue(slot.id)
+                )
+            continue
+
+        try:
+            resolved[slot.id] = input_resolution.resolve_slot(slot, reference)
+        except input_resolution.RESOLUTION_FAILURES as error:
+            issues.append(
+                error.as_validation_issue(slot.id)  # type: ignore[attr-defined]
+            )
+
+    return resolved, issues
 
 
 def _execute_action(
@@ -373,6 +486,7 @@ def _collect_outputs(
     action: Action,
     result: ActionResult,
     input_records: Sequence[InputMetadata],
+    library_records: Sequence[LibraryInputMetadata] = (),
 ) -> tuple[tuple[OutputMetadata, ...], RunResult]:
     """Describe each declared output and keep its frame (build plan 6D.5, 6E.1).
 
@@ -383,10 +497,11 @@ def _collect_outputs(
 
     Since Phase 6E each output is described in full by
     :func:`app.services.results.describe_output`: its schema, the rows the Run
-    received, and the columns this result added or dropped relative to what was
-    uploaded. Those are measured against `input_records` — the inputs that
-    actually parsed — rather than against what the Action declares it wants, so
-    the description is of the data, not of the intention.
+    received, and the columns this result added or dropped relative to what
+    came in. Those are measured against the inputs the Run actually received —
+    the uploads that parsed and, since Phase 11, the dataset versions that
+    resolved — rather than against what the Action declares it wants, so the
+    description is of the data, not of the intention.
 
     Nothing is written. The frames the Action returned are the frames the Run
     keeps, and CSV/XLSX are generated from them when a download asks for them
@@ -400,9 +515,14 @@ def _collect_outputs(
     tables: dict[str, pl.DataFrame] = {}
 
     received_columns = results.input_columns(
-        record.columns for record in input_records
+        [
+            *(record.columns for record in input_records),
+            *(record.columns for record in library_records),
+        ]
     )
-    received_rows = sum(record.row_count for record in input_records)
+    received_rows = sum(record.row_count for record in input_records) + sum(
+        record.row_count for record in library_records
+    )
 
     for declared in action.outputs:
         frame = result.outputs.get(declared.id)
@@ -484,8 +604,19 @@ def delete_run(run_id: str) -> bool:
 
 def _frames_by_slot(
     parsed: Mapping[str, parser.ParsedFile],
+    resolved: Mapping[str, ResolvedLibraryInput] = {},
 ) -> dict[str, pl.DataFrame]:
-    return {slot_id: item.frame for slot_id, item in parsed.items()}
+    """The Action's inputs as one mapping of named frames.
+
+    Uploaded and library-backed slots land in the same mapping and are
+    indistinguishable in it, which is the whole of build plan 11B's promise to
+    the Action. The two can never collide: a slot declares exactly one source,
+    so no slot ID appears in both halves.
+    """
+    return {
+        **{slot_id: item.frame for slot_id, item in parsed.items()},
+        **{slot_id: item.frame for slot_id, item in resolved.items()},
+    }
 
 
 def _input_metadata(
@@ -522,28 +653,68 @@ def _input_metadata(
 
 
 def _unexpected_slot_warnings(
-    action: Action, uploads: Mapping[str, PendingUpload]
+    action: Action,
+    uploads: Mapping[str, PendingUpload],
+    references: Mapping[str, str] = {},
 ) -> list[ValidationIssue]:
     """Warn about submitted fields the Action does not declare.
 
     Ignoring them silently would hide a frontend/backend mismatch; failing the
     Run over them would be harsher than the situation warrants. A warning never
     fails a Run (build plan section 6.2).
+
+    Since Phase 11 a slot has a source, so "unexpected" covers two more cases
+    and both are the same mistake seen from either side: a file sent for a slot
+    that reads the Data Library, and a dataset reference sent for a slot that
+    reads an uploaded file. Each is reported with the kind of thing that was
+    ignored, because "the file was ignored" and "the reference was ignored"
+    send the user to different places.
     """
-    declared = {slot.id for slot in action.inputs}
-    unexpected = sorted(slot_id for slot_id in uploads if slot_id not in declared)
-    if not unexpected:
-        return []
-    return [
-        ValidationIssue(
-            code="UNEXPECTED_INPUT",
-            message=(
-                f"{action.name} does not use "
-                f"{_human_list(tuple(unexpected))}; the file was ignored."
-            ),
-            details={"unexpected_slot_ids": unexpected},
+    upload_slots = {
+        slot.id
+        for slot in action.inputs
+        if slot.source is ActionInputSource.UPLOAD
+    }
+    library_slots = {
+        slot.id
+        for slot in action.inputs
+        if slot.source is ActionInputSource.LIBRARY
+    }
+
+    warnings: list[ValidationIssue] = []
+
+    ignored_files = sorted(
+        slot_id for slot_id in uploads if slot_id not in upload_slots
+    )
+    if ignored_files:
+        warnings.append(
+            ValidationIssue(
+                code="UNEXPECTED_INPUT",
+                message=(
+                    f"{action.name} does not use "
+                    f"{_human_list(tuple(ignored_files))}; the file was ignored."
+                ),
+                details={"unexpected_slot_ids": ignored_files},
+            )
         )
-    ]
+
+    ignored_references = sorted(
+        slot_id for slot_id in references if slot_id not in library_slots
+    )
+    if ignored_references:
+        warnings.append(
+            ValidationIssue(
+                code="UNEXPECTED_DATASET_REFERENCE",
+                message=(
+                    f"{action.name} reads no stored dataset for "
+                    f"{_human_list(tuple(ignored_references))}; the reference "
+                    "was ignored."
+                ),
+                details={"unexpected_slot_ids": ignored_references},
+            )
+        )
+
+    return warnings
 
 
 def _elapsed_ms(start: datetime, end: datetime) -> int:

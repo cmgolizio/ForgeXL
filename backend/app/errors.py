@@ -235,6 +235,29 @@ class DuplicateColumnsError(InputValidationError):
     code = "DUPLICATE_COLUMNS"
 
 
+class InvalidDatasetSelectorError(InputValidationError):
+    """The Data Library reference submitted for an input slot is not readable.
+
+    A library-backed input slot is filled by naming *which* stored version to
+    read (build plan 11A). The accepted forms are ``latest``,
+    ``period:YYYY-MM`` and ``version:<version id>``; anything else is refused
+    here rather than interpreted.
+
+    Deliberately an :class:`InputValidationError` and not a 400. The request
+    was well formed — a form field carried a value — and what is wrong is the
+    value the user supplied for an input, exactly as a missing required column
+    is. It fails the Run and is recorded as a validation issue on it, so the
+    Run's own record says what was asked for and why it could not be honoured.
+
+    It is a *shape* refusal only: whether the named version exists is the Data
+    Library's answer, and it arrives as
+    :class:`UnknownDatasetVersionError` (build plan 11E, "missing library data
+    fails clearly").
+    """
+
+    code = "INVALID_DATASET_SELECTOR"
+
+
 class IssueReportingError(WorkbenchError):
     """Base for an error that carries a list of :class:`ValidationIssue`.
 

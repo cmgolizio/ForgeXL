@@ -879,6 +879,21 @@ def load_version(dataset_id: str, version_id: str) -> pl.DataFrame:
     return DATA_LIBRARY.load_version(dataset_id, version_id)
 
 
+def current_versions(dataset_id: str) -> list[DatasetVersion]:
+    """Return every live version of `dataset_id`, oldest commit first.
+
+    Added in Phase 11 so input resolution can ask the application's library
+    which versions are current without reaching through :data:`DATA_LIBRARY`
+    itself — the same wrapper convention every other operation here follows.
+    """
+    return DATA_LIBRARY.current_versions(dataset_id)
+
+
+def current_version(dataset_id: str, period: str) -> DatasetVersion:
+    """Return the one live version of `dataset_id` for `period`."""
+    return DATA_LIBRARY.current_version(dataset_id, period)
+
+
 def ensure_known_datasets(library: DataLibrary | None = None) -> list[Dataset]:
     """Make sure every dataset ForgeXL declares exists, and return them.
 

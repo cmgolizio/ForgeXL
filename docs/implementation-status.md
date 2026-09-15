@@ -1,18 +1,20 @@
 # Implementation Status
 
-Last Updated: 2026-09-07
+Last Updated: 2026-09-08
 Current Phase: None
-Last Completed Phase: Phase 10 — Monthly Dataset Ingestion and Versioning.
-**Phase 10 is complete.** It is the second phase of the post-POC expansion.
-Phase 11 is not started; nothing for it has been scaffolded, stubbed or
-prepared — no Action knows the Data Library exists, and the runner does not
-import it.
+Last Completed Phase: Phase 11 — Library-Backed Action Inputs and Reproducible
+Runs.
+**Phase 11 is complete.** It is the third phase of the post-POC expansion.
+Phase 12 is not started; nothing for it has been scaffolded, stubbed or
+prepared — `ActionResult` still carries only dataframes, no artifact type
+exists, and there is no ZIP anywhere in the backend.
 
 > **Architecture document.** `docs/architecture.md` was created in Phase 6I
 > (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1
 > persistence behaviour and the extension point for future persistence. Phase 9
-> added §5a, the persistent Data Library, and Phase 10 added §5b, the monthly
-> ingestion layer above it. This file remains the phase-by-phase record.
+> added §5a, the persistent Data Library, Phase 10 added §5b, the monthly
+> ingestion layer above it, and Phase 11 added §5c, library-backed Action
+> inputs. This file remains the phase-by-phase record.
 >
 > **Source schemas.** `docs/monthly-source-schemas.md` was created in Phase 10A
 > and is the authoritative description of the three recurring source files. The
@@ -34,6 +36,263 @@ This file is the durable cross-thread project state required by
 ---
 
 ## Completed
+
+### Phase 11 — Library-Backed Action Inputs and Reproducible Runs
+
+Both authoritative documents were read in full and the repository was inspected
+before anything was edited. The session began in a **fresh ephemeral
+container**: `backend/.venv/` and `node_modules/` did not exist and were rebuilt
+with the four commands `README.md` documents, which worked exactly as written.
+
+Phase 11 lets an ordinary Action consume an exact version of a persistent
+dataset without becoming storage-aware. It is the smallest of the three
+post-POC phases so far, and deliberately so: everything it needed already
+existed. `load_version(dataset_id, version_id)` returns a DataFrame, which is
+what `Action.run(inputs)` already takes, and `current_version(dataset_id,
+period)` is the moving concept build plan 11D says must be pinned before
+execution. **No model, interface or stored record in the Data Library gained a
+field**, exactly as Phase 10 needed none.
+
+#### The baseline was clean, for the second phase running
+
+The check list the Phase 10 entry prescribes was run before any Phase 11 work,
+and every line passed:
+
+| Check                           | Result                                            |
+| ------------------------------- | ------------------------------------------------- |
+| `git show --name-status HEAD`   | matches the Phase 10 report in both directions    |
+| `pytest` (baseline)             | **1,603 passed** — the documented figure exactly  |
+| `git branch -r`                 | `main` and this branch                            |
+| hyphenated module names         | none                                              |
+| duplicate-content modules (md5) | none                                              |
+| `npm run build`                 | exit 0, same three routes                         |
+| `npm run lint`                  | exit 0, no output                                 |
+
+Known Issue 85's family did not recur, and the Phase 10 report's file list
+matches its commit read both ways — 14 files, eight added and six modified.
+
+---
+
+#### 11A — Extend input source metadata
+
+`ActionInput` gained two fields and nothing else changed shape.
+
+```python
+source: ActionInputSource = ActionInputSource.UPLOAD
+dataset_id: str | None = None
+```
+
+**`upload` is the default, so no Action written before this phase means
+anything different from what it meant before.** Build plan 11A: "Do not require
+changes to Exact Duplicate Remover or Product Master Builder merely because
+library-backed inputs now exist." Neither Action module was touched, and
+`test_contract_freeze.py` now *pins* both as upload-backed, so a later phase
+quietly converting one fails a test.
+
+`accepted_extensions` gained a default of `()`, and a model validator makes the
+two kinds of slot mutually exclusive rather than merely conventional:
+
+| slot        | must declare          | must not declare      |
+| ----------- | --------------------- | --------------------- |
+| `upload`    | `accepted_extensions` | `dataset_id`          |
+| `library`   | `dataset_id`          | `accepted_extensions` |
+
+A half-declared slot is refused **when the Action is declared**, at import time,
+not when a Run reaches it. A slot that named a dataset *and* accepted files
+would leave the UI and the runner each guessing which the Action meant.
+
+**Which dataset a slot reads is declared by the Action; which version is chosen
+per Run.** That split is a security property as much as a design one: no
+client-supplied string ever selects what gets opened.
+
+---
+
+#### 11B — Dataset reference resolution
+
+`backend/app/services/input_resolution.py`, a module of its own, because build
+plan 11B names the alternative ("the runner **or** a dedicated
+input-resolution service") and the runner already owns eight stages.
+
+    dataset reference  ->  Data Library  ->  one immutable version
+                       ->  Polars DataFrame  ->  Action
+
+The runner calls it in a new stage, `_resolve_library_slots`, which sits beside
+`_parse_inputs` and produces the same kind of thing. Both halves then merge
+into **one** mapping of named frames:
+
+```python
+frames = _frames_by_slot(parsed, resolved)   # {slot_id: pl.DataFrame}
+```
+
+From that line down, nothing in the pipeline distinguishes an uploaded input
+from a stored one. `_validate_datasets` was changed to read the merged frames
+rather than the parsed uploads, so **a stored version is held to exactly the
+same emptiness and required-column checks as an upload**. Being stored earns no
+trust.
+
+The Action sees `{slot_id: DataFrame}` and cannot tell which arrow filled a
+slot. `FORBIDDEN_ACTION_IMPORTS` in `test_contract_freeze.py` gained
+`app.services.data_library`, `app.services.ingestion`,
+`app.services.input_resolution` and `app.models.library`, which is build plan
+11B's "Actions must not open Data Library files themselves" as an assertion.
+Before this phase the rule had nothing to pin — there was no way for an Action
+to reach the library at all.
+
+##### The three reference forms
+
+A reference is text, because it crosses the wire as one form field beside the
+uploaded files:
+
+| reference              | resolves to                                        |
+| ---------------------- | -------------------------------------------------- |
+| `latest`               | the live version with the greatest reporting month |
+| `period:2026-09`       | the live version for that month                    |
+| `version:<version id>` | that exact version, superseded or not              |
+
+`DatasetSelector.parse` lives in `app/models/library.py` beside
+`parse_dataset_id`, `parse_version_id` and `parse_period`, and reuses the last
+two, so a selector cannot smuggle a path fragment into a library read —
+`version:../../etc/passwd` is `INVALID_DATASET_SELECTOR`, not a file read.
+Nothing is guessed: `current` and `newest` are refused rather than matched to
+`latest`, the same way an unrecognised Action ID is refused rather than
+resolved to a near neighbour.
+
+**`latest` is the greatest month, not the most recent commit**, and the
+difference is not hypothetical. Restating March after June has been imported
+commits a March version *last*; answering "latest" with March would be wrong.
+`latest_version` sorts on `(has a period, period, created_at, version_id)` and
+takes the maximum, and `test_latest_is_the_newest_month_not_the_newest_commit`
+is the regression test.
+
+`version:` reaches a **superseded** version deliberately — that is build plan
+11E's "specific old versions can be selected", and the whole reason 9D keeps
+them. `period:` and `latest` see only live versions, because those ask what the
+dataset says now.
+
+---
+
+#### 11C — Explicit version provenance
+
+`RunManifest` gained `library_inputs`, one `LibraryInputMetadata` per
+library-backed slot. It records the dataset, the resolved version ID, the
+period, the version's commit time, the source filename and hash it was built
+from, and the shape of what was read.
+
+**`requested` and `version_id` are both recorded, and they answer different
+questions.** Build plan 11C: "Never record only `sales_history = current`."
+Recording only the resolved ID would have been the opposite loss — a Run that
+was asked for "the newest month" would read as though someone had typed that
+UUID. So a Run says what it was asked for *and* what it actually read:
+
+    "requested":  "latest"
+    "version_id": "1b7df5d8-d446-43e1-99a7-f38d4f3dcf6c"
+    "period":     "2026-09"
+
+`RunAudit` gained the matching `library_inputs`, and `rows_received` now counts
+both kinds of input — otherwise the audit of a report Run would read as though
+nothing went in. `OutputMetadata.input_row_count` and the added/removed column
+lists are measured across both too.
+
+`AuditLibraryInput` is a separate model from `AuditInput` rather than an
+extension of it. An uploaded file and a committed version are identified by
+different facts, and one model carrying both would leave half its fields empty
+whichever kind it described.
+
+**`MANIFEST_SCHEMA_VERSION` stays at 2.** Every added field has a default, so a
+manifest for an upload-only Run — every Run either registered Action can
+produce — is byte-identical to what it was, and a version 2 manifest written
+before this phase still validates. Phase 6E bumped it because its additions
+were *required*; these are not, and bumping anyway would have made an
+unnecessary claim about incompatibility.
+
+---
+
+#### 11D — Determinism
+
+The rule is unchanged and is now enforced in one place. `resolve_version` is
+the only function that turns a moving reference into a version, it runs before
+`_execute_action`, and it returns a `DatasetVersion` whichever form it was
+given. There is no code path on which an Action executes against "latest".
+
+The consequence is what the phase is for, and it was verified over real HTTP
+against the real library directory:
+
+1. A Run asked for `latest` and resolved to September's version.
+2. September was then corrected — a new version superseding it, with a reason.
+3. Re-fetching the **original** Run still reported the original version ID.
+4. A **new** `latest` Run resolved to the replacement.
+5. Re-running with `version:<the recorded ID>` reproduced the original result
+   exactly, from a version that is now superseded.
+
+That sequence is `test_a_recorded_run_is_unchanged_by_a_later_commit` and
+`test_naming_the_recorded_version_reproduces_the_run`, and it was also done by
+hand with curl — see **Tests**.
+
+---
+
+#### 11E — Regression tests
+
+`backend/tests/test_library_inputs.py`, 58 tests. Every item build plan 11E
+lists is covered, and the module's docstring carries the table mapping each
+item to its test.
+
+Two properties are asserted throughout rather than once:
+
+- **A Run still writes nothing.** Reading stored history is a read.
+  `test_a_library_backed_run_writes_nothing` asserts the `quarantine`
+  directory is still empty afterwards, and
+  `test_a_library_backed_run_records_no_new_library_state` asserts the library
+  gained no version.
+- **An Action never learns the library exists.** Every Action in the module
+  receives `{slot_id: DataFrame}`, and the contract freeze refuses a library
+  import inside an Action module.
+
+The failure surface is tested by name rather than by status alone, because
+"missing library data fails clearly" is about the message:
+
+| what is wrong                       | code                        |
+| ----------------------------------- | --------------------------- |
+| no reference for a required slot    | `MISSING_INPUT`             |
+| `current`, `newest`, a bare month   | `INVALID_DATASET_SELECTOR`  |
+| nothing ever imported               | `UNKNOWN_DATASET`           |
+| that month never imported           | `UNKNOWN_DATASET_VERSION`   |
+| no version with that ID             | `UNKNOWN_DATASET_VERSION`   |
+| stored version missing a column     | `MISSING_COLUMNS`           |
+
+A library that cannot be **read** is deliberately not in that list. Those
+failures propagate as `DATA_LIBRARY_ERROR` / 500, so a corrupt store is never
+reported to the user as though they had asked for the wrong month.
+
+---
+
+#### What the API gained, and what it did not
+
+**No route.** A library-backed slot is a text field beside the uploaded files
+in the existing `POST /api/runs` form, named with the slot's ID.
+`FROZEN_ROUTES` is byte-identical for the second phase running.
+
+A field naming a slot the Action does not read that way is reported, never
+obeyed: a file sent for a library slot warns `UNEXPECTED_INPUT` (the existing
+code and message), and a reference sent for an upload slot warns
+`UNEXPECTED_DATASET_REFERENCE` (new). Two codes rather than one, because "the
+file was ignored" and "the reference was ignored" send the user to different
+places. Both are warnings; the Run fails separately on the input that is
+actually missing.
+
+#### Nothing under `src/` was changed
+
+No registered Action reads the library, so the frontend cannot encounter a
+library-backed slot, and build plan Phase 11 describes no UI — 11A–11E are
+about the input contract. A dataset-version picker also needs endpoints to list
+datasets and versions, which no phase has authorised. Choosing versions in the
+browser is build plan 15A, with the monthly reporting workflow it belongs to.
+Recorded as Known Issue 96 so it is a stated decision rather than an omission.
+
+The frontend was verified unchanged all the same: `npm run lint`,
+`npm run build`, and a real headless-Chromium Run through the running
+application — see **Tests**.
+
+---
 
 ### Phase 10 — Monthly Dataset Ingestion and Versioning
 
@@ -3776,6 +4035,10 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
                               column; refuses an ambiguous one         (10B)
           ingestion.py        monthly commits, the coordinated three-file
                               cycle, the historical bootstrap     (10C-10G)
+          input_resolution.py a dataset reference -> one immutable version
+                              -> a DataFrame, resolved before the Action
+                              runs. The only place a moving selector
+                              stops moving                        (11B-11D)
       tests/
         __init__.py
         conftest.py           quarantine (an empty cwd, autouse), Run Store,
@@ -3809,8 +4072,9 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_audit.py         result metadata and the audit summary through
                               the pipeline; audit stays out of the data  (6E)
         test_runs_api.py      the Run endpoints and their status codes
-        test_contract_freeze.py  the Phase 6A freeze (amended in 6E, 6F and
-                              6I; no frozen value moved in 6I — see KI 48)
+        test_contract_freeze.py  the Phase 6A freeze (amended in 6E, 6F, 7,
+                              10 and 11; every amendment an addition, and no
+                              frozen value moved in 6I — see KI 48)
         test_spreadsheet_fixtures.py  the fixture system itself:
                               determinism, faithfulness, scenario coverage,
                               synthetic-only                             (6H)
@@ -3849,6 +4113,9 @@ repository state. Build plan §15 permits both `.js` and `.jsx`.)
         test_ingestion.py     monthly commits, duplicates, ownership
                               checks, the three-file cycle, the
                               bootstrap, and the exit criterion      (10C-10G)
+        test_library_inputs.py  library-backed input slots: the extended
+                              contract, resolution, provenance,
+                              determinism and every clear failure    (11A-11E)
       benchmarks/             NOT collected by pytest (testpaths=tests and
                               the test_*.py glob). Run directly:
                               `.venv/bin/python -m tests.benchmarks.run`
@@ -3919,22 +4186,41 @@ responses of its own, neither of them FastAPI's:
     GET  /api/actions   ->  200 {"actions": [ActionDefinition, ...]}
 
     POST /api/runs      ->  200 RunManifest
-                            multipart: action_id + one file field per slot ID
+                            multipart: action_id + one field per slot ID —
+                            a file for an upload slot, and since Phase 11
+                            text naming a stored version for a
+                            library-backed one (`latest`, `period:YYYY-MM`
+                            or `version:<version id>`).            (11A)
                             Uploads are read into memory and parsed from
-                            there (6C); the Action's result frames are held
-                            by the Run. The whole pipeline writes nothing to
-                            disk and needs no run directory at all (6D).
+                            there (6C); a library reference is resolved to
+                            one immutable version and loaded as a DataFrame
+                            before the Action runs (11B). Either way the
+                            Action receives {slot_id: DataFrame}.
+                            The Action's result frames are held by the Run.
+                            The whole pipeline writes nothing to disk and
+                            needs no run directory at all (6D) — reading a
+                            stored version is a read, and nothing about a
+                            Run is written to the library.
                             The manifest carries result metadata on every
-                            output and a derived `audit` summary (6E);
-                            `schema_version` is now 2.
+                            output and a derived `audit` summary (6E), plus
+                            `library_inputs` naming the exact dataset
+                            versions the Run read (11C);
+                            `schema_version` is still 2 — every Phase 11
+                            addition has a default.
                             400 malformed request (no action_id)
                             404 unknown Action
                             413 upload over MAX_UPLOAD_BYTES
                             422 validation failure — including
-                                EMPTY_FILE for a zero-byte upload (6C) and
+                                EMPTY_FILE for a zero-byte upload (6C),
                                 DUPLICATE_COLUMNS for a header row that
-                                names two columns the same thing (7B)
-                            500 Action raised
+                                names two columns the same thing (7B),
+                                INVALID_DATASET_SELECTOR for a reference
+                                that is not one of the three forms, and
+                                UNKNOWN_DATASET / UNKNOWN_DATASET_VERSION
+                                for one that names nothing stored     (11E)
+                            500 Action raised, or DATA_LIBRARY_ERROR if
+                                the library's stored state could not be
+                                read
 
     GET  /api/runs/{run_id}
                         ->  200 RunManifest | 404
@@ -3991,16 +4277,22 @@ the OpenAPI schema now documents `ActionDefinition`, `ActionInput`,
 Registered Actions (2):
 
     exact_duplicate_remover  1.0.0  "Exact Duplicate Remover"
-      input  source_file         .csv .xlsx   no required columns
+      input  source_file         upload  .csv .xlsx  no required columns
       output deduplicated_data   csv, xlsx
 
     product_master_builder   1.0.0  "Product Master Builder"
-      input  sales_file          .csv .xlsx
+      input  sales_file          upload  .csv .xlsx
              required columns    SKU, Vintage, Supplier, Producer,
                                  Selection, Volume
       output product_master      csv, xlsx
 
 The Phase 2 placeholder `example_passthrough` was removed in Phase 4.
+
+**Both are upload-backed, and the contract freeze pins that.** Phase 11 made a
+library-backed input slot possible; no registered Action uses one, because
+build plan 11A explicitly says neither proof Action should have to change. The
+first Action that reads the Data Library is build plan Phase 13's monthly
+report.
 
 ### Adding an Action (the architecture being proven)
 
@@ -4012,6 +4304,15 @@ The Phase 2 placeholder `example_passthrough` was removed in Phase 4.
 
 Nothing else in the backend changes, and — once Phase 5 exists — no frontend
 file changes, because the UI is built entirely from `GET /api/actions`.
+
+Since Phase 11 an input slot may read stored business data instead of an
+upload: declare it with `source=ActionInputSource.LIBRARY` and the `dataset_id`
+it reads, and nothing else about the Action changes. `run(inputs)` is
+identical, and it must not import `app.services.data_library` — resolving a
+version is the runner's job, and the contract freeze fails an Action that tries
+(build plan 11B). The browser has no version picker yet, so such an Action is
+driven in-process or by naming the version in the request form until build plan
+15A builds one.
 
 ### npm scripts
 
@@ -4048,8 +4349,8 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 | `backend/app/api/`      | Exists (`actions.py`, `runs.py`, `upload_form.py`; the hyphenated duplicate was removed in Phase 7)                      |
 | `backend/app/actions/`  | Exists (`base.py`, `registry.py`, the two proof Actions)                                                                 |
 | `backend/app/models/`   | Exists (`schemas.py`, `run.py`, `library.py` — 9A/9B)                                                                    |
-| `backend/app/services/` | Exists (run_store, data_library, storage, parser, runner, export, preview, results)                                      |
-| `backend/tests/`        | Exists (32 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
+| `backend/app/services/` | Exists (run_store, data_library, ingestion, reporting_period, input_resolution, storage, parser, runner, export, preview, results) |
+| `backend/tests/`        | Exists (36 test modules, `fixtures/`, and `benchmarks/` which pytest does not collect)                                   |
 | `data/runs/`            | **Removed in 6I.** Nothing has been written there since 6D.                                                              |
 | `data/library/`         | The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.         |
 | `scripts/`              | Exists (`dev-backend.sh`, `lan-address.mjs` — 6G)                                                                        |
@@ -4061,15 +4362,21 @@ devDependencies gained `concurrently` `^10.0.5`. No other dependency was added.
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-9-n9d431
-    Descends from:  60817e8  "phase 8 complete"
+    Current branch: claude/forgexl-phase-11-pds3ad
+    Descends from:  3de2436  "phase 10 complete"
 
-Phase 9's diff is five new files (`backend/app/models/library.py`,
-`backend/app/services/data_library.py` and three test modules), eight modified
-files and one rename. The current state of `main` and of the unmerged phase
+Phase 11's diff is 14 files: two new (`backend/app/services/input_resolution.py`
+and `backend/tests/test_library_inputs.py`) and twelve modified, with no
+deletion and no rename. The current state of `main` and of the unmerged phase
 branches is recorded under **Next Phase → Repository / Git**, which is the
 entry to trust; the paragraphs below record earlier sessions' own view of the
 tree and are left as written.
+
+(The Phase 9 session's record follows.)
+
+Phase 9's diff is five new files (`backend/app/models/library.py`,
+`backend/app/services/data_library.py` and three test modules), eight modified
+files and one rename.
 
 (The Phase 8 session's record follows.)
 
@@ -4193,6 +4500,163 @@ Local addresses (verified running):
 ---
 
 ## Tests
+
+### Backend test suite (Phase 11)
+
+    cd backend && .venv/bin/python -m pytest
+    1665 passed, 2 warnings in 16.76s
+
+Run against the committed tree before any Phase 11 edit — **1,603 passed**, the
+documented figure exactly — and again at the end. No failures, no skips, no
+xfails. The two warnings are the upstream ones recorded as Known Issue 7 and
+are deliberately unsuppressed.
+
+**62 tests added.** 58 are the new module; the other four are the
+`FROZEN_ERRORS` rows Phase 11 added to `test_contract_freeze.py`.
+
+| Module                          | Tests | Covers                                        |
+| ------------------------------- | ----- | --------------------------------------------- |
+| `tests/test_library_inputs.py`  | 58    | 11A–11E — the contract, resolution, provenance, determinism, every failure |
+
+**Four existing test modules were edited, and only one of them changed
+behaviour.** The others assert field lists that Phase 11 added to:
+
+| Module                     | Edit                                                                 |
+| -------------------------- | -------------------------------------------------------------------- |
+| `test_contract_freeze.py`  | `ActionInput` and `RunManifest` field lists; both registered Actions pinned as upload-backed; four error rows; four forbidden Action imports |
+| `test_api.py`              | the two `GET /api/actions` serialisation tests now expect `source` and `dataset_id`, and check an upload slot's rules and a library slot's separately |
+
+No existing test's *behaviour* changed: every assertion that passed before
+Phase 11 passes now, and the whole 1,603-test baseline was green before the new
+module was written.
+
+Writing the tests found three things worth recording:
+
+- **The duplicate-field guard already covered the mismatch cases.** Two tests
+  were written to submit a file and a reference under the same field name;
+  `upload_form.py` refuses that with `INVALID_REQUEST` / 400, which is correct
+  and predates this phase. The tests were rewritten to express the mismatch
+  the way a client can actually produce it — a file for a library slot with no
+  reference, and a reference for an upload slot with no file — and both now
+  assert the specific warning *and* the specific failure.
+- **The first `MISSING_INPUT` message named the dataset twice.** The slot's
+  label and the dataset's label are usually the same words, so
+  "Sales History is required. Name the version of Sales History to use…" read
+  badly. The dataset name was dropped from the sentence; the slot label already
+  names it and `details.dataset_id` still carries the ID.
+- **The Data Library's own "not found" messages name a dataset by its ID.**
+  Right for a message about stored state, wrong for one a user reads. Until
+  this phase no library failure reached a user at all. `input_resolution`
+  substitutes the display name on the way out rather than the library being
+  reworded, so each layer says the thing that suits its own reader — recorded
+  as Deviation 78.
+
+### Type checking (Phase 11)
+
+    npx pyright
+    0 errors, 0 warnings, 0 informations
+
+### Frontend static checks (Phase 11)
+
+    npm run lint     exit 0, no output
+    npm run build    exit 0, compiled successfully
+
+Three routes, unchanged: `/`, `/_not-found`, `/forge-api/[...path]`. **Nothing
+under `src/` was modified in this phase**, and `FROZEN_ROUTES` in
+`test_contract_freeze.py` is byte-identical for the second phase running.
+
+### Phase 11 live verification over real HTTP
+
+`npm run dev`, then a real Product Master Builder Run through the same-origin
+proxy at `127.0.0.1:3000/forge-api/api/runs` — the regression half, proving an
+upload-backed Action is untouched:
+
+    run_id          fdba7572-e8c9-4c7e-976c-c130ce41ba42
+    status          succeeded, duration_ms 4
+    library_inputs  []          (and audit.library_inputs [])
+    rows_received   3, output rows 2, accents intact
+    data/           NOT CREATED
+
+`GET /api/actions` through the proxy served both Actions with
+`"source": "upload"` and `"dataset_id": null` on every slot.
+
+### Phase 11 browser verification (real headless Chromium)
+
+Against the running application, Playwright 1.56.1 driving the pre-installed
+Chromium:
+
+    Action selector   ["Select Action", "Exact Duplicate Remover",
+                       "Product Master Builder"]
+    Run               Product Master Builder, real file picker, real click
+    workbench state   success
+    preview rows      A-1 2021 Acme Château Réal Réserve 750ml
+                      B-2 2020 Acme Domaine Lumère Cuvée 1.5L
+    console errors    none
+
+The frontend was not modified in this phase; this is the check that it did not
+need to be.
+
+### Phase 11 verification of the library-backed path (not a test)
+
+The suite redirects `DATA_LIBRARY` at a temporary directory and no registered
+Action is library-backed, so neither the real library location nor a real HTTP
+library-backed Run is exercised by `pytest`. Both were done by hand.
+
+Two real months were committed to the **real default library** through the real
+ingestion layer, and a second uvicorn was started on `127.0.0.1:8010` from a
+throwaway module (in the session scratchpad, not the repository) registering
+one library-backed Action, `monthly_totals`. Every request below is `curl`:
+
+    GET /api/actions
+      sales_history   source "library", dataset_id "sales_history",
+                      accepted_extensions [], required_columns
+                      ["Customer", "Total Price"]
+
+    POST /api/runs  action_id=monthly_totals  sales_history=latest
+      status            succeeded, duration_ms 7
+      requested         "latest"
+      resolved version  1b7df5d8-…  period 2026-09  from "September Sales.csv"
+      row_count 3, column_count 15, source_sha256 recorded
+      audit.rows_received 3, metrics {input_rows: 3, customers: 2}
+
+    preview           2 rows, Bistro Lumière intact
+    download/csv      forgexl-monthly-totals-totals-20260908-065421.csv
+    download/xlsx     6,135 bytes
+
+    POST … sales_history=period:2026-08
+      resolved 8809216c-…  period 2026-08  2 rows
+
+Then September was corrected — a new version superseding it, with a reason —
+and the same four requests re-issued:
+
+    the ORIGINAL Run, re-read   latest -> 1b7df5d8-…  UNCHANGED
+    a NEW latest Run            d818814f-…  from "September Sales (restated).csv"
+    version:1b7df5d8-…          reproduced the original result exactly,
+                                from a version that is now superseded
+
+That is build plan 11C and 11D demonstrated end to end against real persistent
+state: a moving reference was recorded as the fixed version it resolved to, a
+later commit could not change what the earlier Run says it used, and naming the
+recorded version reproduced the run.
+
+Failures, each over real HTTP:
+
+    (no reference)                    422 MISSING_INPUT
+    current                           422 INVALID_DATASET_SELECTOR
+    period:2026-01                    422 UNKNOWN_DATASET_VERSION
+                                          "No Sales History data has been
+                                           committed for 2026-01."
+    version:0e8e2c9a-…                422 UNKNOWN_DATASET_VERSION
+    version:../../etc/passwd          422 INVALID_DATASET_SELECTOR
+                                          — refused for its shape; no path
+                                            was built
+
+Finally, in a **brand-new Python process** with nothing in memory, the library
+read back all three versions with the supersession chain intact, and
+`data/library/` held exactly seven files: one `dataset.json` and a
+`version.json` + `data.parquet` per version. Nothing else was written anywhere.
+The directory was removed afterwards; `git status --short --ignored` showed
+`!! data/` at every step — ignored, never untracked.
 
 ### Backend test suite (Phase 10)
 
@@ -7370,6 +7834,68 @@ keeps its existing phase ownership.
     both would matter together only if Phase 13's report generation resolves
     periods in a loop. Measure before optimising.
 
+**Added in Phase 11:**
+
+94. **No registered Action reads the Data Library.**
+    The successor to Known Issues 86 and 91, and deliberate for the same
+    reason: build plan 11A says the two proof Actions must not have to change,
+    and Phase 11 is about the input contract rather than about a new Action.
+    So the library-backed path exists, is fully tested, and is exercised by no
+    Action a user can select. A reader who starts the application will see the
+    same two Actions as before and no way to reach stored history, and that is
+    correct for this phase. The first Action that reads the library is build
+    plan Phase 13's monthly report.
+
+    The consequence worth stating: the path was verified by hand against a
+    real backend and a real library, because `pytest` alone cannot exercise
+    what no registered Action does. See **Tests → Phase 11 verification of the
+    library-backed path**.
+
+95. **The reference form is text in a multipart field, and it is not
+    versioned.**
+    `latest`, `period:YYYY-MM` and `version:<id>` cross the wire as one form
+    field beside the uploaded files. That is the smallest thing that works in
+    the existing `POST /api/runs` contract and adds no route, which is what a
+    phase describing no HTTP surface should do. It is also a *string grammar*,
+    and string grammars accumulate cases. If build plan 15A wants a richer
+    selection — a range of months, several versions in one slot — it should
+    decide the shape then rather than extending this one; `DatasetSelector` is
+    a single parse function with a single `as_text`, so replacing it is local.
+
+96. **There is no way to choose a dataset version in the browser.**
+    Direct consequence of 94, and equally deliberate. `FileUploadSlot` renders
+    an upload control for every slot it is given; a library-backed slot would
+    render as a drop zone that does nothing. It cannot happen today, because no
+    registered Action has one. Building the picker also needs endpoints to list
+    datasets and versions, which no phase has authorised and which build plan
+    Phase 11 does not describe. **Do not add either speculatively** — build
+    plan 15A owns the monthly reporting UI and is where the shape of that
+    choice should be decided. A phase that registers a library-backed Action
+    before then must handle the frontend in the same phase.
+
+97. **`latest` is a rule, and the rule is a judgement.**
+    Build plan 11D permits a moving concept and does not say what "latest"
+    means. It is implemented as *the greatest reporting month among live
+    versions*, not the most recent commit, because a corrected old month is
+    committed last and answering "latest" with it would be wrong. That is the
+    right answer for monthly history; it is worth knowing it is a choice this
+    implementation made rather than one the build plan specified, and
+    `test_latest_is_the_newest_month_not_the_newest_commit` is where it is
+    pinned. A dataset whose versions carry no period at all sorts below every
+    version that has one — nothing the ingestion layer produces is period-less,
+    so that branch exists only because the model permits it.
+
+98. **A library-backed slot reads exactly one version.**
+    Build plan 11B's diagram is singular — one reference, one version, one
+    DataFrame — and that is what was built. A report covering two years of
+    history therefore cannot be expressed as one library-backed slot today. It
+    is not a gap in Phase 11: build plan 13E ("Shared Prepared Data Model") is
+    where combining many months is designed, and doing it here would have been
+    inventing an interface for a requirement not yet written. When 13E arrives,
+    the choice is between a slot that resolves several versions and a prepared
+    data model that concatenates them above the Action contract; the second
+    keeps `resolve_slot` as it is.
+
 **Added in Phase 6I:**
 
 70. **Committed state that could not import — the sixth instance, this time a
@@ -8194,6 +8720,73 @@ failed` as an example and says explicitly: "Use existing equivalent status
     `FROZEN_ROUTES` being byte-identical after a phase that added a whole
     subsystem is the fact worth recording.
 
+**Added in Phase 11:**
+
+76. **A library reference is submitted as a text form field, not through a new
+    route.** Build plan 11A says an input slot may originate from a Data
+    Library dataset version; it does not say how a client names the version.
+    `POST /api/runs` already carries `action_id` as a text field beside the
+    files, so a library-backed slot carries its reference the same way, under
+    its own slot ID.
+
+    The alternatives were a new endpoint, which build plan Phase 11 describes
+    none of and which would have meant amending `FROZEN_ROUTES` in a phase that
+    did not ask for it, and a JSON body, which the multipart contract has no
+    room for. Recorded because the wire format is a decision, and Known
+    Issue 95 says what to do if it needs to grow.
+
+77. **`MANIFEST_SCHEMA_VERSION` was not bumped, although the manifest gained a
+    field.** `RunManifest.library_inputs` defaults to empty, so a manifest for
+    an upload-only Run is byte-identical to what it was and a version 2
+    manifest written before this phase still validates against the model.
+    Phase 6E bumped the version because its additions were *required* and a
+    version 1 manifest genuinely stopped validating; bumping here would have
+    claimed an incompatibility that does not exist. `ActionInput`'s two new
+    fields are the same case — both default to what every Action already meant.
+
+78. **A Data Library "not found" message is reworded on its way to a user.**
+    `data_library` names a dataset by its ID, which is right for a message
+    about stored state and wrong for one a nontechnical user reads (build plan
+    §3.5, §22). Until Phase 11 no library failure reached a user at all.
+    `input_resolution._named` substitutes the dataset's display name into the
+    message, keeping the library's own code and details untouched, rather than
+    rewording `data_library` itself — so each layer says the thing that suits
+    its own reader, and Phase 9's messages and tests are unchanged.
+
+79. **A mismatched submission produces one of two warning codes, not one.**
+    A file sent for a library-backed slot warns `UNEXPECTED_INPUT`, the
+    existing code with its existing message. A dataset reference sent for an
+    upload slot warns `UNEXPECTED_DATASET_REFERENCE`, which is new. One code
+    covering both was the obvious alternative and was rejected: "the file was
+    ignored" and "the reference was ignored" send the user to different places,
+    and reusing the existing code with a reworded message would have changed a
+    message every existing test and client has seen since Phase 3.
+
+    Both are warnings and neither fails a Run, exactly as `UNEXPECTED_INPUT`
+    has always behaved. The Run fails separately, on the input that is actually
+    missing.
+
+80. **`test_contract_freeze.py` was amended a sixth time — every part of it an
+    addition.** Two schema field lists (`ActionInput` gained `source` and
+    `dataset_id`; `RunManifest` gained `library_inputs`), the Action inventory
+    (both registered slots now pin `source` as `upload` and `dataset_id` as
+    null), four error rows, and four forbidden Action imports.
+
+    Nothing already frozen moved: not a route, an error code that was already
+    listed, a metric key, a field's position or meaning, a limit, or the
+    manifest version. `FROZEN_ROUTES` is byte-identical for the second phase
+    running. The Action-inventory addition is the one worth calling out as a
+    *tightening* rather than a widening — it is build plan 11A's instruction
+    not to change either proof Action, written down as an assertion, so a later
+    phase converting one to library-backed fails a test rather than passing
+    quietly.
+
+    The three Phase 9 error classes added to `FROZEN_ERRORS`
+    (`UNKNOWN_DATASET`, `UNKNOWN_DATASET_VERSION`, `DATA_LIBRARY_ERROR`) were
+    not omissions in Phase 9: they had no HTTP surface to reach until an Action
+    could read the library. Pinning them now is what keeps a library failure
+    from quietly changing status later.
+
 No architectural conflicts were found. Framework, router, language, styling,
 backend framework, data engine and lockfile all match the build plan. Nothing
 from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no
@@ -8218,93 +8811,97 @@ previously reached only through Polars and now imported directly.
 
 ## Next Phase
 
-**Phase 11 — Library-Backed Action Inputs and Reproducible Runs.**
+**Phase 12 — Rich Artifact Output Framework.**
 
 **Not started.** Nothing for it has been scaffolded, stubbed or prepared:
-`ActionInput` is unchanged, no Action knows the Data Library exists, the runner
-does not import it, and no Run records a dataset version.
+`ActionResult` still carries only `outputs`, `metrics` and `rows_affected`; no
+artifact type, artifact metadata or artifact route exists; nothing in the
+backend imports `zipfile`; and `export.py` still renders one plain table per
+call, with no formatting beyond a bold header row.
 
-Phase 11 lets an ordinary Action consume an exact version of a persistent
-dataset without becoming storage-aware. It has what it needs and should not
-need to change anything beneath it: `load_version(dataset_id, version_id)`
-returns a DataFrame, which is exactly what `Action.run(inputs)` already takes,
-and `current_version(dataset_id, period)` is the "latest" concept 11D says must
-be resolved to an immutable ID _before_ the Action executes.
+Phase 12 separates *dataset outputs* from *artifacts* — finished files a Run
+produces, such as a formatted workbook — and gives a Run a way to return more
+than one of them. Read build plan 12A–12G in full before starting; the ordering
+matters, because 12B ("Extend `ActionResult` Safely") is what keeps every
+existing Action working while the result contract widens.
 
-### Phase 10 is complete
+### Phase 11 is complete
 
-Every exit criterion build plan Phase 10 lists, checked against what is actually
+Every exit criterion build plan Phase 11 lists, checked against what is actually
 in the repository:
 
-| Criterion                               | Evidence                                                                                                                                        |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| 10A canonical source schemas            | `source_schemas.py` + `docs/monthly-source-schemas.md`; sales/samples confirmed verbatim, assignments marked UNCONFIRMED; no aliasing, asserted |
-| 10B reporting period detection          | month read from `Invoice Date`, not the filename; all four single-file conditions refused; ambiguity requires an explicit format                |
-| 10C monthly sales commit                | all seven steps in order; a repeat upload of one file is refused; the month commits as one new version                                          |
-| 10D monthly samples commit              | a separate function to a separate dataset; both coexist for one month                                                                           |
-| 10E account assignment commit           | snapshot for a stated month; ambiguous ownership, blank account and blank rep all refused; the **full** file stored                             |
-| 10F coordinated monthly import          | validate-all-then-commit; one bad file commits none of the three; the report names what was and was not persisted                               |
-| 10G historical bootstrap                | one version **per month** from a multi-month file; one-time into an empty dataset; relaxes only the multi-month rule                            |
-| **exit criterion, as one sentence**     | `test_a_bootstrap_then_one_month_at_a_time` — bootstrap, then two monthly cycles carrying only that month, no duplication                       |
-| `docs/implementation-status.md` updated | this entry                                                                                                                                      |
+| Criterion                               | Evidence                                                                                                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 11A extended input source metadata      | `ActionInput.source` / `dataset_id`, defaulting to `upload`; both proof Actions untouched **and pinned as upload-backed** in the contract freeze       |
+| 11B dataset reference resolution        | `app/services/input_resolution.py`; the runner resolves before executing; an Action importing the library fails `test_contract_freeze.py`              |
+| 11C explicit version provenance         | `RunManifest.library_inputs` records the resolved immutable version ID, the period and the source hash, **beside** what was requested — never instead  |
+| 11D preserve determinism                | `latest` / `period:` resolve to a fixed `DatasetVersion` before `_execute_action`; a later commit cannot change a recorded Run; verified live          |
+| 11E regression tests                    | `tests/test_library_inputs.py`, 58 tests; its docstring maps each of 11E's six items to its test                                                       |
+| **exit criterion, as one sentence**     | a stored dataset version reaches an Action as a DataFrame through the same pipeline an upload does, and no Action, Action module or Action test knows the library exists |
+| `docs/implementation-status.md` updated | this entry                                                                                                                                            |
 
-### What a Phase 11 session inherits
+### What a Phase 12 session inherits
 
 - **A clean container is the normal starting condition.** `backend/.venv/` and
   `node_modules/` will not exist. `README.md` documents the four commands that
   rebuild them; they were followed exactly this session and needed nothing else.
-- **The suite must report 1,603 passed**, zero failures, zero skips, zero
+- **The suite must report 1,665 passed**, zero failures, zero skips, zero
   xfails.
-- **The ingestion layer is reachable in-process and from nowhere else**
-  (Known Issue 91). Phase 11 does not need a route either — 11A–11E are all
-  about the Action input contract — and adding one would again mean amending
-  `FROZEN_ROUTES` in a phase that did not ask for it.
-- **The account-assignment schema is provisional** (Known Issue 90). If the
-  user supplies the real header, confirming it is an edit to one declaration
-  in `source_schemas.py`, one assertion in `test_source_schemas.py`, and one
-  table in `docs/monthly-source-schemas.md`. Nothing else names those columns.
-- **Do not let library-backed inputs change what an Action receives.** Build
-  plan 11B is explicit that an Action must not open a library file itself: the
-  runner or an input-resolution service resolves a reference to a DataFrame
-  first. `Action.run(inputs)` keeps taking `{slot_id: DataFrame}`.
-- **11C and 11D are the same requirement seen twice.** A Run must record the
-  resolved immutable version ID, never `latest` or `current`. `current_version`
-  is where a moving concept becomes a fixed one, and it must be called before
-  execution, not during it.
-- **The Run pipeline still writes nothing**, and the tests that prove it are
-  untouched — including a Phase 10 one that runs a full three-file import and
-  asserts the working directory is still empty. Do not let library-backed
-  inputs change that: a version is _read_ from the library, and nothing about a
-  Run is written to it.
+- **`ActionResult` is the thing Phase 12 changes, and it is a frozen
+  dataclass** in `app/actions/base.py` carrying `outputs`, `metrics` and
+  `rows_affected`. Build plan 12B says to extend it *safely*: every existing
+  Action returns only `outputs`, and every one of them must keep working
+  untouched. The Phase 11 precedent for this is `ActionInput.source` — a new
+  field whose default is what the old code already meant.
+- **`export.py` already generates XLSX in memory** with `xlsxwriter`, including
+  `check_fits_worksheet` and the multi-sheet workbook of 6F.4. Build plan 12D's
+  rich rendering belongs beside those rather than in a second workbook writer.
+- **Phase 12 will need a route, and that is the first one since Phase 6F.**
+  12G asks for artifact API support, so unlike Phases 9, 10 and 11 this one has
+  a reason to amend `FROZEN_ROUTES` — as an addition, with the amendment
+  recorded in `test_contract_freeze.py`'s docstring the way every previous one
+  is.
+- **A Run still writes nothing, and Phase 12 must not change that.** An
+  artifact is bytes generated per request from what the Run holds, exactly as
+  CSV and XLSX downloads are. `test_data_library.py` and
+  `test_library_inputs.py` both assert the working directory stays empty; keep
+  those passing.
+- **Nothing under `src/` has changed since Phase 6G.** Phases 7 through 11 are
+  all backend. 12G may be the first phase since to touch the frontend; if it
+  does, `npm run lint` and `npm run build` are the checks, and the headless
+  Chromium run recorded under **Tests** is the pattern for verifying it.
+- **Library-backed inputs are finished and should need nothing.** An Action
+  that reads stored data declares `source=ActionInputSource.LIBRARY` and a
+  `dataset_id`; the runner resolves the version. Phase 12 is about what comes
+  *out* of a Run and should not touch input resolution at all.
 - **A test that touches the library gets an empty one automatically.** The
   autouse `data_library` fixture in `conftest.py` redirects `DATA_LIBRARY` at a
   temporary directory. Do not construct a
   `LocalDataLibrary(config.LIBRARY_DIRECTORY)` in a test — that writes into the
   repository.
-- **`tests/fixtures/monthly_sources.py` builds committed history cheaply.**
-  `bootstrap_history(SALES_HISTORY.id, source(ms.months((...))))` gives a
-  dataset with several live monthly versions in one call, which is what a
-  Phase 11 test needs to resolve a specific old version against.
+- **Known Issues 94–98 are Phase 11's deliberate gaps.** None of them is
+  Phase 12's to close: 94 and 96 (no library-backed Action, no version picker)
+  belong to Phases 13 and 15A, and 98 (one version per slot) belongs to 13E.
 
 ### Repository / Git
 
     Remote:         https://github.com/cmgolizio/ForgeXL
-    Current branch: claude/forgexl-phase-10-29w9l9
-    Descends from:  63e69fb  "phase 9 complete"
+    Current branch: claude/forgexl-phase-11-pds3ad
+    Descends from:  3de2436  "phase 10 complete"
 
 `origin/main` is at `8bfe29f` ("fixed problems prior to starting Phase 6I").
-Four commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7), `60817e8`
-(Phase 8) and `63e69fb` (Phase 9) — and all four are ancestors of this branch,
-so nothing is skipped or duplicated. Known Issue 75 stands, one commit larger:
-a session inspecting `main` alone would miss 6I, Phase 7, Phase 8 and Phase 9.
-Merging is the user's to do.
+Five commits are now unmerged — `2513e0e` (6I), `d3a0676` (Phase 7), `60817e8`
+(Phase 8), `63e69fb` (Phase 9) and `3de2436` (Phase 10) — and all five are
+ancestors of this branch, so nothing is skipped or duplicated. Known Issue 75
+stands, one commit larger: a session inspecting `main` alone would miss 6I and
+Phases 7 through 10. Merging is the user's to do.
 
-Phase 10's diff is 14 files: eight new (three backend modules, one fixture
-module, three test modules, one document) and six modified, with no deletion
-and no rename. Confirmed against `git show --name-status HEAD` in both
+Phase 11's diff is 14 files: two new (`backend/app/services/input_resolution.py`
+and `backend/tests/test_library_inputs.py`) and twelve modified, with no
+deletion and no rename. Confirmed against `git show --name-status HEAD` in both
 directions — every file the report lists is in the commit, and every file in
-the commit is in the report. `package.json`, `package-lock.json` and `backend/requirements.txt` are
-untouched, and **nothing under `src/` changed**.
+the commit is in the report. `package.json`, `package-lock.json` and
+`backend/requirements.txt` are untouched, and **nothing under `src/` changed**.
 
 ### Before writing any code, verify the repository is intact
 
@@ -8319,15 +8916,15 @@ another.
     md5sum backend/tests/*.py backend/app/*.py backend/app/*/*.py | awk '{print $1}' | sort | uniq -d
     npm run build
 
-The suite must report **1603 passed, zero xfails**. Every other line must
+The suite must report **1665 passed, zero xfails**. Every other line must
 produce no output, and the build must succeed.
 
 **And one check that belongs at the end of your phase, not the start.** Phase 9
 found the same file rename recorded as done by three consecutive phases and
 present in none of their commits (Known Issue 85). Phase 10 ran the fix that
-issue prescribes and it worked — the rename is in `63e69fb`, and Phase 10's own
-reported file lists were checked against `git show --name-status HEAD` before
-this entry was finalised. Keep doing it:
+issue prescribes and it worked — the rename is in `63e69fb` — and Phase 11 ran
+it twice: on Phase 10's commit before starting, and on its own before
+finalising this entry. Keep doing it:
 
     # AFTER committing, before reporting the phase complete:
     git show --name-status HEAD
@@ -8340,5 +8937,5 @@ in the report. Read the list both ways.
 
 If the environment is fresh — no `backend/.venv/`, no `node_modules/` — rebuild
 it with the four commands in `README.md`. That path was exercised end to end in
-Phase 8.1 and again in Phases 9 and 10, and needs nothing beyond what is
+Phase 8.1 and again in Phases 9, 10 and 11, and needs nothing beyond what is
 written there.

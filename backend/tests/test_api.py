@@ -90,6 +90,11 @@ def test_get_actions_serialises_every_definition_field(client_with_actions):
                         "required": True,
                         "accepted_extensions": [".csv", ".xlsx"],
                         "required_columns": [],
+                        # Phase 11: every slot now says where its data comes
+                        # from. An Action that says nothing means an upload,
+                        # which is what this one has always meant.
+                        "source": "upload",
+                        "dataset_id": None,
                     }
                 ],
                 "outputs": [
@@ -163,9 +168,26 @@ def test_get_actions_is_fully_json_serialisable(client):
                 "required",
                 "accepted_extensions",
                 "required_columns",
+                # Phase 11 (build plan 11A). Both are always serialised, so a
+                # client can tell an upload slot from a library-backed one
+                # without knowing which Actions exist.
+                "source",
+                "dataset_id",
             }
-            assert slot["accepted_extensions"], "a slot must accept some extension"
-            assert all(ext.startswith(".") for ext in slot["accepted_extensions"])
+            assert slot["source"] in {"upload", "library"}
+            if slot["source"] == "upload":
+                assert slot["accepted_extensions"], (
+                    "an upload slot must accept some extension"
+                )
+                assert all(
+                    ext.startswith(".") for ext in slot["accepted_extensions"]
+                )
+                assert slot["dataset_id"] is None
+            else:
+                # A library-backed slot reads a stored dataset version, so it
+                # names the dataset and accepts no file at all.
+                assert slot["dataset_id"]
+                assert slot["accepted_extensions"] == []
         for output in entry["outputs"]:
             assert set(output) == {"id", "label", "description", "formats"}
 

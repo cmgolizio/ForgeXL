@@ -6,6 +6,12 @@ API and the on-disk Run manifest (build plan Phase 2.2, sections 21 and 23).
 Action *execution* is deliberately not modelled here. Dataframes and the
 result of a transformation stay in plain Python (`app.actions.base`), because
 Pydantic adds nothing to values that are never serialised directly.
+
+Phase 11 adds the vocabulary for library-backed inputs: an input slot says
+where its data comes from (:class:`ActionInputSource`), and a Run records the
+exact dataset versions it read (:class:`LibraryInputMetadata`). Both are
+additions with defaults, so every Action and every manifest that existed
+before Phase 11 means exactly what it meant then (build plan 11A).
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: Version of the manifest format. Bump when the shape changes incompatibly,
 #: so a manifest produced by an older build remains identifiable.
@@ -35,11 +41,39 @@ MANIFEST_SCHEMA_VERSION = 2
 # ---------------------------------------------------------------------------
 
 
+class ActionInputSource(str, Enum):
+    """Where the data for one input slot comes from (build plan 11A).
+
+    Two sources, and the distinction is about *provenance*, not about what an
+    Action receives: either way the Action is handed a DataFrame keyed by the
+    slot's ID and never learns which of these filled it (build plan 11B).
+
+    :attr:`UPLOAD` is the default, so every Action written before Phase 11
+    keeps its exact meaning without declaring anything new.
+    """
+
+    #: A file the user submits with the Run.
+    UPLOAD = "upload"
+
+    #: An exact committed version of a persistent Data Library dataset.
+    LIBRARY = "library"
+
+
 class ActionInput(BaseModel):
     """One named input slot an Action requires (build plan section 9.2).
 
     Actions request named datasets rather than "some files", so the frontend
     can build one upload control per slot without Action-specific code.
+
+    Since Phase 11 a slot also says *where* its data comes from. `source` is
+    :attr:`ActionInputSource.UPLOAD` unless an Action says otherwise, so the
+    addition is invisible to every Action that existed before it (build plan
+    11A: "Existing Actions must continue to behave as they do now").
+
+    A library-backed slot names the dataset it reads and accepts no file; an
+    upload-backed slot accepts files and names no dataset. The two are
+    mutually exclusive by construction rather than by convention, so a slot
+    cannot half-declare either one.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -53,15 +87,70 @@ class ActionInput(BaseModel):
         default=True, description="Whether a Run may proceed without this slot."
     )
     accepted_extensions: tuple[str, ...] = Field(
-        description="Lowercase extensions including the leading dot, e.g. '.csv'."
+        default=(),
+        description=(
+            "Lowercase extensions including the leading dot, e.g. '.csv'. "
+            "Required for an upload slot and empty for a library-backed one, "
+            "which reads no file."
+        ),
     )
     required_columns: tuple[str, ...] = Field(
         default=(),
         description=(
             "Columns that must be present, compared exactly. An empty tuple "
-            "means the Action imposes no schema."
+            "means the Action imposes no schema. Checked identically whether "
+            "the slot was filled by an upload or by the Data Library."
         ),
     )
+    source: ActionInputSource = Field(
+        default=ActionInputSource.UPLOAD,
+        description=(
+            "Where this slot's data comes from (build plan 11A). Defaults to "
+            "an uploaded file, which is what every Action written before "
+            "Phase 11 means."
+        ),
+    )
+    dataset_id: str | None = Field(
+        default=None,
+        description=(
+            "Logical Data Library dataset this slot reads, e.g. "
+            "'sales_history'. Set only on a library-backed slot. Which "
+            "*version* is read is chosen per Run, not declared here."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_source(self) -> ActionInput:
+        """Keep the two kinds of slot from blurring into each other.
+
+        A slot that named a dataset *and* accepted files would leave both the
+        UI and the runner guessing which one the Action meant, and guessing is
+        the one thing this application does not do (build plan section 3.3).
+        """
+        if self.source is ActionInputSource.LIBRARY:
+            if not (self.dataset_id or "").strip():
+                raise ValueError(
+                    "A library-backed input slot must name the dataset it "
+                    "reads (build plan 11A)."
+                )
+            if self.accepted_extensions:
+                raise ValueError(
+                    "A library-backed input slot reads a stored dataset "
+                    "version, not an uploaded file, so it accepts no file "
+                    "extensions."
+                )
+        else:
+            if self.dataset_id is not None:
+                raise ValueError(
+                    "dataset_id is only meaningful on a library-backed input "
+                    "slot."
+                )
+            if not self.accepted_extensions:
+                raise ValueError(
+                    "An upload input slot must accept at least one file "
+                    "extension."
+                )
+        return self
 
 
 class ActionOutput(BaseModel):
@@ -211,6 +300,68 @@ class InputMetadata(BaseModel):
     columns: tuple[str, ...]
 
 
+class LibraryInputMetadata(BaseModel):
+    """One Data Library dataset version a Run read into an input slot.
+
+    This is build plan 11C — explicit version provenance — as a record. A Run
+    that consumed persistent data records *which exact immutable version* it
+    consumed, so the same report can be regenerated later against the same
+    source state.
+
+    `requested` and `version_id` are both here on purpose, and they answer two
+    different questions. `requested` is what the user asked for and may be a
+    moving concept: ``latest``, or ``period:2026-09``. `version_id` is what
+    that resolved to before the Action ran, and it never moves. Build plan 11D
+    forbids recording only the first; recording only the second would lose the
+    fact that the Run was asked for "the newest month" rather than for that
+    particular ID.
+
+    The remaining fields are the version's own identity carried onto the Run —
+    when it was committed, from which file, and that file's hash — so the
+    manifest explains its inputs without a second lookup. They are copied for
+    the same reason :class:`ActionReference` is copied into a manifest: an
+    audit record has to stand on its own.
+
+    Note the absence of a path. A dataset and a version are named by their
+    logical IDs, exactly as the rest of the API names things (build plan
+    section 11).
+    """
+
+    slot_id: str
+    dataset_id: str = Field(description="Logical dataset ID, e.g. 'sales_history'.")
+    dataset_label: str = Field(description="Human-readable dataset name.")
+    requested: str = Field(
+        description=(
+            "The reference as submitted, canonicalised: 'latest', "
+            "'period:YYYY-MM' or 'version:<version id>'."
+        )
+    )
+    version_id: str = Field(
+        description=(
+            "The resolved immutable version this Run actually read "
+            "(build plan 11C). Never a moving concept."
+        )
+    )
+    period: str | None = Field(
+        default=None, description="The version's reporting period, YYYY-MM."
+    )
+    version_created_at: datetime = Field(
+        description="When the version was committed to the Data Library."
+    )
+    source_filename: str = Field(
+        description=(
+            "Filename the version was originally ingested from. Metadata "
+            "only, exactly as on the version record."
+        )
+    )
+    source_sha256: str = Field(
+        description="SHA-256 of the bytes that version was built from."
+    )
+    row_count: int
+    column_count: int
+    columns: tuple[str, ...]
+
+
 class ColumnSchema(BaseModel):
     """One column of a result table, described so a client can render it.
 
@@ -305,6 +456,25 @@ class AuditInput(BaseModel):
     column_count: int
 
 
+class AuditLibraryInput(BaseModel):
+    """One stored dataset version the Run used, as the audit reports it.
+
+    Kept beside :class:`AuditInput` rather than folded into it. An uploaded
+    file and a committed dataset version are identified by different facts — a
+    filename versus a dataset and a version ID — and one model carrying both
+    would leave half its fields empty whichever kind it described.
+    """
+
+    slot_id: str
+    dataset_id: str
+    dataset_label: str
+    requested: str = Field(description="What was asked for, e.g. 'latest'.")
+    version_id: str = Field(description="What that resolved to (build plan 11C).")
+    period: str | None = None
+    row_count: int = Field(description="Rows this dataset version contributed.")
+    column_count: int
+
+
 class AuditResult(BaseModel):
     """One result table the Run produced, as the audit reports it."""
 
@@ -327,8 +497,19 @@ class RunAudit(BaseModel):
     action: ActionReference
     status: RunStatus
     inputs: tuple[AuditInput, ...] = ()
+    library_inputs: tuple[AuditLibraryInput, ...] = Field(
+        default=(),
+        description=(
+            "Data Library versions this Run read, empty for a Run that used "
+            "only uploads (build plan 11C)."
+        ),
+    )
     rows_received: int = Field(
-        default=0, description="Rows received across every input."
+        default=0,
+        description=(
+            "Rows received across every input, uploaded and library-backed "
+            "alike."
+        ),
     )
     rows_returned: int | None = Field(
         default=None,
@@ -372,6 +553,15 @@ class RunManifest(BaseModel):
     completed_at: datetime | None = None
     duration_ms: int | None = None
     inputs: tuple[InputMetadata, ...] = ()
+    library_inputs: tuple[LibraryInputMetadata, ...] = Field(
+        default=(),
+        description=(
+            "The exact Data Library versions this Run read (build plan 11C). "
+            "Empty for a Run whose inputs were all uploaded, which is why "
+            "adding it did not change the manifest schema version: a manifest "
+            "written before Phase 11 still validates against this model."
+        ),
+    )
     validation: ValidationSummary
     outputs: tuple[OutputMetadata, ...] = ()
     metrics: dict[str, Any] = Field(

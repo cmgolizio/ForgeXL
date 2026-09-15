@@ -31,6 +31,13 @@ the audit summary build plan 6E.5 asks for out of the Run's own fields, and
 :meth:`Run.to_manifest` carries it, so the explanation is always derived from
 the record rather than kept beside it.
 
+Since Phase 11 a Run also records the persistent data it read.
+`library_inputs` carries one :class:`~app.models.schemas.LibraryInputMetadata`
+per library-backed input slot, naming the exact immutable dataset version the
+Run used (build plan 11C). It is provenance, not data: the version's rows
+travel with the Run only as the frames the Action was handed, and the record
+holds their identity and their shape.
+
 Run identity lives here too. :func:`new_run_id` and :func:`parse_run_id` keep
 the Phase 3 convention exactly — ``str(uuid.uuid4())``, validated as the
 canonical string form of a UUID (build plan 6B.7).
@@ -51,8 +58,10 @@ from app.errors import UnknownRunError
 from app.models.schemas import (
     ActionReference,
     AuditInput,
+    AuditLibraryInput,
     AuditResult,
     InputMetadata,
+    LibraryInputMetadata,
     OutputMetadata,
     RunAudit,
     RunError,
@@ -177,6 +186,16 @@ class Run:
     completed_at: datetime | None = None
     duration_ms: int | None = None
     inputs: tuple[InputMetadata, ...] = ()
+
+    #: The Data Library versions this Run read, one per library-backed input
+    #: slot (build plan 11C). Empty for a Run whose inputs were all uploaded,
+    #: which is every Run before Phase 11 and every Run of the two registered
+    #: Actions. Recorded as *resolved* versions: a moving reference such as
+    #: ``latest`` is turned into an immutable version ID before the Action
+    #: executes, so committing a newer version later cannot change what this
+    #: Run says it used (build plan 11D).
+    library_inputs: tuple[LibraryInputMetadata, ...] = ()
+
     validation: ValidationSummary = field(
         default_factory=lambda: ValidationSummary(passed=True)
     )
@@ -250,6 +269,7 @@ class Run:
             completed_at=self.completed_at,
             duration_ms=self.duration_ms,
             inputs=self.inputs,
+            library_inputs=self.library_inputs,
             validation=self.validation,
             outputs=self.outputs,
             metrics=dict(self.metrics),
@@ -269,6 +289,11 @@ class Run:
         `rows_returned` is the primary result's row count, so a Run with
         several result tables reports the one it calls primary rather than a
         total that belongs to no table. Every table is listed in `results`.
+
+        `rows_received` counts every input the Run received, uploaded and
+        library-backed alike: a Run that read a stored month contributed those
+        rows as surely as an upload would, and leaving them out would make the
+        audit of a report Run read as though nothing went in.
         """
         primary = self.outputs[0] if self.outputs else None
         return RunAudit(
@@ -283,7 +308,23 @@ class Run:
                 )
                 for record in self.inputs
             ),
-            rows_received=sum(record.row_count for record in self.inputs),
+            library_inputs=tuple(
+                AuditLibraryInput(
+                    slot_id=record.slot_id,
+                    dataset_id=record.dataset_id,
+                    dataset_label=record.dataset_label,
+                    requested=record.requested,
+                    version_id=record.version_id,
+                    period=record.period,
+                    row_count=record.row_count,
+                    column_count=record.column_count,
+                )
+                for record in self.library_inputs
+            ),
+            rows_received=sum(
+                record.row_count
+                for record in (*self.inputs, *self.library_inputs)
+            ),
             rows_returned=primary.row_count if primary else None,
             rows_affected=self.rows_affected,
             results=tuple(
