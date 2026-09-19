@@ -21,6 +21,12 @@ ForgeXL filename convention, built from the Run's own record, and a Run with
 several result tables can be downloaded as one workbook. No response carries a
 server path, because there is no server path to carry (6F.8).
 
+Phase 12 adds two routes, the first since Phase 6F: one downloads a single
+artifact a Run produced, the other bundles every artifact into one ZIP
+(build plan 12F, 12G). Both follow the rules the export routes already follow —
+the bytes are what the Run holds or are assembled per request, nothing is read
+from or written to the filesystem, and no response names a server location.
+
 Phase 11 adds no route and changes no response shape. A library-backed input
 slot is filled by a text field beside the uploaded files, naming which stored
 dataset version to read; the manifest gains ``library_inputs`` recording the
@@ -43,11 +49,13 @@ from app.errors import (
     InvalidRequestError,
     MissingArtifactError,
     UnknownActionError,
+    UnknownArtifactError,
     UnknownOutputError,
 )
+from app.models.artifact import Artifact
 from app.models.run import Run
 from app.models.schemas import OutputMetadata, PreviewResponse, RunManifest
-from app.services import export, preview, run_store
+from app.services import archive, export, preview, run_store
 from app.services.runner import PendingUpload, execute_run
 
 router = APIRouter(prefix="/api", tags=["runs"])
@@ -203,12 +211,60 @@ def download_run_xlsx(run_id: str) -> Response:
 
     return _attachment(
         export.to_workbook_bytes(sheets),
-        export.XLSX_FORMAT,
+        media_type=_DOWNLOAD_MEDIA_TYPES[export.XLSX_FORMAT],
         filename=export.download_filename(
             action_id=run.action.id,
             extension=export.XLSX_FORMAT,
             timestamp=_result_timestamp(run),
         ),
+    )
+
+
+@router.get("/runs/{run_id}/artifacts/download/zip")
+def download_run_artifacts_zip(run_id: str) -> Response:
+    """Download every artifact of one Run as a single ZIP (build plan 12F).
+
+    Declared **before** the single-artifact route below so the two can never be
+    confused: ``/artifacts/download/zip`` is three segments and the other is
+    two, but stating the specific route first means the reading order matches
+    the matching order.
+
+    A Run with one artifact still bundles: whether the bundle is worth offering
+    is the client's decision, and the frontend only shows it when there is more
+    than one. A Run with no artifact at all has nothing to bundle, which is a
+    missing artifact rather than an unknown one.
+    """
+    run = run_store.get_run(run_id)
+    artifacts = _run_artifacts(run)
+
+    return _attachment(
+        archive.to_zip_bytes(artifacts, timestamp=_result_timestamp(run)),
+        media_type=archive.ZIP_MEDIA_TYPE,
+        filename=export.download_filename(
+            action_id=run.action.id,
+            extension=archive.ZIP_EXTENSION,
+            timestamp=_result_timestamp(run),
+        ),
+    )
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}/download")
+def download_artifact(run_id: str, artifact_id: str) -> Response:
+    """Download one artifact a Run produced (build plan 12G).
+
+    The bytes are the ones the Action produced and the Run has held since;
+    nothing is rendered here and nothing is read from disk. The file is offered
+    under the artifact's own filename rather than under the generic ForgeXL
+    export convention, because that name is the point of an artifact: a report
+    called "Beth Comeaux - September 2026.xlsx" must arrive under that name.
+    """
+    run = run_store.get_run(run_id)
+    artifact = _require_artifact(run, artifact_id)
+
+    return _attachment(
+        artifact.payload,
+        media_type=artifact.media_type,
+        filename=artifact.filename,
     )
 
 
@@ -275,6 +331,50 @@ def _result_sheets(run: Run) -> list[tuple[str, pl.DataFrame]]:
     ]
 
 
+def _require_artifact(run: Run, artifact_id: str) -> Artifact:
+    """Return one artifact of `run` by ID, or raise.
+
+    Matched against what the Run recorded, exactly as an output ID is: the
+    client's string selects among the artifacts this Run produced and reaches
+    nothing else. An ID the Run never recorded is unknown (404); one it
+    recorded but no longer holds — a Run whose result has been released — is a
+    missing artifact, which is the same distinction the output routes make.
+    """
+    known = {record.id for record in run.artifacts}
+    if artifact_id not in known:
+        raise UnknownArtifactError(
+            "That Run has no such artifact.",
+            details={
+                "run_id": run.run_id,
+                "artifact_id": artifact_id,
+                "available_artifact_ids": sorted(known),
+            },
+        )
+
+    artifact = run.result.artifact(artifact_id) if run.result is not None else None
+    if artifact is None:
+        raise MissingArtifactError(
+            "That artifact is no longer available.",
+            details={"run_id": run.run_id, "artifact_id": artifact_id},
+        )
+    return artifact
+
+
+def _run_artifacts(run: Run) -> list[Artifact]:
+    """Return every artifact of `run`, in the order the Run recorded them.
+
+    Walks the Run's recorded metadata rather than the held mapping, so the
+    archive's entries appear in the order the Action listed its artifacts
+    (build plan 12E) rather than in whatever order a dictionary happens to
+    iterate.
+    """
+    if not run.artifacts:
+        raise MissingArtifactError(
+            "That Run produced no artifacts.", details={"run_id": run.run_id}
+        )
+    return [_require_artifact(run, record.id) for record in run.artifacts]
+
+
 def _result_timestamp(run: Run) -> datetime:
     """The moment a download's filename is stamped with.
 
@@ -285,18 +385,86 @@ def _result_timestamp(run: Run) -> datetime:
     return run.completed_at or run.created_at
 
 
-def _attachment(payload: bytes, export_format: str, *, filename: str) -> Response:
+def _attachment(payload: bytes, *, media_type: str, filename: str) -> Response:
     """Send `payload` as a download named `filename`.
 
-    `filename` comes from :func:`app.services.export.download_filename`, which
-    emits only ``a-z``, ``0-9``, ``-`` and a single ``.`` — nothing the client
-    supplied reaches this header, and nothing here names a server location
-    (build plan 6F.6, 6F.8).
+    Two kinds of name reach this function and both are safe by construction,
+    for different reasons. An **export** filename comes from
+    :func:`app.services.export.download_filename`, which emits only ``a-z``,
+    ``0-9``, ``-`` and a single ``.``. An **artifact** filename is the Action's
+    own — it may hold spaces and accents, because that is the point of it — and
+    :func:`app.models.artifact.check_artifact_filename` refused every separator
+    and every control character when the artifact was built, so it cannot carry
+    a directory component or inject a header line.
+
+    Nothing the client supplied reaches this header either way, and nothing
+    here names a server location (build plan 6F.6, 6F.8).
     """
     return Response(
         content=payload,
-        media_type=_DOWNLOAD_MEDIA_TYPES[export_format],
-        headers={"content-disposition": f'attachment; filename="{filename}"'},
+        media_type=media_type,
+        headers={"content-disposition": _content_disposition(filename)},
+    )
+
+
+def _content_disposition(filename: str) -> str:
+    """Render the download header for `filename`, non-ASCII names included.
+
+    An ASCII name — which is every generated export filename, by construction
+    (build plan 6F.6) — is sent in the single quoted parameter it has always
+    been sent in. Nothing about those downloads changed in Phase 12.
+
+    An artifact's filename is the Action's own and may legitimately be
+    "Château Réal — September 2026.xlsx". The quoted parameter is defined over
+    ASCII only, so a name like that sent through it alone arrives mangled.
+    RFC 6266 and RFC 5987 answer with a second parameter: ``filename*``,
+    carrying the real name UTF-8 percent-encoded, which every current browser
+    prefers. The quoted parameter stays as the fallback, with each non-ASCII
+    character replaced by ``?`` — a readable approximation for a reader too old
+    to understand the other one.
+
+    Nothing the client supplied reaches here, and
+    :func:`app.models.artifact.check_artifact_filename` has already refused
+    every control character, so no filename can introduce a header line.
+    """
+    if filename.isascii():
+        return f'attachment; filename="{_quoted(filename)}"'
+
+    fallback = _quoted(filename.encode("ascii", "replace").decode("ascii"))
+    return (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{_percent_encoded(filename)}"
+    )
+
+
+def _quoted(filename: str) -> str:
+    """Escape the two characters an HTTP quoted-string cannot hold verbatim."""
+    return filename.replace("\\", "\\\\").replace('"', '\\"')
+
+
+#: Characters RFC 5987 lets an extended parameter carry unencoded. The
+#: unreserved set of RFC 3986, which is a subset of what RFC 5987 permits:
+#: encoding a little more than strictly necessary is always valid, and one set
+#: to reason about is better than two.
+_UNENCODED_FILENAME_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+
+def _percent_encoded(filename: str) -> str:
+    """Percent-encode `filename`'s UTF-8 bytes for an RFC 5987 parameter.
+
+    Written out rather than taken from :func:`urllib.parse.quote`, so the
+    backend imports no part of ``urllib`` at all. That is a rule
+    ``test_local_exposure.py`` enforces across the whole source tree: an
+    application that never imports an HTTP client cannot reach one by accident,
+    and the rule is worth more than the six lines it costs here.
+    """
+    return "".join(
+        chr(byte)
+        if chr(byte) in _UNENCODED_FILENAME_CHARACTERS
+        else f"%{byte:02X}"
+        for byte in filename.encode("utf-8")
     )
 
 
@@ -328,7 +496,7 @@ def _download(run_id: str, output_id: str, export_format: str) -> Response:
 
     return _attachment(
         payload,
-        export_format,
+        media_type=_DOWNLOAD_MEDIA_TYPES[export_format],
         filename=export.download_filename(
             action_id=run.action.id,
             output_id=output_id,

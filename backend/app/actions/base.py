@@ -12,6 +12,14 @@ is what makes a new Action a single new module.
 wrote an internal Parquet file and wrote a manifest file. Nothing is written to
 disk any more — see docs/architecture.md — but the split itself is unchanged.)
 
+Since Phase 12 an Action may also return *artifacts* — finished files such as
+a formatted report workbook (build plan 12A-12B). That is an addition and
+nothing more: :attr:`ActionResult.artifacts` defaults to empty, so an Action
+that returns only dataframes means exactly what it always meant, and no Action
+is required to produce an artifact. Rendering one is still not the Action's own
+job to improvise: :mod:`app.services.workbook` owns the spreadsheet engine, and
+an Action describes the report it wants rather than driving xlsxwriter itself.
+
 Actions are ordinary imported Python. There is no plugin loader and nothing is
 ever executed from disk at runtime.
 """
@@ -19,18 +27,23 @@ ever executed from disk at runtime.
 from __future__ import annotations
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import polars as pl
 
+from app.models.artifact import Artifact
 from app.models.schemas import (
     ActionDefinition,
     ActionInput,
     ActionOutput,
     ValidationIssue,
 )
+
+#: Re-exported so one import line carries the whole Action contract:
+#: ``from app.actions.base import Action, ActionResult, Artifact``.
+__all__ = ["Action", "ActionResult", "Artifact"]
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,58 @@ class ActionResult:
     #: two row counts, which is a different fact (build plan section 3.3).
     rows_affected: int | None = None
 
+    #: Finished files this Action produced, in the order they should be listed
+    #: (build plan 12B, 12E). Empty for every Action that returns only tables,
+    #: which is what the default means: build plan 12B's "Do not require every
+    #: Action to generate artifacts", expressed as a default rather than as a
+    #: convention.
+    #:
+    #: Last in the field order deliberately. Artifacts belong beside `outputs`
+    #: by meaning, but inserting a field there would change what a positional
+    #: ``ActionResult(frames, metrics)`` constructs, and an addition must not
+    #: silently re-point an existing call.
+    artifacts: Sequence[Artifact] = ()
+
+    def __post_init__(self) -> None:
+        """Freeze the artifact list and refuse a collision inside it.
+
+        Build plan 12E requires artifact IDs and filenames to be
+        collision-safe. Two artifacts sharing an ID would leave one of them
+        unreachable through the download route; two sharing a filename would
+        leave one of them overwriting the other when the ZIP bundle is
+        extracted (build plan 12F). Neither is renamed on the Action's behalf —
+        this application does not rename things quietly (build plan section
+        3.3) — so the collision is reported and the Run fails.
+
+        A :class:`ValueError` rather than a structured error: it is a fault in
+        the Action, not in anything the user submitted. The runner converts
+        whatever an Action raises into the
+        :class:`~app.errors.ActionExecutionError` a client sees, and logs the
+        cause locally.
+        """
+        object.__setattr__(self, "artifacts", tuple(self.artifacts))
+
+        # Filenames are compared case-insensitively because macOS and Windows
+        # treat two names differing only in case as one file, so an archive
+        # holding both loses one of them on extraction.
+        for label, values in (
+            ("id", [artifact.id for artifact in self.artifacts]),
+            (
+                "filename",
+                [artifact.filename.casefold() for artifact in self.artifacts],
+            ),
+        ):
+            duplicates = sorted(
+                {value for value in values if values.count(value) > 1}
+            )
+            if duplicates:
+                raise ValueError(
+                    f"Two artifacts share the same {label}: "
+                    f"{', '.join(repr(value) for value in duplicates)}. "
+                    "Artifact IDs and filenames must be unique within a Run "
+                    "(build plan 12E)."
+                )
+
 
 class Action(abc.ABC):
     """Base class for every Action.
@@ -76,6 +141,22 @@ class Action(abc.ABC):
 
             def run(self, inputs):
                 return ActionResult(outputs={"result": inputs["source_file"]})
+
+    An Action that also produces finished files returns them beside its
+    tables (build plan 12B)::
+
+            def run(self, inputs):
+                return ActionResult(
+                    outputs={"result": frame},
+                    artifacts=(
+                        Artifact.workbook(
+                            id="summary",
+                            label="Summary",
+                            filename="Summary.xlsx",
+                            payload=render_workbook(sheets),
+                        ),
+                    ),
+                )
 
     Instances hold no per-Run state: one instance is registered at import time
     and reused for every Run, so :meth:`run` must not mutate ``self``.

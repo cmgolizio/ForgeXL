@@ -46,6 +46,13 @@ received, and the columns it added or dropped — and the Action's own
 summary can state it. None of that reaches the result table itself: audit and
 result metadata stay out of the user's data (build plan 6E.6).
 
+Since Phase 12 the runner also collects what an Action produced *besides*
+tables. An Action may return artifacts — finished files such as formatted
+report workbooks (build plan 12A) — and the runner records their metadata on
+the Run and keeps their bytes with the result frames, so one lifetime covers
+both. An Action that returns none is unchanged in every respect, which is what
+build plan 12B means by extending the result contract safely.
+
 Failure handling follows build plan 3.9: once a Run is recorded, every
 outcome — including a failure — leaves the Run recorded, with its error and its
 full validation results. Evidence of a failed Run is never destroyed. A failed
@@ -75,10 +82,12 @@ from app.errors import (
     UnsupportedExtensionError,
     WorkbenchError,
 )
+from app.models.artifact import Artifact
 from app.models.run import Run, RunResult, now
 from app.models.schemas import (
     ActionInputSource,
     ActionReference,
+    ArtifactMetadata,
     InputMetadata,
     LibraryInputMetadata,
     OutputMetadata,
@@ -217,6 +226,8 @@ def execute_run(
         outputs, tables = _collect_outputs(
             action, result, input_records, library_records
         )
+        artifact_records, artifact_files = _collect_artifacts(result)
+        produced = RunResult.of(tables, artifact_files)
 
         completed_at = now()
         run = run_store.update_run(
@@ -227,8 +238,9 @@ def execute_run(
                 duration_ms=_elapsed_ms(created_at, completed_at),
                 validation=ValidationSummary(passed=True, warnings=warnings),
                 outputs=outputs,
+                artifacts=artifact_records,
                 metrics=dict(result.metrics),
-                result=tables,
+                result=produced,
                 rows_affected=result.rows_affected,
             )
         )
@@ -487,7 +499,7 @@ def _collect_outputs(
     result: ActionResult,
     input_records: Sequence[InputMetadata],
     library_records: Sequence[LibraryInputMetadata] = (),
-) -> tuple[tuple[OutputMetadata, ...], RunResult]:
+) -> tuple[tuple[OutputMetadata, ...], dict[str, pl.DataFrame]]:
     """Describe each declared output and keep its frame (build plan 6D.5, 6E.1).
 
     Walks the Action's declared outputs in declaration order, so the first one
@@ -502,6 +514,11 @@ def _collect_outputs(
     the uploads that parsed and, since Phase 11, the dataset versions that
     resolved — rather than against what the Action declares it wants, so the
     description is of the data, not of the intention.
+
+    Returns the metadata and the frames separately rather than an assembled
+    :class:`~app.models.run.RunResult`. Since Phase 12 a Run's result also
+    carries the Action's artifacts, and one construction that knows about both
+    is better than one that has to be rebuilt to add the second half.
 
     Nothing is written. The frames the Action returned are the frames the Run
     keeps, and CSV/XLSX are generated from them when a download asks for them
@@ -545,7 +562,32 @@ def _collect_outputs(
             )
         )
 
-    return tuple(outputs), RunResult.of(tables)
+    return tuple(outputs), tables
+
+
+def _collect_artifacts(
+    result: ActionResult,
+) -> tuple[tuple[ArtifactMetadata, ...], dict[str, Artifact]]:
+    """Describe the Action's artifacts and keep their bytes (build plan 12C).
+
+    The order the Action listed them in is the order they are recorded in, so
+    a report that produces one workbook per sales rep controls how the list
+    reads (build plan 12E).
+
+    Nothing is generated here and nothing is validated here. The artifacts
+    arrive complete — :class:`~app.models.artifact.Artifact` refuses an unsafe
+    filename when it is constructed, and
+    :class:`~app.actions.base.ActionResult` refuses a collision between two of
+    them — so this stage only splits what the Action produced into the part the
+    manifest carries and the part the Run holds. That split is the same one
+    :func:`_collect_outputs` makes between an output's metadata and its frame.
+
+    Nothing is written. The bytes an Action produced are the bytes the Run
+    keeps, and a download hands them straight back (build plan 6D.7, 12C).
+    """
+    records = tuple(artifact.to_metadata() for artifact in result.artifacts)
+    files = {artifact.id: artifact for artifact in result.artifacts}
+    return records, files
 
 
 def _finalize_failed(
@@ -577,6 +619,10 @@ def _finalize_failed(
             # frames — an Action that omits a declared output is exactly that
             # case.
             outputs=(),
+            # Same rule for the files it produced: a Run that failed offers
+            # no artifact, and the bytes of any it had already rendered are
+            # released with the rest of the result (build plan 6D.8, 12C).
+            artifacts=(),
             result=None,
             # Same rule: a Run that produced nothing has affected nothing it
             # can report (build plan 6D.8).

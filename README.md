@@ -143,8 +143,11 @@ being guessed. Maximum upload size is 250 MB per file, configurable via
 
 Uploaded files are read into memory and parsed from there. Results stay as
 in-memory dataframes. CSV and XLSX exports are generated when you click
-download and released with the response. No upload, no intermediate file, no
-export and no manifest ever reaches the filesystem.
+download and released with the response. So are any **generated files** an
+Action produces — a formatted report workbook, or the ZIP of all of them: those
+are held as bytes by the Run and handed straight back. No upload, no
+intermediate file, no export, no generated file and no manifest ever reaches
+the filesystem.
 
 The consequence: **restarting the backend clears Run history.** A link to an
 earlier Run then returns a clean "run not found" message. This is intended V1
@@ -243,7 +246,8 @@ src/lib/                 Frontend API paths and display formatters
 backend/app/actions/     The Action contract, the registry, and each Action
 backend/app/api/         FastAPI routes
 backend/app/services/    Parsing, the Run pipeline, results, preview, export,
-                         the Data Library and its ingestion and input resolution
+                         report rendering and archiving, the Data Library and
+                         its ingestion and input resolution
 backend/tests/           The test suite and its synthetic fixture system
 docs/                    Build plan, architecture, implementation status
 scripts/                 Backend launcher and the LAN address helper
@@ -266,3 +270,13 @@ To read stored history instead of an upload, declare the slot with
 `source=ActionInputSource.LIBRARY` and the `dataset_id` it reads. The runner
 resolves the version and hands your `run(inputs)` an ordinary dataframe — an
 Action never opens a Data Library file itself.
+
+To produce **finished files** as well as tables — one formatted workbook per
+sales rep, say — return them in `ActionResult.artifacts`. Render each with
+`app.services.workbook`, which owns the spreadsheet engine and does the
+formatting (worksheets, currency and percentage formats, column widths, frozen
+panes, filters, conditional formats, totals) from report data you have already
+calculated. Name each with `artifact_ids()` and `artifact_filename()` so the
+IDs and filenames stay safe and collision-free. ForgeXL then lists the files
+under the result, offers a download link for each and a ZIP of all of them —
+again with no frontend change.

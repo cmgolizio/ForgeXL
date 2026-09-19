@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionDescription from "@/components/workbench/ActionDescription";
 import ActionSelector from "@/components/workbench/ActionSelector";
+import ArtifactDownloads from "@/components/workbench/ArtifactDownloads";
 import AuditSummary from "@/components/workbench/AuditSummary";
 import DataPreview from "@/components/workbench/DataPreview";
 import ExportButtons from "@/components/workbench/ExportButtons";
@@ -295,6 +296,17 @@ export default function ActionRunner() {
             runId={manifest.run_id}
             output={selectedOutput}
             outputs={outputs}
+          />
+
+          {/*
+            Artifacts belong to the Run, not to the selected result table, so
+            this sits outside the output-specific section above and does not
+            change when the reader switches tables. It renders nothing when
+            the Action produced no files (build plan 12B, 12G).
+          */}
+          <ArtifactDownloads
+            runId={manifest.run_id}
+            artifacts={manifest.artifacts}
           />
 
           <AuditSummary manifest={manifest} />

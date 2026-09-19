@@ -38,6 +38,13 @@ Run used (build plan 11C). It is provenance, not data: the version's rows
 travel with the Run only as the frames the Action was handed, and the record
 holds their identity and their shape.
 
+Since Phase 12 a Run can also carry *artifacts* — finished files the Action
+produced, such as formatted report workbooks (build plan 12A). They travel
+with :class:`RunResult`, beside the result tables, for exactly the reason the
+tables do: one lifetime, one owner, and forgetting the Run releases both. The
+manifest carries their metadata and never their bytes, the same split
+:class:`~app.models.schemas.OutputMetadata` already makes for a table.
+
 Run identity lives here too. :func:`new_run_id` and :func:`parse_run_id` keep
 the Phase 3 convention exactly — ``str(uuid.uuid4())``, validated as the
 canonical string form of a UUID (build plan 6B.7).
@@ -55,8 +62,11 @@ from typing import Any
 import polars as pl
 
 from app.errors import UnknownRunError
+from app.models.artifact import Artifact
 from app.models.schemas import (
     ActionReference,
+    ArtifactMetadata,
+    AuditArtifact,
     AuditInput,
     AuditLibraryInput,
     AuditResult,
@@ -103,7 +113,7 @@ def now() -> datetime:
 
 @dataclass(frozen=True)
 class RunResult:
-    """The tables one Action produced, held in memory (build plan 6D.5).
+    """What one Action produced, held in memory (build plan 6D.5, 12C).
 
     An Action declares one or more outputs and returns a frame for each. Most
     Actions produce exactly one, so the common case must stay simple: `primary`
@@ -115,8 +125,15 @@ class RunResult:
     the run keeps them as DataFrames rather than as intermediary spreadsheet
     files (build plan 6D.7). They are released when the Run is forgotten.
 
-    `tables` is exposed read-only so a caller cannot add or drop a result table
-    behind the Run's back — the same rule the frozen Run itself follows.
+    Since Phase 12 it also carries the Run's artifacts — the finished files the
+    Action produced (build plan 12A). They sit here rather than in a container
+    of their own so that a Run has exactly one place its produced data lives
+    and exactly one thing to release: dropping the Run drops the frames and the
+    artifact bytes together (build plan 12C, 6D.8).
+
+    `tables` and `artifacts` are both exposed read-only so a caller cannot add
+    or drop something the Run produced behind its back — the same rule the
+    frozen Run itself follows.
     """
 
     #: Result frames keyed by the Action's declared output ID, in declaration
@@ -127,6 +144,12 @@ class RunResult:
     #: does not name one.
     primary_output_id: str
 
+    #: Finished files keyed by artifact ID, in the order the Action listed
+    #: them (build plan 12E). Empty for every Action that produces only
+    #: tables, which is what "artifacts are never required" means in practice
+    #: (build plan 12B). Read-only.
+    artifacts: Mapping[str, Artifact] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if self.primary_output_id not in self.tables:
             raise ValueError(
@@ -134,18 +157,34 @@ class RunResult:
                 f"result tables {sorted(self.tables)}."
             )
         object.__setattr__(self, "tables", MappingProxyType(dict(self.tables)))
+        object.__setattr__(
+            self, "artifacts", MappingProxyType(dict(self.artifacts))
+        )
 
     @classmethod
-    def of(cls, tables: Mapping[str, pl.DataFrame]) -> RunResult:
+    def of(
+        cls,
+        tables: Mapping[str, pl.DataFrame],
+        artifacts: Mapping[str, Artifact] | None = None,
+    ) -> RunResult:
         """Build a result whose primary table is the first one given.
 
         The runner builds `tables` by walking the Action's declared outputs, so
         "first given" is "first declared" — the Action decides which table is
         primary, by declaring it first.
+
+        `artifacts` is optional and defaults to none, so every call written
+        before Phase 12 means exactly what it meant then. A Run still requires
+        at least one result table: artifacts are an addition to what an Action
+        may produce, not a replacement for what it must (build plan 12B).
         """
         if not tables:
             raise ValueError("A result must contain at least one table.")
-        return cls(tables=tables, primary_output_id=next(iter(tables)))
+        return cls(
+            tables=tables,
+            primary_output_id=next(iter(tables)),
+            artifacts=artifacts or {},
+        )
 
     @property
     def primary(self) -> pl.DataFrame:
@@ -166,6 +205,10 @@ class RunResult:
     def table(self, output_id: str) -> pl.DataFrame | None:
         """Return one result table by output ID, or None if it has none."""
         return self.tables.get(output_id)
+
+    def artifact(self, artifact_id: str) -> Artifact | None:
+        """Return one artifact by ID, or None if this Run produced no such file."""
+        return self.artifacts.get(artifact_id)
 
 
 @dataclass(frozen=True)
@@ -200,10 +243,19 @@ class Run:
         default_factory=lambda: ValidationSummary(passed=True)
     )
     outputs: tuple[OutputMetadata, ...] = ()
+
+    #: The finished files this Run produced, described without their bytes
+    #: (build plan 12C). Sits beside `outputs` for the same reason
+    #: `OutputMetadata` sits beside `result`: the description is what the
+    #: manifest carries, and the bytes stay in `result`. Empty for a Run that
+    #: produced only tables.
+    artifacts: tuple[ArtifactMetadata, ...] = ()
+
     metrics: Mapping[str, Any] = field(default_factory=dict)
     error: RunError | None = None
 
-    #: The tables this Run produced, kept in memory (build plan 6D.5/6D.7).
+    #: What this Run produced — its tables and, since Phase 12, its artifacts
+    #: — kept in memory (build plan 6D.5/6D.7, 12C).
     #: None until the Action has succeeded, and None on every failed Run, so a
     #: Run never carries a partially valid result (build plan 6D.8). It is
     #: deliberately absent from `to_manifest`: the manifest describes results,
@@ -272,6 +324,7 @@ class Run:
             library_inputs=self.library_inputs,
             validation=self.validation,
             outputs=self.outputs,
+            artifacts=self.artifacts,
             metrics=dict(self.metrics),
             error=self.error,
             audit=self.to_audit(),
@@ -288,7 +341,11 @@ class Run:
 
         `rows_returned` is the primary result's row count, so a Run with
         several result tables reports the one it calls primary rather than a
-        total that belongs to no table. Every table is listed in `results`.
+        total that belongs to no table. Every table is listed in `results`,
+        and since Phase 12 every finished file the Run produced is listed in
+        `artifacts` (build plan 12A). A Run whose purpose was to produce twelve
+        workbooks would otherwise be audited as though it had produced only the
+        tables behind them.
 
         `rows_received` counts every input the Run received, uploaded and
         library-backed alike: a Run that read a stored month contributed those
@@ -337,6 +394,16 @@ class Run:
                 for output in self.outputs
             ),
             primary_result_id=primary.id if primary else None,
+            artifacts=tuple(
+                AuditArtifact(
+                    artifact_id=artifact.id,
+                    label=artifact.label,
+                    filename=artifact.filename,
+                    artifact_type=artifact.artifact_type,
+                    size_bytes=artifact.size_bytes,
+                )
+                for artifact in self.artifacts
+            ),
             warnings=self.validation.warnings,
             errors=self.validation.errors,
             metrics=dict(self.metrics),
