@@ -9,6 +9,7 @@ import AuditSummary from "@/components/workbench/AuditSummary";
 import DataPreview from "@/components/workbench/DataPreview";
 import ExportButtons from "@/components/workbench/ExportButtons";
 import FileUploadSlot from "@/components/workbench/FileUploadSlot";
+import LibraryInputSlot from "@/components/workbench/LibraryInputSlot";
 import OutputSelector from "@/components/workbench/OutputSelector";
 import ResultsSummary from "@/components/workbench/ResultsSummary";
 import RunButton from "@/components/workbench/RunButton";
@@ -69,20 +70,45 @@ export default function ActionRunner() {
     [actions, selectedActionId],
   );
 
-  const missingRequiredSlots = useMemo(
+  // A slot is filled either by an upload or by stored data (build plan 11A).
+  // Only the first kind can be filled here, so only the first kind can be
+  // missing; nothing below branches on which Action is selected.
+  const uploadSlots = useMemo(
     () =>
       (selectedAction?.inputs ?? []).filter(
-        (input) => input.required && !files[input.id],
+        (input) => (input.source ?? "upload") !== "library",
       ),
-    [selectedAction, files],
+    [selectedAction],
+  );
+
+  const librarySlots = useMemo(
+    () =>
+      (selectedAction?.inputs ?? []).filter(
+        (input) => (input.source ?? "upload") === "library",
+      ),
+    [selectedAction],
+  );
+
+  const missingRequiredSlots = useMemo(
+    () => uploadSlots.filter((input) => input.required && !files[input.id]),
+    [uploadSlots, files],
   );
 
   const running = runStatus === "running";
 
   // Build plan section 30: the Run button is disabled when no Action is
   // selected, when a required file is missing, or while a Run is executing.
+  //
+  // And, since Phase 13, when the Action reads stored data. Choosing which
+  // stored version to read is build plan 15A's Monthly Reports workflow; until
+  // it exists the browser has no way to say, and offering a Run that could
+  // only fail would be worse than saying so. Driven by the slot's declared
+  // source, not by which Action it belongs to.
   const canRun =
-    selectedAction !== null && missingRequiredSlots.length === 0 && !running;
+    selectedAction !== null &&
+    missingRequiredSlots.length === 0 &&
+    librarySlots.length === 0 &&
+    !running;
 
   const state = useMemo(() => {
     if (actionsStatus === "loading") return "loading_actions";
@@ -98,6 +124,7 @@ export default function ActionRunner() {
         : "server_error";
     }
     if (!selectedAction) return "idle";
+    if (librarySlots.length > 0) return "idle";
     return missingRequiredSlots.length === 0 ? "ready" : "idle";
   }, [
     actionsStatus,
@@ -105,6 +132,7 @@ export default function ActionRunner() {
     runStatus,
     runError,
     selectedAction,
+    librarySlots,
     missingRequiredSlots,
   ]);
 
@@ -255,17 +283,28 @@ export default function ActionRunner() {
           <h3 className='text-sm font-medium text-zinc-900 dark:text-zinc-100'>
             Required Inputs
           </h3>
-          {selectedAction.inputs.map((input) => (
-            <FileUploadSlot
-              key={input.id}
-              input={input}
-              file={files[input.id] ?? null}
-              error={slotErrors[input.id] ?? null}
-              disabled={running}
-              onSelect={(file) => handleSelectFile(input, file)}
-              onRemove={() => handleRemoveFile(input)}
-            />
-          ))}
+          {selectedAction.inputs.map((input) =>
+            (input.source ?? "upload") === "library" ? (
+              <LibraryInputSlot key={input.id} input={input} />
+            ) : (
+              <FileUploadSlot
+                key={input.id}
+                input={input}
+                file={files[input.id] ?? null}
+                error={slotErrors[input.id] ?? null}
+                disabled={running}
+                onSelect={(file) => handleSelectFile(input, file)}
+                onRemove={() => handleRemoveFile(input)}
+              />
+            ),
+          )}
+          {librarySlots.length > 0 ? (
+            <p className='text-xs text-zinc-600 dark:text-zinc-400'>
+              This Action reads saved data, so choosing a reporting period
+              happens in the Monthly Reports workflow rather than here. It
+              cannot be run from this screen yet.
+            </p>
+          ) : null}
         </section>
       ) : null}
 

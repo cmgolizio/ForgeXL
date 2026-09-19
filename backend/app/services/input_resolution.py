@@ -26,9 +26,33 @@ DataFrames").
 **A moving selector stops moving here.** Build plan 11D allows ``latest`` and
 ``period:2026-09`` at selection time and requires the immutable version ID
 before execution. :func:`resolve_slot` is the single place that conversion
-happens, and it returns the resolved :class:`~app.models.library.DatasetVersion`
-alongside the frame, so the runner records what was actually read rather than
-what was asked for (build plan 11C).
+happens, and it returns the resolved
+:class:`~app.models.library.DatasetVersion` objects alongside the frame, so
+the runner records what was actually read rather than what was asked for
+(build plan 11C).
+
+**A slot may read more than one version.** Phase 11 resolved exactly one, and
+that was all Phase 11 needed. Build plan 13B requires a report Action's inputs
+to "include the historical information required by the report specification",
+and the year-over-year and year-to-date windows of build plan 13C span more
+months than one monthly version holds — the Data Library stores one version
+per month by construction (build plan 10G). The ``history`` selector added in
+Phase 13 therefore resolves a *set*: every live version of the dataset, in
+period order, optionally bounded at a month.
+
+Nothing about build plan 11's guarantees changed to make that work:
+
+* every version is still immutable and still resolved before execution;
+* every version read is still recorded on the Run individually, by its own ID
+  (11C), so the provenance of a report is the full list of months it was built
+  from rather than a summary of them;
+* naming those IDs back reproduces the Run exactly (11D);
+* the Action still receives ``{slot_id: DataFrame}`` and still cannot tell
+  where a slot's rows came from (11B).
+
+The merge itself is a plain vertical concatenation in period order, and it
+refuses rather than reconciles when two months disagree about their columns —
+see :func:`_merge_versions`.
 
 Nothing here writes. The Data Library is read, and a Run remains something
 that persists nothing at all — reading stored history does not make a Run a
@@ -44,6 +68,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from app.errors import (
+    InconsistentDatasetVersionsError,
     InvalidDatasetSelectorError,
     UnknownDatasetError,
     UnknownDatasetVersionError,
@@ -72,6 +97,7 @@ RESOLUTION_FAILURES: tuple[type[Exception], ...] = (
     InvalidDatasetSelectorError,
     UnknownDatasetError,
     UnknownDatasetVersionError,
+    InconsistentDatasetVersionsError,
 )
 
 
@@ -131,7 +157,57 @@ class ResolvedLibraryInput:
         )
 
 
-def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibraryInput:
+@dataclass(frozen=True)
+class ResolvedLibrarySlot:
+    """One library-backed slot, resolved to the versions it reads.
+
+    A slot filled by ``latest``, ``period:`` or ``version:`` holds exactly one
+    entry in :attr:`versions`; a slot filled by ``history`` holds one per
+    month, oldest first. :attr:`frame` is what the Action receives either way,
+    which is why the Action cannot tell the two apart (build plan 11B).
+
+    The metadata is per *version*, never per slot: build plan 11C asks a Run
+    to record "the exact dataset versions used", and one record summarising
+    several months would be a summary rather than the identities. A history
+    slot therefore contributes several entries to the manifest's
+    ``library_inputs``, each naming its own month, source file and hash, and
+    every one of them is a version ID a later Run can name back.
+    """
+
+    slot_id: str
+    dataset_id: str
+    dataset_label: str
+
+    #: What the caller asked for. May be a moving concept; it is never what
+    #: the Run records as the identity of the data it used.
+    selector: DatasetSelector
+
+    #: What that resolved to, oldest period first. Never empty.
+    versions: tuple[ResolvedLibraryInput, ...]
+
+    #: Every version's rows as one table, in period order.
+    frame: pl.DataFrame
+
+    @property
+    def version(self) -> DatasetVersion:
+        """The newest version this slot read.
+
+        Present for the single-version case, where "the version" is an
+        unambiguous thing to ask for. A history slot has no single version and
+        callers that care read :attr:`versions`.
+        """
+        return self.versions[-1].version
+
+    def as_metadata(self) -> tuple[LibraryInputMetadata, ...]:
+        """Render every version read, for the Run manifest (build plan 11C)."""
+        return tuple(item.as_metadata() for item in self.versions)
+
+    def as_audit(self) -> tuple[AuditLibraryInput, ...]:
+        """Render every version read, for the Run's audit summary."""
+        return tuple(item.as_audit() for item in self.versions)
+
+
+def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibrarySlot:
     """Resolve one library-backed input slot into its rows.
 
     Args:
@@ -139,12 +215,15 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibraryInput:
             it reads is declared by the Action, never by the client, so no
             client-supplied string ever chooses which dataset is opened.
         reference: What the client asked for, as text — ``latest``,
-            ``period:YYYY-MM`` or ``version:<version id>``.
+            ``period:YYYY-MM``, ``version:<version id>``, ``history`` or
+            ``history:YYYY-MM``.
 
     Raises:
         InvalidDatasetSelectorError: `reference` is not one of those forms.
         UnknownDatasetError: the dataset has nothing committed to it.
         UnknownDatasetVersionError: no version answers the reference.
+        InconsistentDatasetVersionsError: the versions a ``history`` selector
+            named do not describe the same columns.
         DataLibraryError: the library's stored state could not be read.
     """
     if slot.source is not ActionInputSource.LIBRARY:
@@ -157,16 +236,162 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibraryInput:
     selector = DatasetSelector.parse(reference)
     label = dataset_label(dataset_id)
 
-    version = resolve_version(dataset_id, selector, label=label)
-    frame = data_library.load_version(dataset_id, version.version_id)
+    versions = resolve_versions(dataset_id, selector, label=label)
+    resolved = tuple(
+        ResolvedLibraryInput(
+            slot_id=slot.id,
+            dataset_id=dataset_id,
+            dataset_label=label,
+            selector=selector,
+            version=version,
+            frame=data_library.load_version(dataset_id, version.version_id),
+        )
+        for version in versions
+    )
 
-    return ResolvedLibraryInput(
+    return ResolvedLibrarySlot(
         slot_id=slot.id,
         dataset_id=dataset_id,
         dataset_label=label,
         selector=selector,
-        version=version,
-        frame=frame,
+        versions=resolved,
+        frame=_merge_versions(resolved, label=label),
+    )
+
+
+def resolve_versions(
+    dataset_id: str, selector: DatasetSelector, *, label: str | None = None
+) -> tuple[DatasetVersion, ...]:
+    """Return every immutable version `selector` names, oldest period first.
+
+    One entry for every selector but ``history``, which is the only one that
+    names a set. Either way what leaves this function is
+    :class:`~app.models.library.DatasetVersion` objects and never a selector,
+    which is build plan 11D's rule.
+    """
+    name = label or dataset_label(dataset_id)
+
+    if selector.kind is not DatasetSelectorKind.HISTORY:
+        return (resolve_version(dataset_id, selector, label=name),)
+
+    _require_dataset(dataset_id, name)
+    return history_versions(dataset_id, selector.value, label=name)
+
+
+def history_versions(
+    dataset_id: str, through: str | None = None, *, label: str | None = None
+) -> tuple[DatasetVersion, ...]:
+    """Every live version of `dataset_id`, oldest month first.
+
+    Args:
+        dataset_id: The dataset to read.
+        through: The last month to include, or None for every month there is.
+            **The bounding month must itself have a live version.** A bound
+            that quietly fell back to an earlier month would mean a report
+            built for August while its Run said September, and the only place
+            that mistake is visible is here, where the request and the stored
+            months are both in hand.
+        label: The dataset's display name, for the message.
+
+    Only versions that state a reporting period take part; a version without
+    one cannot be placed in the sequence, and the ingestion layer never
+    commits one (build plan 10C-10G).
+
+    Raises:
+        UnknownDatasetVersionError: the dataset holds no live version, or the
+            bounding month has none.
+    """
+    name = label or dataset_label(dataset_id)
+    live = [
+        version
+        for version in data_library.current_versions(dataset_id)
+        if version.period is not None
+    ]
+    if not live:
+        raise UnknownDatasetVersionError(
+            f"No {name} data has been committed to the Data Library yet.",
+            details={
+                "dataset_id": dataset_id,
+                "selector": DatasetSelector(
+                    kind=DatasetSelectorKind.HISTORY, value=through
+                ).as_text(),
+            },
+        )
+
+    ordered = sorted(
+        live, key=lambda version: (version.period or "", version.created_at)
+    )
+    if through is None:
+        return tuple(ordered)
+
+    months = [version.period for version in ordered]
+    if through not in months:
+        raise UnknownDatasetVersionError(
+            f"{name} has no committed data for {through}. Import that month, "
+            "or name a month that has been imported.",
+            details={
+                "dataset_id": dataset_id,
+                "period": through,
+                "available_periods": months,
+            },
+        )
+
+    return tuple(
+        version
+        for version in ordered
+        if version.period is not None and version.period <= through
+    )
+
+
+def _merge_versions(
+    resolved: tuple[ResolvedLibraryInput, ...], *, label: str
+) -> pl.DataFrame:
+    """Read several versions of one dataset as one table.
+
+    One version is returned as it stands — the overwhelmingly common case, and
+    the only one that existed before Phase 13 — so nothing about a
+    single-version slot passes through a merge at all.
+
+    Several are concatenated in the order they were resolved, which is period
+    order, after each is selected into the newest version's column order. The
+    reorder is safe because the column *names* are identical by the time it
+    happens; the check above is what guarantees that.
+
+    Columns must match exactly. Two months whose exports carry different
+    columns describe different things, and merging them would mean inventing
+    values for one month or dropping a column from the other (build plan
+    section 3.3). Types may differ and are widened: the same column stored as
+    an integer in a CSV month and as a float in a workbook month is one
+    column, and no value changes.
+    """
+    if len(resolved) == 1:
+        return resolved[0].frame
+
+    newest = resolved[-1]
+    expected = tuple(newest.frame.columns)
+    reference = set(expected)
+
+    for item in resolved:
+        present = set(item.frame.columns)
+        if present == reference:
+            continue
+        raise InconsistentDatasetVersionsError(
+            f"The {label} months this Run read do not describe the same "
+            "columns, so they cannot be read as one table. "
+            f"{item.version.period or item.version.version_id} and "
+            f"{newest.version.period or newest.version.version_id} differ.",
+            details={
+                "dataset_id": item.dataset_id,
+                "period": item.version.period,
+                "compared_with": newest.version.period,
+                "missing_columns": sorted(reference - present),
+                "unexpected_columns": sorted(present - reference),
+            },
+        )
+
+    return pl.concat(
+        [item.frame.select(expected) for item in resolved],
+        how="vertical_relaxed",
     )
 
 

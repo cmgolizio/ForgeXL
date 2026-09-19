@@ -84,7 +84,9 @@ from a client component is a build error, and none of its variables is a
 | Parsing                  | `backend/app/services/parser.py`           | Bytes → Polars DataFrame. CSV, XLSX, worksheet-ambiguity rules.                   |
 | Run state                | `backend/app/services/run_store.py`        | Where a Run lives. Five methods, one implementation in V1.                        |
 | Persistent data          | `backend/app/services/data_library.py`     | Versioned business datasets that outlive a Run. Seven methods. See §5a.           |
-| Input resolution         | `backend/app/services/input_resolution.py` | A dataset reference → one immutable version → a DataFrame. See §5c.               |
+| Input resolution         | `backend/app/services/input_resolution.py` | A dataset reference → immutable version(s) → a DataFrame. See §5c.                |
+| Monthly ingestion        | `backend/app/services/ingestion.py`        | The three recurring source files → validated, versioned library commits. §5b.    |
+| Report calculations      | `backend/app/services/monthly_report.py`   | The monthly report's arithmetic, against the definitions in `report_spec`. §5e.  |
 | Results                  | `backend/app/services/results.py`          | Measuring a result table: schema, row counts, columns added/dropped.              |
 | Preview                  | `backend/app/services/preview.py`          | Paginated slices of a retained result frame.                                      |
 | Export                   | `backend/app/services/export.py`           | CSV/XLSX bytes from a result frame, generated per request.                        |
@@ -409,6 +411,26 @@ what gets opened. It names a version, in one of three forms:
 | `latest`               | the live version with the greatest reporting month |
 | `period:2026-09`       | the live version for that month                    |
 | `version:<version id>` | that exact version, superseded or not              |
+| `history`              | every live version, oldest month first             |
+| `history:2026-09`      | every live version through that month              |
+
+The last two were added in Phase 13 and are the only forms that name a **set**.
+Build plan 13B requires a report Action's inputs to "include the historical
+information required by the report specification", and the year-over-year and
+year-to-date windows of 13C span more months than one version holds — the
+library stores one version per month by construction.
+
+A `history` slot resolves to every live version in period order, loads each
+one, and hands the Action their rows as one frame. The bounding month **must
+itself have a live version**, or the Run fails with `UNKNOWN_DATASET_VERSION`
+before the Action starts: a bound that quietly fell back to an earlier month
+would mean a report built for August while its Run said September.
+
+Months whose exports carry different columns are refused with
+`INCONSISTENT_DATASET_VERSIONS` rather than reconciled — merging them would
+mean inventing values for one month or dropping a column from the other. Months
+that differ only in *type*, which a CSV month and a workbook month can, are
+merged: the widening changes no value.
 
 `latest` is the greatest **month**, not the most recent commit. The two differ
 exactly when an old month is corrected: restating March after June was imported
@@ -416,11 +438,16 @@ commits a March version last, and answering "latest" with March would be wrong.
 
 ### Reproducible Runs
 
-The first two forms move; the third does not. Build plan 11D allows a moving
-form at selection and forbids one at execution, so resolution happens once,
-before the Action runs, and the Run records **both**: `requested` (`latest`)
-and `version_id` (what that resolved to). A Run therefore says what it was
-asked for and what it actually read.
+Only `version:` is fixed; every other form moves. Build plan 11D allows a
+moving form at selection and forbids one at execution, so resolution happens
+once, before the Action runs, and the Run records **both**: `requested`
+(`latest`) and `version_id` (what that resolved to). A Run therefore says what
+it was asked for and what it actually read.
+
+A slot that read a span of months records **one entry per month**, each naming
+its own period, source file and hash. Recording the months individually rather
+than summarising them is what keeps build plan 11C's promise: every identity a
+later Run would have to name back is written down.
 
 The consequence is the reason the phase exists. Committing a newer version, or
 superseding the one a Run used, cannot change what that Run says it used — the
@@ -445,11 +472,16 @@ source state, and a superseded version stays loadable by ID forever.
 
 ### Not built
 
-There is no frontend control for choosing a dataset version, because no
-registered Action has a library-backed slot and build plan Phase 11 describes
-no UI. Choosing versions in the browser belongs to the monthly reporting
-workflow of build plan 15A, together with the endpoints it would need to list
-datasets and versions.
+There is no frontend control for choosing a dataset version. Choosing versions
+in the browser belongs to the monthly reporting workflow of build plan 15A,
+together with the endpoints it would need to list datasets and versions.
+
+Since Phase 13 a registered Action *does* have library-backed slots, so the
+Action selector can reach one. The workbench renders such a slot as a
+read-only `LibraryInputSlot` — there is nothing to upload — and disables the
+Run button with a line saying where the reporting period is chosen. That is
+driven by the slot's declared `source` and by nothing else: no Action ID,
+slot ID or dataset name appears in any frontend file.
 
 ---
 
@@ -558,12 +590,96 @@ No registered Action produces an artifact, so the frontend's "Generated Files"
 section renders for no Action that ships today. That is deliberate: build plan
 12B keeps artifacts optional and 12G asks only for generic support, which is
 what the section is — every line of it comes from `manifest.artifacts`. The
-first Action that produces one is build plan Phase 13's monthly report.
+first Action that produces one is build plan Phase 14's rep workbooks: Phase 13
+registered the report Action and it returns tables only, because Phase 13's
+exit criterion is the calculations "before any attention is paid to workbook
+appearance".
 
 Artifacts are also not persisted. They live and die with their Run, exactly as
 result frames do. The Data Library stores source and history data; build plan
 12C is explicit that it "does not automatically become a permanent report
 archive".
+
+---
+
+## 5e. The monthly report engine (Phase 13)
+
+The first Action that reads the Data Library, and the first whose behaviour is
+specified by a document rather than by a paragraph of the build plan.
+
+```text
+sales_history      history:2026-09  ─┐
+sample_history     history:2026-09  ─┤ app/services/input_resolution.py
+account_assignments period:2026-09  ─┘        ↓
+                                     three DataFrames
+                                              ↓
+              app/actions/monthly_sales_rep_report.py   the Action contract
+                                              ↓
+              app/services/monthly_report.py            the arithmetic
+                   ↑
+              app/models/report_spec.py                 the definitions
+                                              ↓
+                              twelve result tables, keyed by Sales Rep
+                                              ↓
+                          [Phase 14] app/services/workbook.py
+```
+
+Three modules, and the split is the point:
+
+| module | owns |
+| ------ | ---- |
+| `app/models/report_spec.py` | the business definitions: what revenue is, what a placement is, which conditions fail a report. Declarations only — it reads no file and no clock. |
+| `app/services/monthly_report.py` | the arithmetic. It spells no rule of its own; it reads the declarations. |
+| `app/actions/monthly_sales_rep_report.py` | the Action contract — ID, version, slots, outputs, the validation hook — and nothing else. |
+
+`docs/monthly-sales-rep-report-spec.md` is the same specification in prose and
+is the authoritative one.
+
+### One period, resolved once
+
+Build plan 13C: no section of the report decides for itself what "this month"
+means. The reporting period is the greatest calendar month present in
+`Invoice Date` across the sales history the Run read — from the data, never
+from a filename — and all five comparison windows are derived from it. The Run
+chooses it explicitly by bounding its history selector, and that bounding month
+must exist, so the month derived is always the month requested.
+
+### The roster comes from the snapshot
+
+Build plan 13D forbids a hard-coded rep list. The reps are the distinct
+non-blank `Sales Person` values in the account-assignment snapshot for the
+month, and every figure is attributed by that snapshot rather than by the rep
+named on the invoice (build plan 9E). A rep who sold nothing still gets a row;
+a rep named only on transactions gets a warning and no report.
+
+### Prepared once, company once
+
+Build plan 13E and 13G, in one sentence each: dates, measures and ownership
+are attached once per Run rather than once per rep, and the company's figures
+are calculated once and joined in, so two reps can never be shown company
+totals that disagree.
+
+### Fail, or qualify
+
+Build plan 13H splits the conditions the report detects in two, and the
+specification says which is which:
+
+- **Errors** are returned from the Action's `validate()` hook, so the Run fails
+  with a structured 422 **before** a single table is calculated. A blank
+  measure, an unowned account with activity, an account owned twice, an
+  unreadable date, a sample history that skips the month.
+- **Warnings** travel in the `data_quality` result table, because an Action has
+  no warning channel of its own and everything `validate()` returns fails the
+  Run. An unrecognised rep, an unexpected invoice type, an added source column,
+  repeated rows, an empty comparison window, a short placement history — and,
+  on every Run for now, that some of the report's definitions are still
+  provisional.
+
+### Not built
+
+No workbook. Build plan Phase 13 produces tables and Phase 14 renders them,
+with the report renderer Phase 12 already built and tested. No frontend either:
+the reporting-period picker is build plan 15A.
 
 ---
 
@@ -737,4 +853,5 @@ the Run manifest.
 | What has been built and verified, phase by phase                                                  | `docs/implementation-status.md`        |
 | Which components were filesystem-coupled before Phase 6, and what the frozen public contracts are | `docs/phase-6a-compatibility-audit.md` |
 | The exact columns of the three monthly source files, and every ingestion refusal and warning      | `docs/monthly-source-schemas.md`       |
+| Every business definition the monthly sales-rep report is built on, and which are still provisional | `docs/monthly-sales-rep-report-spec.md` |
 | Known issues, limitations and deviations                                                          | `docs/implementation-status.md`        |

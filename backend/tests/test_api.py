@@ -225,11 +225,20 @@ def test_unknown_api_path_returns_404(client):
 
 
 def test_get_actions_exposes_both_proof_actions(client):
-    payload = client.get("/api/actions").json()
+    """Both proof Actions are served, first and in their original order.
 
-    assert [entry["id"] for entry in payload["actions"]] == [
+    Phase 13 added a third (build plan 13B). The selector is built from this
+    list, so the order is what the user sees; a new Action appends to it and
+    never reorders what was there.
+    """
+    payload = client.get("/api/actions").json()
+    served = [entry["id"] for entry in payload["actions"]]
+
+    assert served[:2] == ["exact_duplicate_remover", "product_master_builder"]
+    assert served == [
         "exact_duplicate_remover",
         "product_master_builder",
+        "monthly_sales_rep_report",
     ]
 
 
@@ -281,11 +290,25 @@ def test_get_actions_describes_the_product_master_builder(client):
     assert output["formats"] == ["csv", "xlsx"]
 
 
-def test_the_two_actions_declare_different_input_slot_ids(client):
-    """The frontend renders slots from these IDs; it never hardcodes them."""
+def test_every_action_declares_its_own_input_slot_ids(client):
+    """The frontend renders slots from these IDs; it never hardcodes them.
+
+    Every slot ID across the whole registry is distinct, which is what lets a
+    slot ID be the multipart field name whichever Action is being run. The two
+    proof slots are still named here, because their names are what build plan
+    sections 26 and 27 fix.
+    """
     payload = client.get("/api/actions").json()
     slot_ids = [
         slot["id"] for entry in payload["actions"] for slot in entry["inputs"]
     ]
 
-    assert slot_ids == ["source_file", "sales_file"]
+    assert len(set(slot_ids)) == len(slot_ids)
+    assert slot_ids[:2] == ["source_file", "sales_file"]
+    assert slot_ids == [
+        "source_file",
+        "sales_file",
+        "sales_history",
+        "sample_history",
+        "account_assignments",
+    ]

@@ -16,6 +16,7 @@ from collections.abc import Iterable
 
 from app.actions.base import Action
 from app.actions.exact_duplicate_remover import ExactDuplicateRemoverAction
+from app.actions.monthly_sales_rep_report import MonthlySalesRepReportAction
 from app.actions.product_master_builder import ProductMasterBuilderAction
 
 
@@ -82,6 +83,7 @@ ACTION_REGISTRY = ActionRegistry(
     (
         ExactDuplicateRemoverAction(),
         ProductMasterBuilderAction(),
+        MonthlySalesRepReportAction(),
     )
 )
 

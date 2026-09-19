@@ -33,10 +33,17 @@ the record rather than kept beside it.
 
 Since Phase 11 a Run also records the persistent data it read.
 `library_inputs` carries one :class:`~app.models.schemas.LibraryInputMetadata`
-per library-backed input slot, naming the exact immutable dataset version the
-Run used (build plan 11C). It is provenance, not data: the version's rows
-travel with the Run only as the frames the Action was handed, and the record
-holds their identity and their shape.
+per dataset **version** read, naming the exact immutable version the Run used
+(build plan 11C). It is provenance, not data: the version's rows travel with
+the Run only as the frames the Action was handed, and the record holds their
+identity and their shape.
+
+A slot usually reads one version and so contributes one record. Since Phase 13
+a slot may read a *span* of months — the `history` selector build plan 13B's
+report needs — and then contributes one record per month, each naming its own
+period, source file and hash. Recording the months individually rather than
+summarising them is what keeps 11C's promise: every identity a later Run would
+have to name back is written down.
 
 Since Phase 12 a Run can also carry *artifacts* — finished files the Action
 produced, such as formatted report workbooks (build plan 12A). They travel

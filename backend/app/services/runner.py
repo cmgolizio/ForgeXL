@@ -27,11 +27,13 @@ download time by :mod:`app.services.export`.
 
 Since Phase 11 an input slot may instead be filled from the persistent Data
 Library. :mod:`app.services.input_resolution` turns the reference the client
-submitted into one exact immutable version and its rows *before* the Action
+submitted into exact immutable versions and their rows *before* the Action
 runs, so the Action still receives ``{slot_id: DataFrame}`` and never learns
-that a library exists (build plan 11B). The version's identity is recorded on
+that a library exists (build plan 11B). Every version's identity is recorded on
 the Run, which is what makes the Run reproducible later (11C, 11D). That is a
 *read*: the Run pipeline still writes nothing, to the library or anywhere else.
+Since Phase 13 one slot may read a span of months rather than a single version
+(build plan 13B); the stage is unchanged and simply records more of them.
 
 Run state is owned by :mod:`app.services.run_store` (build plan 6B). The runner
 records a Run when it starts and hands the store a new state at every
@@ -98,7 +100,7 @@ from app.models.schemas import (
 )
 from app.services import input_resolution, parser, results, run_store, storage
 from app.services.export import EXPORT_FORMATS
-from app.services.input_resolution import ResolvedLibraryInput
+from app.services.input_resolution import ResolvedLibrarySlot
 from app.services.storage import BinarySource, LoadedUpload
 
 logger = logging.getLogger(__name__)
@@ -151,10 +153,10 @@ def execute_run(
         uploads: Submitted files keyed by input slot ID.
         dataset_references: Data Library references keyed by input slot ID,
             for the Action's library-backed slots (build plan 11A). Each is
-            text — ``latest``, ``period:YYYY-MM`` or ``version:<version id>``.
-            Omitted entirely by an Action with no such slot, which is why the
-            parameter has a default: a caller written before Phase 11 keeps
-            working unchanged.
+            text — ``latest``, ``period:YYYY-MM``, ``version:<version id>``,
+            ``history`` or ``history:YYYY-MM``. Omitted entirely by an Action
+            with no such slot, which is why the parameter has a default: a
+            caller written before Phase 11 keeps working unchanged.
 
     Raises:
         UploadTooLargeError: an upload exceeded the configured limit.
@@ -198,7 +200,11 @@ def execute_run(
         )
 
         input_records = tuple(_input_metadata(loaded, parsed))
-        library_records = tuple(item.as_metadata() for item in resolved.values())
+        library_records = tuple(
+            record
+            for item in resolved.values()
+            for record in item.as_metadata()
+        )
         # The uploaded bytes have served their purpose: everything downstream
         # works from the dataframes and this metadata. Releasing them here
         # keeps a Run from holding a second copy of every input for the rest
@@ -430,7 +436,7 @@ def _missing_columns_message(source: ActionInputSource) -> str:
 
 def _resolve_library_slots(
     action: Action, references: Mapping[str, str]
-) -> tuple[dict[str, ResolvedLibraryInput], list[ValidationIssue]]:
+) -> tuple[dict[str, ResolvedLibrarySlot], list[ValidationIssue]]:
     """Resolve every library-backed slot to an exact version (build plan 11B).
 
     Runs before the Action does, so what executes is always a fixed immutable
@@ -445,8 +451,13 @@ def _resolve_library_slots(
     a different thing entirely and is deliberately not caught here: it
     propagates as the 500 it is, so a corrupt store is never reported to the
     user as though they had asked for the wrong month.
+
+    Since Phase 13 a slot may resolve to several versions at once — a
+    ``history`` reference, which build plan 13B's report needs. Nothing about
+    this stage changed to allow it: it still resolves each slot exactly once
+    and still records every version read, there are simply more of them.
     """
-    resolved: dict[str, ResolvedLibraryInput] = {}
+    resolved: dict[str, ResolvedLibrarySlot] = {}
     issues: list[ValidationIssue] = []
 
     for slot in action.inputs:
@@ -458,9 +469,10 @@ def _resolve_library_slots(
             if slot.required:
                 issues.append(
                     MissingInputError(
-                        f"{slot.label} is required. Name the stored version "
-                        "to use: 'latest', 'period:YYYY-MM' or "
-                        "'version:<version id>'.",
+                        f"{slot.label} is required. Name the stored data "
+                        "to use: 'latest', 'period:YYYY-MM', "
+                        "'version:<version id>', 'history' or "
+                        "'history:YYYY-MM'.",
                         details={
                             "slot_id": slot.id,
                             "label": slot.label,
@@ -650,7 +662,7 @@ def delete_run(run_id: str) -> bool:
 
 def _frames_by_slot(
     parsed: Mapping[str, parser.ParsedFile],
-    resolved: Mapping[str, ResolvedLibraryInput] = {},
+    resolved: Mapping[str, ResolvedLibrarySlot] = {},
 ) -> dict[str, pl.DataFrame]:
     """The Action's inputs as one mapping of named frames.
 
@@ -658,6 +670,10 @@ def _frames_by_slot(
     indistinguishable in it, which is the whole of build plan 11B's promise to
     the Action. The two can never collide: a slot declares exactly one source,
     so no slot ID appears in both halves.
+
+    A slot that read several stored months contributes the one table they
+    merge into, assembled by the resolver. The Action sees a frame, the same
+    way it sees a frame for an upload.
     """
     return {
         **{slot_id: item.frame for slot_id, item in parsed.items()},

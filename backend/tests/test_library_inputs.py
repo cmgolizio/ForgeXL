@@ -314,10 +314,21 @@ def test_an_input_slot_is_upload_backed_unless_it_says_otherwise() -> None:
 
 
 def test_the_registered_actions_did_not_have_to_change() -> None:
-    """Build plan 11A states this as an instruction; here it is as a fact."""
+    """Build plan 11A states this as an instruction; here it is as a fact.
+
+    Scoped to the two proof Actions by name, which is what 11A is about: "Do
+    not require changes to Exact Duplicate Remover or Product Master Builder
+    merely because library-backed inputs now exist." Phase 13 registered an
+    Action that *does* read the library (build plan 13B), and that neither of
+    these two was touched to allow it is the point. Naming them is a stronger
+    assertion than sweeping the registry, which would have quietly stopped
+    asserting anything the moment a library-backed Action existed.
+    """
     from app.actions import registry
 
-    for action in registry.list_actions():
+    for action_id in ("exact_duplicate_remover", "product_master_builder"):
+        action = registry.get_action(action_id)
+        assert action is not None
         for slot in action.inputs:
             assert slot.source is ActionInputSource.UPLOAD
             assert slot.dataset_id is None
@@ -326,10 +337,10 @@ def test_the_registered_actions_did_not_have_to_change() -> None:
 def test_every_registered_library_slot_names_a_declared_dataset() -> None:
     """A slot may only read a dataset ForgeXL declares.
 
-    Vacuous today — no registered Action reads the library — and deliberately
-    written anyway: the moment one does (build plan Phase 13), a typo in its
-    `dataset_id` becomes a failing test here rather than a Run that reports an
-    unknown dataset to the user.
+    Vacuous when it was written — no registered Action read the library — and
+    deliberately written anyway. Phase 13's report Action reads three of them,
+    so a typo in a `dataset_id` is now a failing test here rather than a Run
+    that reports an unknown dataset to the user.
     """
     from app.actions import registry
     from app.models.library import known_dataset

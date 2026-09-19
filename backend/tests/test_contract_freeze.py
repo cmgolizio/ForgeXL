@@ -116,6 +116,31 @@ no file and runs no pipeline stage, which is what every entry on that list
 actually guards against. :func:`test_an_action_may_use_the_report_renderer`
 states that as an assertion so it cannot be read as a gap.
 
+*Phase 13* makes four amendments, and every one of them is an addition:
+
+* :data:`FROZEN_ACTIONS` — a third Action, ``monthly_sales_rep_report`` (build
+  plan 13B). The first registered Action with library-backed input slots, the
+  first with more than one slot, the first with more than one output and the
+  first below version 1.0.0. Neither proof Action's entry changed in any
+  respect.
+* :data:`FROZEN_PROOF_ACTIONS` — a *new* list, the two proof Actions, which
+  the behavioural tests below parametrize over instead of over the whole
+  inventory. Those tests drive an Action with :func:`_frame_for`, a single
+  generic frame, and assert the deduplication behaviour build plan sections 26
+  and 27 fix; neither is a statement about a three-input report whose
+  arithmetic is checked in `test_golden_month.py`. **No assertion was weakened
+  to accommodate the new Action**: the identity, slot, output, metadata,
+  signature and filesystem checks still cover all three.
+* :data:`FROZEN_ERRORS` — one new code, ``INCONSISTENT_DATASET_VERSIONS``, for
+  a ``history`` selector whose months do not describe the same columns. The
+  failure had no code before this phase because no slot could read more than
+  one version. Nothing already listed moved.
+* :data:`ACTION_MODULES` — the new Action's module, so the same
+  filesystem-independence checks apply to it.
+
+`FROZEN_ROUTES` is byte-identical for the third phase running: a report is a
+Run like any other, served by the endpoints that already exist.
+
 Everything else in this module — the metric keys, the preview limits, the
 determinism checks, the Action inventory's identities and outputs — is
 untouched across every one of those amendments and still passing. Each amended entry says
@@ -138,6 +163,7 @@ from app import config
 from app.actions import registry as registry_module
 from app.actions.base import Action, ActionResult
 from app.actions.exact_duplicate_remover import ExactDuplicateRemoverAction
+from app.actions.monthly_sales_rep_report import MonthlySalesRepReportAction
 from app.actions.product_master_builder import ProductMasterBuilderAction
 from app.actions.registry import ActionRegistry, DuplicateActionIdError
 from app.errors import (
@@ -149,6 +175,7 @@ from app.errors import (
     EmptyDatasetError,
     ExportTooLargeError,
     FileParseError,
+    InconsistentDatasetVersionsError,
     IngestionValidationError,
     InputValidationError,
     InvalidDatasetSelectorError,
@@ -190,6 +217,7 @@ from app.models.schemas import (
 )
 from app.services import preview
 
+from tests.fixtures import report_months
 from tests.helpers import make_action
 
 # ---------------------------------------------------------------------------
@@ -200,6 +228,27 @@ from tests.helpers import make_action
 # these values, so they are asserted from one place rather than restated per
 # test.
 # ---------------------------------------------------------------------------
+
+#: The fifteen columns of the confirmed transaction exports (Phase 10A).
+#: Written out rather than imported: this module pins values, and a frozen
+#: value read from the thing it is freezing proves nothing.
+TRANSACTION_COLUMN_NAMES: tuple[str, ...] = (
+    "Invoice Date",
+    "Invoice Type",
+    "Invoice Number",
+    "Customer",
+    "Cust Type",
+    "Sales Person",
+    "SKU",
+    "Vintage",
+    "Supplier",
+    "Producer",
+    "Selection",
+    "Volume",
+    "Quantity",
+    "Item Price",
+    "Total Price",
+)
 
 FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
@@ -261,10 +310,105 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
             {"input_rows", "output_rows", "duplicate_product_rows_removed"}
         ),
     },
+    # Added in Phase 13. The first Action that reads the Data Library, the
+    # first with several input slots, the first with several outputs and the
+    # first below 1.0.0 — the version says its business definitions are not
+    # yet confirmed against the finished monthly report, which is a fact about
+    # the specification rather than about the code (build plan 13A).
+    {
+        "id": "monthly_sales_rep_report",
+        "version": "0.1.0",
+        "name": "Monthly Sales Rep Report",
+        "inputs": (
+            {
+                "id": "sales_history",
+                "label": "Sales History",
+                "required": True,
+                "accepted_extensions": (),
+                "required_columns": TRANSACTION_COLUMN_NAMES,
+                "source": ActionInputSource.LIBRARY,
+                "dataset_id": "sales_history",
+            },
+            {
+                "id": "sample_history",
+                "label": "Sample History",
+                "required": True,
+                "accepted_extensions": (),
+                "required_columns": TRANSACTION_COLUMN_NAMES,
+                "source": ActionInputSource.LIBRARY,
+                "dataset_id": "sample_history",
+            },
+            {
+                "id": "account_assignments",
+                "label": "Account Assignments",
+                "required": True,
+                "accepted_extensions": (),
+                "required_columns": ("Customer", "Sales Person"),
+                "source": ActionInputSource.LIBRARY,
+                "dataset_id": "account_assignments",
+            },
+        ),
+        "outputs": tuple(
+            {"id": section_id, "label": label, "formats": ("csv", "xlsx")}
+            for section_id, label in (
+                ("rep_summary", "Rep Summary"),
+                ("company_summary", "Company Summary"),
+                ("account_performance", "Account Performance"),
+                ("supplier_performance", "Supplier Performance"),
+                (
+                    "company_supplier_performance",
+                    "Company Supplier Performance",
+                ),
+                ("supplier_comparison", "Company vs Rep by Supplier"),
+                ("product_performance", "Product Performance"),
+                ("placements", "Placements"),
+                ("placement_detail", "Placement Detail"),
+                ("samples", "Samples"),
+                ("sample_detail", "Sample Detail"),
+                ("data_quality", "Data Quality"),
+            )
+        ),
+        "metric_keys": frozenset(
+            {
+                "sales_reps",
+                "accounts",
+                "history_months",
+                "sales_rows",
+                "sample_rows",
+                "placements",
+                "warnings",
+            }
+        ),
+    },
 )
 
 FROZEN_ACTION_IDS: tuple[str, ...] = tuple(
     entry["id"] for entry in FROZEN_ACTIONS
+)
+
+#: The two proof Actions of build plan sections 26 and 27.
+#:
+#: The behavioural tests below — deterministic output, first-occurrence order,
+#: accents and blanks surviving, the row metrics adding up — drive an Action
+#: with one generic input frame and assert the deduplication rules those two
+#: sections fix. They are statements about *those two Actions*, and were
+#: always parametrized over the whole inventory only because the whole
+#: inventory was those two.
+#:
+#: The report Action of Phase 13 takes three named inputs whose meanings
+#: differ, so there is no single frame that drives it, and its arithmetic is
+#: verified against hand-worked figures in `test_golden_month.py`. Splitting
+#: the list is what keeps both kinds of assertion honest; every contract check
+#: — identity, slots, outputs, immutability, run signature, no filesystem —
+#: still runs over all three.
+FROZEN_PROOF_ACTIONS: tuple[dict[str, Any], ...] = tuple(
+    entry
+    for entry in FROZEN_ACTIONS
+    if entry["id"] in {"exact_duplicate_remover", "product_master_builder"}
+)
+
+FROZEN_PROOF_ACTION_IDS: tuple[str, ...] = tuple(
+    entry["id"] for entry in FROZEN_PROOF_ACTIONS
 )
 
 #: Every server-side route the frontend or a future client may call, with the
@@ -336,6 +480,12 @@ FROZEN_ERRORS: tuple[tuple[type[WorkbenchError], str, int], ...] = (
     # library that cannot be *read* stays a 500 and is never reported as a bad
     # request. Nothing already listed above moved.
     (InvalidDatasetSelectorError, "INVALID_DATASET_SELECTOR", 422),
+    # Added in Phase 13. A `history` selector reads several versions of one
+    # dataset as one table (build plan 13B); months whose exports carry
+    # different columns cannot be merged without inventing or dropping one, so
+    # they are reported. The failure had no code before this phase because no
+    # slot could read more than one version. Nothing above moved.
+    (InconsistentDatasetVersionsError, "INCONSISTENT_DATASET_VERSIONS", 422),
     (UnknownDatasetError, "UNKNOWN_DATASET", 404),
     (UnknownDatasetVersionError, "UNKNOWN_DATASET_VERSION", 404),
     (DataLibraryError, "DATA_LIBRARY_ERROR", 500),
@@ -688,7 +838,7 @@ def test_each_action_declares_its_frozen_outputs(entry) -> None:
         assert output.formats == expected["formats"]
 
 
-def test_the_two_actions_use_different_slot_ids() -> None:
+def test_every_action_uses_its_own_slot_ids() -> None:
     slot_ids = [
         slot.id for action in registry_module.list_actions() for slot in action.inputs
     ]
@@ -698,12 +848,12 @@ def test_the_two_actions_use_different_slot_ids() -> None:
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
 def test_action_metadata_is_immutable(entry) -> None:
     action = _action(entry["id"])
-    (slot,) = action.inputs
 
     # Declared once as module-level constants; a Run must never be able to
     # change what an Action requires.
-    with pytest.raises(Exception):
-        slot.required = False  # pyright: ignore[reportAttributeAccessIssue]
+    for slot in action.inputs:
+        with pytest.raises(Exception):
+            slot.required = False  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
@@ -723,7 +873,16 @@ def test_the_definition_reports_exactly_the_declared_metadata(entry) -> None:
 
 
 def test_validate_reports_no_issues_by_default() -> None:
-    for action in registry_module.list_actions():
+    """An Action imposes nothing beyond what the runner already checked.
+
+    Over the two proof Actions: build plan section 24 makes `validate` an
+    override for constraints that cannot be expressed as required columns, and
+    neither of them has one. The report Action of Phase 13 does — build plan
+    13H requires it to refuse data that would make a report unreliable — and
+    `test_monthly_report.py` covers every condition it raises.
+    """
+    for entry in FROZEN_PROOF_ACTIONS:
+        action = _action(entry["id"])
         (slot,) = action.inputs
         assert action.validate({slot.id: _frame_for(action)}) == []
 
@@ -733,7 +892,9 @@ def test_validate_reports_no_issues_by_default() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_run_receives_frames_keyed_by_slot_id_and_returns_frames_by_output_id(
     entry,
 ) -> None:
@@ -750,7 +911,9 @@ def test_run_receives_frames_keyed_by_slot_id_and_returns_frames_by_output_id(
         assert isinstance(frame, pl.DataFrame)
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_each_action_reports_exactly_its_frozen_metric_keys(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -761,7 +924,9 @@ def test_each_action_reports_exactly_its_frozen_metric_keys(entry) -> None:
     assert all(isinstance(value, int) for value in metrics.values())
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_the_row_metrics_are_internally_consistent(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -780,7 +945,11 @@ def test_the_row_metrics_are_internally_consistent(entry) -> None:
 def test_an_action_instance_holds_no_per_run_state() -> None:
     # One instance is registered at import time and reused for every Run, so
     # running twice through the same instance must not accumulate anything.
-    for action in registry_module.list_actions():
+    # Driven over the two proof Actions here, because it needs an Action that
+    # one generic frame can run; the report Action is held to the same rule by
+    # test_the_report_action_holds_no_per_run_state in test_golden_month.py.
+    for entry in FROZEN_PROOF_ACTIONS:
+        action = _action(entry["id"])
         (slot,) = action.inputs
         before = dict(vars(action))
         action.run({slot.id: _frame_for(action)})
@@ -792,7 +961,9 @@ def test_an_action_instance_holds_no_per_run_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_repeat_execution_produces_identical_output(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -806,7 +977,9 @@ def test_repeat_execution_produces_identical_output(entry) -> None:
         assert frame.equals(second.outputs[output_id])
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_the_input_frame_is_never_mutated(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -818,7 +991,9 @@ def test_the_input_frame_is_never_mutated(entry) -> None:
     assert source.equals(untouched)
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_near_duplicates_accents_and_blanks_survive_untouched(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -837,7 +1012,9 @@ def test_near_duplicates_accents_and_blanks_survive_untouched(entry) -> None:
     assert None in values, "a null was substituted"
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_first_occurrence_order_and_column_order_are_preserved(entry) -> None:
     action = _action(entry["id"])
     (slot,) = action.inputs
@@ -866,6 +1043,10 @@ def test_first_occurrence_order_and_column_order_are_preserved(entry) -> None:
 ACTION_MODULES = (
     ("exact_duplicate_remover", ExactDuplicateRemoverAction),
     ("product_master_builder", ProductMasterBuilderAction),
+    # Added in Phase 13. It reads the Data Library, so it is the Action these
+    # checks matter most for: build plan 11B forbids an Action opening library
+    # files itself, and the import check below is what enforces it.
+    ("monthly_sales_rep_report", MonthlySalesRepReportAction),
 )
 
 
@@ -898,7 +1079,9 @@ def test_no_action_module_opens_or_executes_anything(
     assert not forbidden, f"{action_id} calls {sorted(forbidden)}"
 
 
-@pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
+@pytest.mark.parametrize(
+    "entry", FROZEN_PROOF_ACTIONS, ids=FROZEN_PROOF_ACTION_IDS
+)
 def test_an_action_executes_with_no_filesystem_available(
     entry, quarantine: Path
 ) -> None:
@@ -927,7 +1110,7 @@ def test_no_registered_action_produces_artifacts() -> None:
     and a later phase that quietly converted one — making a report out of a
     deduplicator — would fail here rather than pass unnoticed.
     """
-    for entry in FROZEN_ACTIONS:
+    for entry in FROZEN_PROOF_ACTIONS:
         action = _action(entry["id"])
         (slot,) = action.inputs
         result = action.run({slot.id: _frame_for(action)})
@@ -935,6 +1118,23 @@ def test_no_registered_action_produces_artifacts() -> None:
             f"{entry['id']} produces artifacts. Build plan 12B keeps them "
             "optional, and neither proof Action was asked to produce one."
         )
+
+    # The report Action of Phase 13 returns tables and no file either, which
+    # is build plan Phase 13's exit criterion in as many words: "automated
+    # tests prove the business calculations before any attention is paid to
+    # workbook appearance". Rendering them is Phase 14.
+    report = _action("monthly_sales_rep_report")
+    result = report.run(
+        {
+            "sales_history": report_months.sales_frame(),
+            "sample_history": report_months.sample_frame(),
+            "account_assignments": report_months.assignment_frame(),
+        }
+    )
+    assert result.artifacts == (), (
+        "monthly_sales_rep_report produces artifacts. Build plan Phase 13 "
+        "produces tables; the workbooks are Phase 14."
+    )
 
 
 def test_an_action_may_use_the_report_renderer() -> None:
@@ -954,6 +1154,16 @@ def test_an_action_may_use_the_report_renderer() -> None:
     assert "app.models.artifact" not in FORBIDDEN_ACTION_IMPORTS
     assert "xlsxwriter" in FORBIDDEN_ACTION_IMPORTS
     assert "app.services.export" in FORBIDDEN_ACTION_IMPORTS
+    # Added in Phase 13, for the same reason and with the same shape. An
+    # Action may describe a report (app.models.report_spec) and have its
+    # arithmetic done (app.services.monthly_report); both are pure functions
+    # over frames that open no file and run no pipeline stage. What stays
+    # forbidden is the thing the rule is actually about: the Data Library
+    # itself, which an Action must never open (build plan 11B).
+    assert "app.models.report_spec" not in FORBIDDEN_ACTION_IMPORTS
+    assert "app.services.monthly_report" not in FORBIDDEN_ACTION_IMPORTS
+    assert "app.services.data_library" in FORBIDDEN_ACTION_IMPORTS
+    assert "app.services.input_resolution" in FORBIDDEN_ACTION_IMPORTS
     assert FORBIDDEN_ACTION_IMPORTS == frozenset(
         {
             "os",

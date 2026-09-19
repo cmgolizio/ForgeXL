@@ -17,6 +17,8 @@ backend's own Action metadata.
 - How it is actually built: [`docs/architecture.md`](docs/architecture.md)
 - Phase-by-phase record, known issues, deviations:
   [`docs/implementation-status.md`](docs/implementation-status.md)
+- The monthly sales-rep report's business definitions:
+  [`docs/monthly-sales-rep-report-spec.md`](docs/monthly-sales-rep-report-spec.md)
 
 ---
 
@@ -117,6 +119,40 @@ Both are deterministic: the same input always produces the same output. Neither
 trims, re-cases, normalises, fuzzy-matches or infers anything. Column names are
 matched **exactly** — `Sku` is not `SKU`, and `Supplier Name` is not
 `Supplier`.
+
+### Monthly Sales Rep Report
+
+A third Action, and a different shape: it uploads nothing. Its three inputs are
+read from the **Data Library** — sales history, sample history and the
+account-assignment snapshot for the reporting month — and it produces twelve
+tables covering accounts, suppliers, products, placements and samples for every
+rep, beside the company's own figures.
+
+| | |
+| --- | --- |
+| Action ID | `monthly_sales_rep_report` |
+| Version | `0.1.0` |
+| Inputs | `sales_history`, `sample_history`, `account_assignments` — all stored data |
+| Outputs | twelve tables, each holding every rep's rows, keyed by `Sales Rep` |
+
+Ownership comes from the assignment snapshot for the month, never from the rep
+named on the invoice, so September's report is built from September's
+ownership. The reporting month is read from the sales data itself. Conditions
+that would make the report unreliable — an account with activity and no owner,
+a blank `Total Price`, an account assigned to two reps — fail the Run rather
+than producing a plausible-looking report.
+
+> **Its business definitions are not yet confirmed.** Some rules are
+> provisional defaults awaiting the finished monthly report, which is why the
+> version is below 1.0.0 and why every Run reports
+> `PROVISIONAL_REPORT_RULES` in its Data Quality table. The authoritative
+> specification, and what to change to confirm a rule, is
+> [`docs/monthly-sales-rep-report-spec.md`](docs/monthly-sales-rep-report-spec.md).
+
+It cannot be run from the workbench screen yet: choosing a reporting period in
+the browser arrives with the Monthly Reports workflow. Until then it is driven
+in-process or by naming the stored versions in the `POST /api/runs` form —
+`sales_history=history:2026-09`, `account_assignments=period:2026-09`.
 
 ### Supported file formats
 

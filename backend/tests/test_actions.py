@@ -228,9 +228,23 @@ def test_an_action_cannot_be_instantiated_without_run():
 
 
 def test_the_application_registers_both_proof_actions():
-    assert [action.id for action in registry_module.list_actions()] == [
+    """Both proof Actions are registered, first and in their original order.
+
+    Phase 13 registered a third Action beside them (build plan 13B). The claim
+    build plan 4E makes is about these two being exposed by the application,
+    and it is unchanged: a later Action joining the registry must not displace
+    or reorder them, which is what the slice below asserts.
+    """
+    registered = [action.id for action in registry_module.list_actions()]
+
+    assert registered[:2] == [
         "exact_duplicate_remover",
         "product_master_builder",
+    ]
+    assert registered == [
+        "exact_duplicate_remover",
+        "product_master_builder",
+        "monthly_sales_rep_report",
     ]
 
 
