@@ -69,14 +69,17 @@ class _MemoryMultiPartParser(MultiPartParser):
         self._complete = True
 
     async def parse(self) -> FormData:
-        form = await super().parse()
-        if not self._complete:
-            await form.close()
-            # A partial final file is not in form.items yet.
+        try:
+            form = await super().parse()
+            if not self._complete:
+                raise InvalidRequestError("The multipart upload is incomplete.")
+            return form
+        except BaseException:
+            # Starlette closes these only for MultiPartException. Our bounded
+            # intake also raises WorkbenchError and may be cancelled mid-file.
             for file in self._files_to_close_on_error:
                 file.close()
-            raise InvalidRequestError("The multipart upload is incomplete.")
-        return form
+            raise
 
 
 @asynccontextmanager

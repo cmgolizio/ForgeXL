@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "period": "2026-08",
+  "format": "CSV",
+  "sales_rows": 72000,
+  "sample_rows": 6000,
+  "accounts": 900,
+  "products": 1500,
+  "suppliers": 50,
+  "reps": 15,
+  "history_months": 24,
+  "repeats": 3,
+  "python": "3.12.14",
+  "polars": "1.43.2",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+  "monthly_upload_bytes": 606559,
+  "zip_bytes": [
+    850099,
+    850099,
+    850099
+  ],
+  "timings_ms": {
+    "parsing": {
+      "median": 3.541,
+      "min": 3.358,
+      "max": 4.072
+    },
+    "validation": {
+      "median": 238.989,
+      "min": 237.62,
+      "max": 248.35
+    },
+    "historical_loading": {
+      "median": 119.29,
+      "min": 118.956,
+      "max": 121.566
+    },
+    "persistent_commit": {
+      "median": 14.175,
+      "min": 13.016,
+      "max": 14.38
+    },
+    "report_calculation": {
+      "median": 617.899,
+      "min": 611.931,
+      "max": 618.23
+    },
+    "xlsx_generation": {
+      "median": 1455.144,
+      "min": 1446.596,
+      "max": 1485.459
+    },
+    "zip_generation": {
+      "median": 26.203,
+      "min": 25.655,
+      "max": 27.761
+    },
+    "total_cycle": {
+      "median": 2626.058,
+      "min": 2610.67,
+      "max": 2646.983
+    },
+    "initial_history_setup": {
+      "median": 370.838,
+      "min": 352.68,
+      "max": 374.075
+    }
+  },
+  "runs_ms": [
+    {
+      "parsing": 3.3578619950276334,
+      "validation": 238.9888400066411,
+      "historical_loading": 118.95598800037988,
+      "persistent_commit": 14.175262997014215,
+      "report_calculation": 611.9311680013197,
+      "xlsx_generation": 1455.143966999458,
+      "zip_generation": 25.654746001237072,
+      "total_cycle": 2610.669808000239,
+      "initial_history_setup": 370.8375169990177
+    },
+    {
+      "parsing": 4.072286996233743,
+      "validation": 237.61994599772152,
+      "historical_loading": 119.28956599876983,
+      "persistent_commit": 13.016486998822074,
+      "report_calculation": 617.8987890016288,
+      "xlsx_generation": 1485.459137998987,
+      "zip_generation": 27.7605900009803,
+      "total_cycle": 2646.9829809975636,
+      "initial_history_setup": 374.07505699957255
+    },
+    {
+      "parsing": 3.541081998264417,
+      "validation": 248.34998100050143,
+      "historical_loading": 121.56599701120285,
+      "persistent_commit": 14.379918000486214,
+      "report_calculation": 618.2297500017739,
+      "xlsx_generation": 1446.5964039991377,
+      "zip_generation": 26.20273800130235,
+      "total_cycle": 2626.0580439993646,
+      "initial_history_setup": 352.6804639986949
+    }
+  ]
+}

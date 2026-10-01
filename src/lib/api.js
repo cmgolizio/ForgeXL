@@ -192,13 +192,14 @@ export async function fetchHealth({ signal } = {}) {
  * An `AbortError` is re-thrown untouched: a cancelled request is the caller's
  * own doing, not a backend failure.
  */
-async function request(path, { method = "GET", body, signal } = {}) {
+async function request(path, { method = "GET", body, signal, headers } = {}) {
   let response;
   try {
     response = await fetch(`${API_BASE_PATH}${path}`, {
       method,
       body,
       signal,
+      headers,
       cache: "no-store",
     });
   } catch (cause) {
@@ -295,4 +296,18 @@ function objectOr(value) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value
     : {};
+}
+
+
+// Monthly reporting keeps business validation on the Python server.
+export const fetchMonthlyCatalog = (options) => request("/api/monthly/catalog", options);
+export const validateMonthlyUploads = (formData) => request("/api/monthly/validate", { method: "POST", body: formData });
+export const validateSavedReports = (payload) => monthlyJson("validate-saved", payload);
+export const generateMonthlyReports = (payload) => monthlyJson("generate", payload);
+export const discardMonthlyValidation = (validationId) => monthlyJson("discard", { validation_id: validationId });
+export const validateHistory = (formData) => request("/api/monthly/history/validate", { method: "POST", body: formData });
+export const commitHistory = (payload) => monthlyJson("history/commit", payload);
+
+function monthlyJson(path, payload) {
+  return request(`/api/monthly/${path}`, { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } });
 }

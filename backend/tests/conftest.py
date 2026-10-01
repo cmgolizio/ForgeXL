@@ -24,6 +24,7 @@ from app.actions.registry import ActionRegistry
 from app.main import app
 from app.services import data_library as data_library_module
 from app.services import run_store as run_store_module
+from app.services import cycle_receipts, monthly_workflow, history_workflow
 from app.services.data_library import LocalDataLibrary
 from app.services.run_store import InMemoryRunStore
 
@@ -92,6 +93,9 @@ def data_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalDataLi
     """
     library = LocalDataLibrary(tmp_path / "library")
     monkeypatch.setattr(data_library_module, "DATA_LIBRARY", library)
+    monkeypatch.setattr(cycle_receipts, "CYCLE_RECEIPTS", cycle_receipts.CycleReceiptStore(library.root / ".reporting-cycles"))
+    monkeypatch.setattr(monthly_workflow, "WORKFLOW", monthly_workflow.MonthlyWorkflow())
+    monkeypatch.setattr(history_workflow, "HISTORY_WORKFLOW", history_workflow.HistoryWorkflow())
     return library
 
 

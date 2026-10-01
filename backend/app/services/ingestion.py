@@ -316,6 +316,12 @@ def validate_source(
             errors=tuple(errors),
         )
 
+    if parsed.mixed_columns:
+        warnings.append(ValidationIssue(
+            code="MIXED_COLUMN_TYPES",
+            message="Excel columns with mixed cell types were preserved as text: " + ", ".join(parsed.mixed_columns) + ".",
+            details={"columns": list(parsed.mixed_columns)}, slot_id=schema.dataset_id,
+        ))
     columns = parsed.columns
     errors.extend(_schema_errors(schema, columns))
     warnings.extend(_schema_warnings(schema, columns))
@@ -652,7 +658,7 @@ def import_reporting_cycle(
 
     for validation in outcome.validations:
         try:
-            version = _commit_validated(validation)
+            version = commit_validated_source(validation)
         except (
             DataLibraryError, InvalidDatasetCommitError, UnknownDatasetError
         ) as error:
@@ -839,10 +845,10 @@ def _commit_month(
         replaces=replaces,
     )
     validation.raise_if_failed()
-    return _commit_validated(validation, replaces=replaces, reason=reason)
+    return commit_validated_source(validation, replaces=replaces, reason=reason)
 
 
-def _commit_validated(
+def commit_validated_source(
     validation: SourceValidation,
     *,
     replaces: str | None = None,

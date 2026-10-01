@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import config
-from app.api import actions, runs
+from app.api import actions, runs, monthly
 from app.errors import WorkbenchError
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ app.add_middleware(
 
 app.include_router(actions.router)
 app.include_router(runs.router)
+app.include_router(monthly.router)
 
 
 @app.exception_handler(WorkbenchError)

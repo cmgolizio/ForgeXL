@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionDescription from "@/components/workbench/ActionDescription";
@@ -301,8 +303,7 @@ export default function ActionRunner() {
           {librarySlots.length > 0 ? (
             <p className='text-xs text-zinc-600 dark:text-zinc-400'>
               This Action reads saved data, so choosing a reporting period
-              happens in the Monthly Reports workflow rather than here. It
-              cannot be run from this screen yet.
+              happens in the <Link href="/monthly-reports" className="underline">Monthly Reports workflow</Link>.
             </p>
           ) : null}
         </section>

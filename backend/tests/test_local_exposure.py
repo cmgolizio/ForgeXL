@@ -397,6 +397,13 @@ def test_no_uploaded_bytes_are_written_anywhere_by_a_run(
     from tests.fixtures import spreadsheets as fx
     from tests.helpers import upload_file
 
+    # Phase 9 permits existing business data. A proof Action must leave it
+    # unchanged, rather than requiring a fresh repository with no library.
+    data_root = REPOSITORY_ROOT / "data"
+    def state():
+        return (data_root.exists(), sorted((str(path.relative_to(data_root)),
+            path.stat().st_size, path.stat().st_mtime_ns) for path in data_root.rglob("*") if path.is_file()))
+    before = state()
     response = client.post(
         "/api/runs",
         data={"action_id": "exact_duplicate_remover"},
@@ -407,4 +414,4 @@ def test_no_uploaded_bytes_are_written_anywhere_by_a_run(
 
     assert response.status_code == 200, response.text
     assert list(quarantine.rglob("*")) == []
-    assert not (REPOSITORY_ROOT / "data").exists()
+    assert state() == before

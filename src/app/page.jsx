@@ -1,3 +1,4 @@
+import Link from "next/link";
 import BackendStatus from "@/components/backend/BackendStatus";
 import ActionRunner from "@/components/workbench/ActionRunner";
 
@@ -13,6 +14,10 @@ export default function Home() {
         </p>
         <BackendStatus />
       </header>
+      <Link href="/monthly-reports" className="rounded-lg border border-zinc-300 p-4 text-lg font-medium hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900">
+        Monthly Reports →
+        <span className="mt-1 block text-sm font-normal text-zinc-500">Validate monthly sources, generate rep workbooks, and rerun saved periods.</span>
+      </Link>
       <main>
         <ActionRunner />
       </main>

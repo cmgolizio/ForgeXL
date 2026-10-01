@@ -147,19 +147,32 @@ The [specification](docs/monthly-sales-rep-report-spec.md) records exact rules;
 [Phase 14 validation](docs/phase-14-validation.md) records independent source
 checks and the remaining company-data and manual Excel for Mac acceptance.
 
-The dedicated monthly-workflow screen arrives in Phase 15. For now, run the
-Action in-process or submit these `POST /api/runs` form fields against committed
-September data: `action_id=monthly_sales_rep_report`,
-`sales_history=history:2026-09`, `sample_history=history:2026-09`, and
-`account_assignments=period:2026-09`. Download workbooks under
-`/api/runs/<run_id>/artifacts/<artifact_id>/download`, or the entire batch under
-`/api/runs/<run_id>/artifacts/download/zip`. Download before restarting the
-backend: Runs and artifacts are held in memory.
+Open **Monthly Reports** from the home page (`/monthly-reports`). For a new
+installation, expand initial history setup, validate company sales/sample
+history, then save the reviewed monthly partitions. For the recurring cycle:
 
-To replay a Run after source corrections, group its recorded `library_inputs`
-by slot and name every immutable history version with `versions:<id>,<id>,...`
-and the snapshot with `version:<id>`. Period selectors intentionally read live
-corrected sources; an exact replay also requires the original Action version.
+1. Choose the report month and upload its sales, samples and assignment snapshot.
+   An already-saved source can be reused by leaving that slot empty.
+2. Validate. Review row counts, source/month checks, detected reps, ownership
+   issues and missing history; acknowledge any warnings.
+3. Generate. The screen reports source saving separately from report generation.
+4. Download the monthly ZIP or individual rep workbooks, and spot-check the
+   company/result previews against the source.
+
+Corrections explicitly replace the current monthly version with a reason;
+they never append a second copy of a corrected month. **Rerun saved reports**
+can use a previous cycle's exact source IDs or deliberately capture the current
+stored versions. The recorded source selection survives a restart. Download
+bytes and previews remain in memory and are recreated by rerunning the cycle.
+If workbook generation fails after source saving, review the saved cycle and
+retry without uploading again. A partial storage failure lists the versions
+already committed; refresh and supply only missing sources.
+
+The existing `POST /api/runs` interface still accepts explicit history/snapshot
+selectors. An exact replay also depends on the original report Action version;
+the monthly workflow warns if the installed version differs from the receipt.
+See [Phase 15 validation](docs/phase-15-validation.md) for API routes,
+performance evidence and the remaining production/manual acceptance checks.
 
 ### Supported file formats
 
@@ -238,10 +251,9 @@ The Run records the version it resolved to, so committing a newer month later
 never changes what an earlier Run says it used, and naming that recorded
 version reproduces the original result exactly.
 
-The Action itself is unchanged by any of this: it receives dataframes keyed by
-its input slots and cannot tell an uploaded one from a stored one. No Action
-shipped today reads the library, so there is no version picker in the UI yet
-either — that comes with the monthly reporting screen.
+The Action receives DataFrames keyed by its input slots and cannot tell an
+uploaded one from a stored one. The monthly reporting screen selects the
+report period and exact stored cycle. The generic Action screen links to it.
 
 Running an Action still writes nothing — reading a stored version is a read,
 and the two systems stay separate.

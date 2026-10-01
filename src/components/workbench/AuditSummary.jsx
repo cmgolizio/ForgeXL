@@ -43,6 +43,17 @@ export default function AuditSummary({ manifest }) {
       </dl>
 
       <Inputs inputs={audit.inputs} />
+      {audit.library_inputs?.length ? (
+        <details className='text-xs text-zinc-500'>
+          <summary className='cursor-pointer'>Stored source versions used ({audit.library_inputs.length})</summary>
+          <ul className='mt-2 space-y-2'>
+            {audit.library_inputs.map((input) => <li key={`${input.slot_id}-${input.version_id}`}>
+              {input.dataset_label} · {input.period ?? "unscoped"} · {formatCount(input.row_count)} rows
+              <span className='block break-all font-mono'>{input.version_id}</span>
+            </li>)}
+          </ul>
+        </details>
+      ) : null}
       <Results results={audit.results} primaryId={audit.primary_result_id} />
     </section>
   );

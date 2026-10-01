@@ -1,13 +1,14 @@
 # ForgeXL — Architecture
 
-**Status:** implemented through Phase 14 on 2026-10-01. The configured report
+**Status:** engineering implemented through Phase 15 on 2026-10-01. The configured report
 contract defines six sections. Source
 reconciliation and automated acceptance are recorded in
 [phase-14-validation.md](phase-14-validation.md); complete company credits/sample
 coverage and manual Excel for Mac opening remain pending.
 Phases 0–8 built the proof of concept; Phase 9 added the Data Library (§5a),
 Phase 10 ingestion (§5b), Phase 11 library-backed inputs (§5c), Phase 12 generic
-artifacts/rendering (§5d), and Phases 13–14 the report and workbook batch (§5e).
+artifacts/rendering (§5d), Phases 13–14 the report and workbook batch (§5e),
+and Phase 15 the monthly workflow and durable source receipts (§5f).
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -289,15 +290,16 @@ library root (build plan 9B).
 
 ### What reaches it
 
-Phase 9 built the layer and left it connected to nothing. **Phase 10 added the
-one thing that writes to it**: the monthly ingestion service in §5b. Nothing
-else does — no route, no Action, and not the Run pipeline, which still writes
-nothing at all. `ensure_known_datasets()` is still never called at import, so a
-library that has never been ingested into stays absent.
+Phase 9 built the storage layer. Phase 10 added ingestion, and Phase 15's
+workflow invokes its validated commit rules and partitions initial history.
+Only these explicit source-saving operations write business data. The report
+Action and generic Run pipeline do not write sources. The workflow also saves
+small provenance receipts as described in §5f. Importing modules creates no
+library or source version.
 
-**Phase 11 added the one thing that reads it from a Run**: input resolution,
-§5c. It is a read and only a read — no Action, no route and no Run writes to
-the library, and the writer is still ingestion alone.
+Phase 11 input resolution reads selected immutable sources for a Run, and the
+Phase 15 catalog/review reads metadata and source frames. Actions receive only
+the resolved working frames.
 
 ---
 
@@ -374,15 +376,14 @@ is rewritten or guessed into a new format.
 
 The accepted schemas, every refusal and every warning are documented in
 [`monthly-source-schemas.md`](monthly-source-schemas.md). The
-account-assignment schema is **provisional and marked UNCONFIRMED**; that
-document says what to change to confirm it.
+assignment identity columns and optional context fields are confirmed;
+invoice-performance rules are documented separately in the report contract.
 
-### No HTTP surface
+### Workflow API added in Phase 15
 
-Phase 10 adds no route. `FROZEN_ROUTES` in `test_contract_freeze.py` is
-byte-identical, and the published API is exactly what Phase 8 froze. The
-monthly reporting workflow UI is build plan Phase 15A; ingestion is reachable
-in-process, which is what its own phase asks for.
+Phase 10's Python ingestion entry points remain the source of validation and
+commit rules. Phase 15 adds HTTP orchestration for reviewing uploads, saving
+history, generating reports and selecting recorded cycles. See §5f.
 
 ---
 
@@ -496,18 +497,12 @@ original source state, and a superseded version stays loadable by ID forever.
   emptiness checks as an upload. Being stored earns no trust.
 - **The Run pipeline writes nothing.**
 
-### Not built
+### Browser selection
 
-There is no frontend control for choosing a dataset version. Choosing versions
-in the browser belongs to the monthly reporting workflow of build plan 15A,
-together with the endpoints it would need to list datasets and versions.
-
-Since Phase 13 a registered Action *does* have library-backed slots, so the
-Action selector can reach one. The workbench renders such a slot as a
-read-only `LibraryInputSlot` — there is nothing to upload — and disables the
-Run button with a line saying where the reporting period is chosen. That is
-driven by the slot's declared `source` and by nothing else: no Action ID,
-slot ID or dataset name appears in any frontend file.
+The dedicated Monthly Reports screen chooses periods and exact source cycles.
+The generic Action workbench retains its metadata-driven library-input display
+and links to Monthly Reports. Library-backed Actions still receive only
+resolved DataFrames; the workflow does not add filesystem access to an Action.
 
 ---
 
@@ -695,10 +690,54 @@ If any workbook fails rendering, the failed Run exposes no partial batch.
 The generic artifact ZIP contains each workbook once and uses
 `<Month Year> Sales Rep Reports.zip`; individual downloads remain available.
 
-Phase 15's period picker, ingestion UI and dedicated monthly reporting flow
-are not implemented here. Phase 14 is reachable through `POST /api/runs` with
-explicit library selectors, or in-process. Manual Excel for Mac acceptance and
-full-company completed-month validation are recorded as outstanding.
+The batch is reached through the Phase 15 workflow or existing `POST /api/runs`
+library selectors. Manual Excel for Mac acceptance and full-company
+completed-month validation remain outstanding.
+
+---
+
+## 5f. Monthly workflow and source receipts (Phase 15)
+
+`src/app/monthly-reports/page.jsx` exposes two paths: validate/import a reporting
+month, or rerun saved sources. An initial history panel uses the same ingestion
+rules to partition a multi-month file only when the dataset is empty.
+
+| Boundary | Owner | Responsibility |
+| --- | --- | --- |
+| Browser | `components/monthly/`, `lib/api.js` | File/period controls, review, explicit warning consent and correction intent, downloads and previews. No business arithmetic. |
+| HTTP | `api/monthly.py` | Bounded memory multipart intake, structured request errors, metadata catalog and service calls in the thread pool. |
+| Review | `services/monthly_workflow.py` | Existing ingestion checks, lossless date/merge policy and pure report preparation; one pending review with a 15-minute token. |
+| History setup | `services/history_workflow.py` | Reviewed bootstrap partitions or one new history month; no implicit correction. |
+| Durable selection | `services/cycle_receipts.py` | Small JSON receipts under `data/library/.reporting-cycles/<period>/<cycle-id>.json`; exact immutable source IDs and Action version. |
+| Generation | Existing runner / report Action | Resolve receipt selectors, calculate existing report tables, publish the complete in-memory workbook batch. |
+
+Validation does not write sources. Generate consumes its token once, checks
+that live sources and the installed Action still match the review, commits
+validated monthly files, saves a receipt, then executes the existing Action.
+Repeated files are refused. A replacement names the current version and a
+nonblank reason; prior versions stay readable. Reusing sources requires no
+upload. Receipt reruns intentionally retain superseded source IDs; current-source
+reruns capture their selection in a new receipt. A changed Action version
+produces a visible warning because source replay cannot restore older code.
+
+A storage failure reports the already-committed source IDs and publishes no
+reports. A rendering failure retains the valid sources and receipt for retry.
+There is no cross-dataset rollback claim. Sources saved and reports generated
+are distinct UI states. Downloads and Runs remain ephemeral, including after a
+restart; receipts contain no results, artifacts, original uploads or local paths.
+
+Each service retains at most one pending parsed review. New validation, input
+discard or a consumed/expired token releases it; an idle expired review is
+released on the next service interaction. This local workflow does not add
+multi-user coordination, queues, database persistence or authentication.
+
+Catalog responses contain metadata only. Review summaries include source row
+counts, report month, roster, ownership/schema errors and calendar coverage.
+Missing R12 months remain warnings with unavailable totals blank; calendar
+coverage is explicitly not a guarantee of complete company exports.
+
+See [phase-15-validation.md](phase-15-validation.md) for the route inventory,
+failure/replay evidence, repeated timings and acceptance limits.
 
 ---
 
