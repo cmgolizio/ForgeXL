@@ -422,12 +422,14 @@ def test_the_action_returns_every_declared_table() -> None:
         assert isinstance(frame, pl.DataFrame)
 
 
-def test_the_action_produces_no_artifact() -> None:
-    """Phase 13 calculates; Phase 14 renders (build plan Phase 13 exit)."""
+def test_the_action_produces_one_workbook_per_rep() -> None:
     action = registry.get_action(REPORT_ACTION_ID)
     assert action is not None
-
-    assert action.run(_action_inputs()).artifacts == ()
+    result = action.run(_action_inputs())
+    assert {artifact.filename for artifact in result.artifacts} == {
+        "Beth Comeaux - September 2026.xlsx", "Kevin Wardell - September 2026.xlsx", "Jennifer Jones - September 2026.xlsx"}
+    assert all(artifact.payload.startswith(b"PK") for artifact in result.artifacts)
+    assert result.artifact_bundle_filename == "September 2026 Sales Rep Reports.zip"
 
 
 def test_the_action_states_no_affected_row_count() -> None:
@@ -439,17 +441,11 @@ def test_the_action_states_no_affected_row_count() -> None:
 
 
 def test_the_action_refuses_before_it_calculates() -> None:
-    """Build plan 13H: fail rather than produce a plausible workbook."""
     action = registry.get_action(REPORT_ACTION_ID)
     assert action is not None
     inputs = _action_inputs()
-    inputs[ASSIGNMENTS_SLOT] = golden.assignment_frame(
-        tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER)
-    )
-
-    issues = action.validate(inputs)
-
-    assert [issue.code for issue in issues] == ["MISSING_ACCOUNT_OWNERSHIP"]
+    inputs[SALES_SLOT] = golden.replace_value(inputs[SALES_SLOT], TRANSACTION_COLUMNS.transaction_rep, 11, "")
+    assert [issue.code for issue in action.validate(inputs)] == ["MISSING_TRANSACTION_REP"]
 
 
 def test_the_action_passes_validation_on_a_clean_month() -> None:
@@ -742,7 +738,7 @@ def test_the_whole_report_downloads_as_one_workbook(
 
     assert response.status_code == 200
     sheets = fastexcel.read_excel(response.content).sheet_names
-    assert len(sheets) == 12
+    assert len(sheets) == 19
     assert "Rep Summary" in sheets
 
 
@@ -756,32 +752,13 @@ def test_the_manifest_carries_the_reports_metrics(stocked_library) -> None:
         "sales_rows": 5,
         "sample_rows": 2,
         "placements": 2,
-        "warnings": 2,
+        "warnings": 3,
     }
 
 
-def test_an_unreliable_month_fails_the_run_with_its_condition(
-    stocked_library,
-) -> None:
-    """A snapshot for the right month must cover every active account."""
-    from app.errors import RunValidationError
-
-    commit_account_assignments(
-        SourceFile(
-            filename="assignments-2026-09-corrected.csv",
-            payload=golden.assignments(
-                tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER),
-                name="partial",
-            ).as_csv(),
-        ),
-        period=GOLDEN_MONTH,
-        replaces=stocked_library.current_version(
-            "account_assignments", GOLDEN_MONTH
-        ).version_id,
-        reason="Corrected ownership snapshot",
-    )
-
-    with pytest.raises(RunValidationError) as failure:
-        _run_the_report()
-
-    assert "MISSING_ACCOUNT_OWNERSHIP" in [issue.code for issue in failure.value.issues]
+def test_partial_current_ownership_does_not_erase_invoice_performance(stocked_library) -> None:
+    commit_account_assignments(SourceFile(filename="assignments-corrected.csv", payload=golden.assignments(tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER), name="partial").as_csv()),
+        period=GOLDEN_MONTH, replaces=stocked_library.current_version("account_assignments", GOLDEN_MONTH).version_id, reason="Corrected ownership snapshot")
+    outcome = _run_the_report()
+    assert outcome.result is not None
+    assert outcome.result.primary.filter(pl.col(REP_COLUMN)==BETH)["Revenue"][0] == 755.0

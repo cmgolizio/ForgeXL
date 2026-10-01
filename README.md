@@ -122,48 +122,44 @@ matched **exactly** — `Sku` is not `SKU`, and `Supplier Name` is not
 
 ### Monthly Sales Rep Report
 
-A third Action, and a different shape: it uploads nothing. Its three inputs are
-read from the **Data Library** — sales history, sample history and the
-account-assignment snapshot for the reporting month — and it produces twelve
-tables covering accounts, suppliers, products, placements and samples for every
-rep, beside the company's own figures.
+This Action reads stored sales history, sample history and a reporting-month
+assignment snapshot. One successful Run generates a six-sheet workbook for
+every applicable rep, individual downloads and a monthly ZIP.
 
-| | |
+| Field | Value |
 | --- | --- |
 | Action ID | `monthly_sales_rep_report` |
-| Version | `0.1.1` |
-| Inputs | `sales_history`, `sample_history`, `account_assignments` — all stored data |
-| Outputs | twelve tables, each holding every rep's rows, keyed by `Sales Rep` |
+| Version | `0.2.0` |
+| Inputs | `sales_history`, `sample_history`, `account_assignments` |
+| Results | Nineteen preview/export tables plus all six-sheet rep workbook artifacts. |
 
-Ownership comes from the assignment snapshot for the month, never from the rep
-named on the invoice, so September's report is built from September's
-ownership. The reporting month is read from the sales data itself. Conditions
-that would make the report unreliable — an account with activity and no owner,
-a blank `Total Price`, an account assigned to two reps — fail the Run rather
-than producing a plausible-looking report.
+Performance follows the salesperson on the invoice. Net sales include signed
+credits/returns; sample credits reduce sample quantities separately. The six
+accepted sections cover monthly samples, R12 samples, R12 account sales,
+monthly supplier sales and percentages, R12 product/account quantities, and
+current-versus-prior R12 account comparisons. Missing interior R12 months
+produce blank unavailable totals with explicit notes.
 
-> **Its business definitions are not yet confirmed.** Some rules are
-> provisional defaults awaiting the finished monthly report, which is why the
-> version is below 1.0.0 and why every Run reports
-> `PROVISIONAL_REPORT_RULES` in its Data Quality table. The authoritative
-> specification, and what to change to confirm a rule, is
-> [`docs/monthly-sales-rep-report-spec.md`](docs/monthly-sales-rep-report-spec.md).
+The report contract establishes these six
+sections. Supplementary placements and the true-zero sample-month policy
+remain provisional, so Data Quality retains `PROVISIONAL_REPORT_RULES`.
+The [specification](docs/monthly-sales-rep-report-spec.md) records exact rules;
+[Phase 14 validation](docs/phase-14-validation.md) records independent source
+checks and the remaining company-data and manual Excel for Mac acceptance.
 
-Phase 13 business acceptance is pending and Phase 14 is blocked on the
-missing report evidence or explicit approval of the provisional basis. The
-[readiness audit](docs/phase-14-readiness-audit.md) records the decision and the
-completed fixes to earlier phases.
+The dedicated monthly-workflow screen arrives in Phase 15. For now, run the
+Action in-process or submit these `POST /api/runs` form fields against committed
+September data: `action_id=monthly_sales_rep_report`,
+`sales_history=history:2026-09`, `sample_history=history:2026-09`, and
+`account_assignments=period:2026-09`. Download workbooks under
+`/api/runs/<run_id>/artifacts/<artifact_id>/download`, or the entire batch under
+`/api/runs/<run_id>/artifacts/download/zip`. Download before restarting the
+backend: Runs and artifacts are held in memory.
 
-It cannot be run from the workbench screen yet: choosing a reporting period in
-the browser arrives with the Monthly Reports workflow. Until then it is driven
-in-process or by naming the stored versions in the `POST /api/runs` form —
-`sales_history=history:2026-09`, `sample_history=history:2026-09`,
-`account_assignments=period:2026-09`.
-
-To replay an earlier Run after a correction, group the recorded
-`library_inputs` by slot. Submit `versions:<id>,<id>,...` for each history slot
-and `version:<id>` for the assignment snapshot, preserving every recorded
-version. Period selectors intentionally use the current corrected data.
+To replay a Run after source corrections, group its recorded `library_inputs`
+by slot and name every immutable history version with `versions:<id>,<id>,...`
+and the snapshot with `version:<id>`. Period selectors intentionally read live
+corrected sources; an exact replay also requires the original Action version.
 
 ### Supported file formats
 

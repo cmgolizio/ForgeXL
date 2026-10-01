@@ -1,8 +1,8 @@
-"""Action 3 — Monthly Sales Rep Report (build plan 13B, 13D).
+"""Action 3 — Monthly Sales Rep Report (build plan Phases 13 and 14).
 
 The first Action that reads the persistent Data Library. It declares three
 library-backed input slots (build plan 11A), receives their rows as DataFrames
-like every other Action, and returns the report's calculation tables.
+like every other Action, and returns calculation tables and every rep workbook.
 
 It is a thin module on purpose. The Action contract lives here — the ID, the
 version, the slots, the outputs and the validation hook — and the arithmetic
@@ -11,17 +11,15 @@ definitions in :mod:`app.models.report_spec`. That is the same split
 :mod:`app.services.workbook` already has with the Actions that render reports:
 one file per concern, and an Action that can be read in a minute.
 
-**No workbook, no artifact, no ZIP.** Build plan Phase 13's exit criterion is
-"the Action produces correct report DataFrames for every applicable rep, and
-automated tests prove the business calculations *before any attention is paid
-to workbook appearance*". Rendering those tables into one XLSX per rep is build
-plan Phase 14, and the renderer it will use was built and tested in Phase 12.
+Phase 14 renders the six accepted views with the shared Phase 12 renderer.
+Artifacts remain distinct from table exports and use the generic individual
+and ZIP download routes. No spreadsheet calculations live in the renderer.
 
 **Every table holds every rep's rows**, keyed by `Sales Rep`. An Action
 declares a fixed set of outputs and the rep roster is dynamic (build plan
 13D), so one output per rep could not be declared — and should not be: build
 plan 13G wants the company's figures calculated once rather than rebuilt per
-rep, which is what one frame per section gives. Phase 14 slices them.
+rep, which is what one frame per section gives. Rendering slices them per rep.
 """
 
 from __future__ import annotations
@@ -31,6 +29,7 @@ from collections.abc import Mapping
 import polars as pl
 
 from app.actions.base import Action, ActionResult
+from app.models.artifact import artifact_filename
 from app.models.report_spec import (
     ASSIGNMENTS_DATASET_ID,
     ASSIGNMENTS_SCHEMA,
@@ -54,6 +53,7 @@ from app.services.monthly_report import (
     prepare,
     report_metrics,
 )
+from app.services.report_workbooks import render_rep_workbooks
 
 #: The three input slots, named for the datasets they read.
 SALES_SLOT = "sales_history"
@@ -99,10 +99,9 @@ class MonthlySalesRepReportAction(Action):
     description = (
         "Calculate the monthly sales-rep report from the Data Library: one "
         "set of tables per rep covering accounts, suppliers, products, "
-        "placements and samples, with the company's own figures to compare "
-        "against. Ownership comes from the account-assignment snapshot for "
-        "the reporting month, and the reporting month is read from the sales "
-        "data itself."
+        "samples and R12 comparisons, with one finished workbook per rep and "
+        "a monthly ZIP download. Performance follows the invoice salesperson; "
+        "the month is read from the committed sales data."
     )
     inputs = (
         _library_slot(
@@ -138,8 +137,8 @@ class MonthlySalesRepReportAction(Action):
             period_matches=SALES_SLOT,
             description=(
                 "The account-ownership snapshot for the reporting month, "
-                "named with 'period:YYYY-MM'. Every figure is attributed by "
-                "this snapshot, never by the rep on the invoice."
+                "named with 'period:YYYY-MM'. Supplies roster and account-list "
+                "context. Performance stays attributed to the invoice salesperson."
             ),
         ),
     )
@@ -178,6 +177,10 @@ class MonthlySalesRepReportAction(Action):
             # them — so it states no affected-row count rather than inventing
             # one from two totals that mean different things (build plan 6E.5).
             rows_affected=None,
+            artifacts=render_rep_workbooks(prepared, tables),
+            artifact_bundle_filename=artifact_filename(
+                f"{prepared.require_period().label} Sales Rep Reports", "zip"
+            ),
         )
 
     @staticmethod

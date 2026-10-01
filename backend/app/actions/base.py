@@ -33,7 +33,7 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from app.models.artifact import Artifact
+from app.models.artifact import Artifact, check_artifact_filename
 from app.models.schemas import (
     ActionDefinition,
     ActionInput,
@@ -84,6 +84,9 @@ class ActionResult:
     #: silently re-point an existing call.
     artifacts: Sequence[Artifact] = ()
 
+    #: Optional purpose-specific name for the generic artifact ZIP download.
+    artifact_bundle_filename: str | None = None
+
     def __post_init__(self) -> None:
         """Freeze the artifact list and refuse a collision inside it.
 
@@ -102,6 +105,10 @@ class ActionResult:
         cause locally.
         """
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        if self.artifact_bundle_filename is not None:
+            check_artifact_filename(self.artifact_bundle_filename)
+            if not self.artifact_bundle_filename.lower().endswith(".zip") or not self.artifacts:
+                raise ValueError("A named artifact bundle needs artifacts and a .zip filename.")
 
         # Filenames are compared case-insensitively because macOS and Windows
         # treat two names differing only in case as one file, so an archive

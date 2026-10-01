@@ -821,6 +821,7 @@ class TestTheExportGuardsStillApply:
         [
             ({"title": "Report"}, 2),
             ({"subtitle": "September"}, 2),
+            ({"notes": ("Coverage note",)}, 2),
             ({"total_row": {"n": 10}}, 1),
             ({"title": "Report", "subtitle": "September", "total_row": {"n": 10}}, 4),
         ],
@@ -852,12 +853,14 @@ class TestTheExportGuardsStillApply:
         assert reopened["A6"].value == 10
 
     @pytest.mark.parametrize(
-        "field", ["title", "subtitle", "total_label", "total_value", "header"]
+        "field", ["title", "subtitle", "total_label", "total_value", "header", "note"]
     )
     def test_every_presentation_cell_must_fit(self, field) -> None:
         text = "x" * (MAX_CELL_CHARACTERS + 1)
         options: dict[str, Any] = {"total_row": {}} if field == "total_label" else {}
-        if field == "total_value":
+        if field == "note":
+            options["notes"] = (text,)
+        elif field == "total_value":
             options["total_row"] = {"n": text}
         elif field == "header":
             options["columns"] = (Column("n", header=text),)

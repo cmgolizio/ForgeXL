@@ -69,7 +69,7 @@ from typing import Any
 import polars as pl
 
 from app.errors import UnknownRunError
-from app.models.artifact import Artifact
+from app.models.artifact import Artifact, check_artifact_filename
 from app.models.schemas import (
     ActionReference,
     ArtifactMetadata,
@@ -157,6 +157,8 @@ class RunResult:
     #: (build plan 12B). Read-only.
     artifacts: Mapping[str, Artifact] = field(default_factory=dict)
 
+    artifact_bundle_filename: str | None = None
+
     def __post_init__(self) -> None:
         if self.primary_output_id not in self.tables:
             raise ValueError(
@@ -167,12 +169,17 @@ class RunResult:
         object.__setattr__(
             self, "artifacts", MappingProxyType(dict(self.artifacts))
         )
+        if self.artifact_bundle_filename is not None:
+            check_artifact_filename(self.artifact_bundle_filename)
+            if not self.artifact_bundle_filename.lower().endswith(".zip") or not self.artifacts:
+                raise ValueError("A named artifact bundle needs artifacts and a .zip filename.")
 
     @classmethod
     def of(
         cls,
         tables: Mapping[str, pl.DataFrame],
         artifacts: Mapping[str, Artifact] | None = None,
+        artifact_bundle_filename: str | None = None,
     ) -> RunResult:
         """Build a result whose primary table is the first one given.
 
@@ -191,6 +198,7 @@ class RunResult:
             tables=tables,
             primary_output_id=next(iter(tables)),
             artifacts=artifacts or {},
+            artifact_bundle_filename=artifact_bundle_filename,
         )
 
     @property

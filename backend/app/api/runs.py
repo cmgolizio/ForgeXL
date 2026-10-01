@@ -240,7 +240,7 @@ def download_run_artifacts_zip(run_id: str) -> Response:
     return _attachment(
         archive.to_zip_bytes(artifacts, timestamp=_result_timestamp(run)),
         media_type=archive.ZIP_MEDIA_TYPE,
-        filename=export.download_filename(
+        filename=(run.result.artifact_bundle_filename if run.result else None) or export.download_filename(
             action_id=run.action.id,
             extension=archive.ZIP_EXTENSION,
             timestamp=_result_timestamp(run),

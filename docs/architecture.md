@@ -1,14 +1,13 @@
 # ForgeXL — Architecture
 
-**Status:** audited through the Phase 13 implementation on 2026-10-01.
-Phase 13 business acceptance remains pending; Phase 14 is blocked on the
-report-specification decision documented in the
-[readiness audit](phase-14-readiness-audit.md).
-Phases 0–8 built and validated the proof of concept; Phase 9 added
-the persistent Data Library described in §5a, Phase 10 the monthly ingestion
-layer in §5b, Phase 11 the library-backed Action inputs in §5c, and Phase 12
-the rich artifact output framework in §5d, and Phase 13 the provisional
-monthly report engine in §5e.
+**Status:** implemented through Phase 14 on 2026-10-01. The configured report
+contract defines six sections. Source
+reconciliation and automated acceptance are recorded in
+[phase-14-validation.md](phase-14-validation.md); complete company credits/sample
+coverage and manual Excel for Mac opening remain pending.
+Phases 0–8 built the proof of concept; Phase 9 added the Data Library (§5a),
+Phase 10 ingestion (§5b), Phase 11 library-backed inputs (§5c), Phase 12 generic
+artifacts/rendering (§5d), and Phases 13–14 the report and workbook batch (§5e).
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -603,7 +602,8 @@ time rather than with "now", so re-downloading a bundle returns the same bytes.
 
 - **The Action contract.** `ActionResult.artifacts` defaults to empty. Every
   Action written before Phase 12 is valid and unchanged, and the contract
-  freeze asserts that neither registered Action produces an artifact.
+  freeze asserts that neither proof Action produces an artifact. Phase 14
+  adds an optional bundle filename without changing those defaults.
 - **`MANIFEST_SCHEMA_VERSION` stays at 2.** `RunManifest.artifacts` defaults to
   empty, so a manifest written before this phase still validates.
 - **The Run pipeline writes nothing.** An artifact is bytes an Action produced,
@@ -611,102 +611,94 @@ time rather than with "now", so re-downloading a bundle returns the same bytes.
 - **The tabular side.** Preview, per-output export and the whole-Run workbook
   are untouched, and an artifact-producing Run uses all of them normally.
 
-### Not built
+### Current artifact delivery
 
-No registered Action produces an artifact, so the frontend's "Generated Files"
-section renders for no Action that ships today. That is deliberate: build plan
-12B keeps artifacts optional and 12G asks only for generic support, which is
-what the section is — every line of it comes from `manifest.artifacts`. The
-first Action that produces one is build plan Phase 14's rep workbooks: Phase 13
-registered the report Action and it returns tables only, because Phase 13's
-exit criterion is the calculations "before any attention is paid to workbook
-appearance".
+The Monthly Sales Rep Report produces every rep workbook in one successful
+Run. The existing generic Generated Files section can render their metadata,
+and the existing routes download one artifact or all of them in a ZIP. A named
+bundle travels as optional runtime result state; the route uses it instead of
+its generic fallback. Neither the manifest schema nor the proof Actions change.
 
-Artifacts are also not persisted. They live and die with their Run, exactly as
-result frames do. The Data Library stores source and history data; build plan
-12C is explicit that it "does not automatically become a permanent report
-archive".
+Artifacts are not persisted. They live and die with their Run, exactly as
+result frames do. The Data Library remains an immutable source/history store,
+not a report archive.
 
 ---
 
-## 5e. The monthly report engine (Phase 13)
+## 5e. The monthly report and workbook batch (Phases 13–14)
 
-The first Action that reads the Data Library, and the first whose behaviour is
-specified by a document rather than by a paragraph of the build plan.
+The report reads three resolved DataFrames and delegates preparation,
+calculation and presentation to separate pure services:
 
-```text
-sales_history      history:2026-09  ─┐
-sample_history     history:2026-09  ─┤ app/services/input_resolution.py
-account_assignments period:2026-09  ─┘        ↓
-                                     three DataFrames
-                                              ↓
-              app/actions/monthly_sales_rep_report.py   the Action contract
-                                              ↓
-              app/services/monthly_report.py            the arithmetic
-                   ↑
-              app/models/report_spec.py                 the definitions
-                                              ↓
-                              twelve result tables, keyed by Sales Rep
-                                              ↓
-                          [Phase 14] app/services/workbook.py
-```
 
-Three modules, and the split is the point:
 
-| module | owns |
-| ------ | ---- |
-| `app/models/report_spec.py` | the business definitions: what revenue is, what a placement is, which conditions fail a report. Declarations only — it reads no file and no clock. |
-| `app/services/monthly_report.py` | the arithmetic. It spells no rule of its own; it reads the declarations. |
-| `app/actions/monthly_sales_rep_report.py` | the Action contract — ID, version, slots, outputs, the validation hook — and nothing else. |
+| Module | Responsibility |
+| --- | --- |
+| `models/report_spec.py` | Rule confidence, source roles, windows, outputs and validation severity. |
+| `services/monthly_report.py` | One period/prepared model, invoice rep identities, dynamic roster, shared company calculations and twelve supplementary tables. |
+| `services/report_views.py` | Six accepted views and precomputed footer amounts/ratios. |
+| `services/report_workbooks.py` | Per-rep slicing, period/coverage notes, formatting policy and safe names. No business calculations. |
+| `services/workbook.py` | Pure generic rendering into XLSX bytes; capacity checks, numeric formats, literal cells, filters and frozen headers. |
+| `actions/monthly_sales_rep_report.py` | Thin Action contract and delegation; returns tables, all workbooks and the month-specific ZIP name. |
 
-`docs/monthly-sales-rep-report-spec.md` is the same specification in prose and
-is the authoritative one.
+[monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) records the
+exact six worksheets, formulas, coverage and acceptance scope.
 
-### One period, resolved once
+### One reporting period and seven calendar windows
 
-Build plan 13C: no section of the report decides for itself what "this month"
-means. The reporting period is the greatest calendar month present in
-`Invoice Date` across the sales history the Run read — from the data, never
-from a filename — and all five comparison windows are derived from it. The Run
-chooses it explicitly by bounding its history selector, and that bounding month
-must exist, so the month derived is always the month requested.
+The greatest month in the selected sales data defines the period. Bounding
+`history:YYYY-MM` requires that month to exist. Seven inclusive windows cover
+the reporting month, prior month, same month last year, both YTD periods, and
+current/prior R12. Month-presence checks include interior gaps. Accepted R12
+views blank unavailable totals and growth; supplementary previews retain
+explicitly qualified available-row sums.
 
-### The roster comes from the snapshot
+### Invoice performance and snapshot context
 
-Build plan 13D forbids a hard-coded rep list. The reps are the distinct
-non-blank `Sales Person` values in the account-assignment snapshot for the
-month, and every figure is attributed by that snapshot rather than by the rep
-named on the invoice (build plan 9E). A rep who sold nothing still gets a row;
-a rep named only on transactions gets a warning and no report.
+Invoice salesperson is the configured performance identity, superseding the
+previous account-owner performance assumption. Transactions retain their
+`Sales Person`; the month-specific snapshot contributes current ownership and
+account-list/roster context. It never moves historical performance to a new
+owner. Snapshot reps plus reps active in current-R12 sales/samples receive
+workbooks. Idle snapshot reps retain zero-activity reports; unknown active reps
+are warned about and included.
 
 ### Prepared once, company once
 
-Build plan 13E and 13G, in one sentence each: dates, measures and ownership
-are attached once per Run rather than once per rep, and the company's figures
-are calculated once and joined in, so two reps can never be shown company
-totals that disagree.
+Preparation and company aggregations are shared across all reps. Company
+supplier amounts are calculated once and joined into accepted supplier views.
+Footer percentages are ratios of precomputed footer amounts, not sums of row
+percentages. Sources remain unchanged, including subcent prices, fractional
+quantities, accents and original identifiers.
 
-### Fail, or qualify
+### Fail or qualify
 
-Build plan 13H splits the conditions the report detects in two, and the
-specification says which is which:
+Action validation fails with a structured 422 before artifacts are published
+for unsafe measures, missing invoice reps/sales accounts, unreadable dates,
+wrong/unknown invoice types, or mismatched input periods. Samples may have
+blank customers. Unknown reps, source-schema additions, repeated source rows,
+missing historical months and direct-call assignment conflicts qualify the
+report. Library ingestion still refuses a conflicting ownership snapshot.
+Remaining provisional placement/sample-period definitions appear in Data
+Quality; placements are excluded from the accepted workbooks.
 
-- **Errors** are returned from the Action's `validate()` hook, so the Run fails
-  with a structured 422 **before** a single table is calculated. A blank
-  measure, an unowned account with activity, an account owned twice, an
-  unreadable date, a sample history that skips the month.
-- **Warnings** travel in the `data_quality` result table, because an Action has
-  no warning channel of its own and everything `validate()` returns fails the
-  Run. An unrecognised rep, an unexpected invoice type, an added source column,
-  repeated rows, an empty comparison window, a short placement history — and,
-  on every Run for now, that some of the report's definitions are still
-  provisional.
+### Batch publication and presentation
 
-### Not built
+One rendering policy produces six sheets per rep. Amounts and percentages
+stay numeric; note rows and footer rows participate in capacity checks.
+Filenames preserve the reporting period and safely resolve case-insensitive
+collisions, character limits and UTF-8 byte limits. A fixed XLSX creation
+property removes the rendering clock from byte reproducibility.
 
-No workbook. Build plan Phase 13 produces tables and Phase 14 renders them,
-with the report renderer Phase 12 already built and tested. No frontend either:
-the reporting-period picker is build plan 15A.
+The runner publishes result tables and the entire artifact set together.
+If any workbook fails rendering, the failed Run exposes no partial batch.
+The generic artifact ZIP contains each workbook once and uses
+`<Month Year> Sales Rep Reports.zip`; individual downloads remain available.
+
+Phase 15's period picker, ingestion UI and dedicated monthly reporting flow
+are not implemented here. Phase 14 is reachable through `POST /api/runs` with
+explicit library selectors, or in-process. Manual Excel for Mac acceptance and
+full-company completed-month validation are recorded as outstanding.
 
 ---
 

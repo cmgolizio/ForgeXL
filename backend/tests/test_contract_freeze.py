@@ -333,7 +333,7 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
     # the specification rather than about the code (build plan 13A).
     {
         "id": "monthly_sales_rep_report",
-        "version": "0.1.1",
+        "version": "0.2.0",
         "name": "Monthly Sales Rep Report",
         "inputs": (
             {
@@ -388,6 +388,13 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 ("samples", "Samples"),
                 ("sample_detail", "Sample Detail"),
                 ("data_quality", "Data Quality"),
+                ("monthly_samples", "Monthly Samples by Product"),
+                ("rolling_samples", "Samples R12"),
+                ("rolling_account_sales", "Sales R12 by Account"),
+                ("monthly_supplier_sales", "Monthly Supplier Sales"),
+                ("rolling_product_accounts", "Product and Account R12"),
+                ("rolling_account_comparison", "Account R12 Comparison"),
+                ("workbook_totals", "Workbook Totals"),
             )
         ),
         "metric_keys": frozenset(
@@ -1128,7 +1135,7 @@ def test_an_action_executes_with_no_filesystem_available(
     assert list(quarantine.iterdir()) == []
 
 
-def test_no_registered_action_produces_artifacts() -> None:
+def test_proof_actions_keep_optional_artifacts_and_report_returns_its_batch() -> None:
     """Build plan 12B: an Action is never required to produce a file.
 
     The assertion form of "do not require every Action to generate artifacts".
@@ -1145,10 +1152,8 @@ def test_no_registered_action_produces_artifacts() -> None:
             "optional, and neither proof Action was asked to produce one."
         )
 
-    # The report Action of Phase 13 returns tables and no file either, which
-    # is build plan Phase 13's exit criterion in as many words: "automated
-    # tests prove the business calculations before any attention is paid to
-    # workbook appearance". Rendering them is Phase 14.
+    # Phase 14 makes the report the first artifact-producing registered Action.
+    # The proof Actions above still keep their original table-only contract.
     report = _action("monthly_sales_rep_report")
     result = report.run(
         {
@@ -1157,10 +1162,9 @@ def test_no_registered_action_produces_artifacts() -> None:
             "account_assignments": report_months.assignment_frame(),
         }
     )
-    assert result.artifacts == (), (
-        "monthly_sales_rep_report produces artifacts. Build plan Phase 13 "
-        "produces tables; the workbooks are Phase 14."
-    )
+    assert len(result.artifacts) == 3
+    assert result.artifact_bundle_filename == "September 2026 Sales Rep Reports.zip"
+    assert all(artifact.filename.endswith(" - September 2026.xlsx") for artifact in result.artifacts)
 
 
 def test_an_action_may_use_the_report_renderer() -> None:

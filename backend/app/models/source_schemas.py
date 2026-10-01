@@ -6,13 +6,8 @@ detection, row validation, the coordinated import — reads a
 :class:`SourceSchema` rather than naming a column of its own, so a column name
 appears in this repository once.
 
-Build plan 10A is explicit about the standard these declarations are held to:
-
-    Use the actual company exports that support the existing manually verified
-    monthly reports. Do not guess alternative column names. Do not silently
-    treat semantically similar columns as equivalent. Any required
-    normalization or aliasing must be explicitly specified, deterministic, and
-    tested.
+Exact canonical headers avoid accidental equivalence between different
+fields. Aliasing requires an explicit, deterministic and tested policy.
 
 So there is **no aliasing here at all**. A column is matched by its exact name,
 the same way :class:`~app.actions.product_master_builder.ProductMasterBuilderAction`
@@ -22,9 +17,10 @@ resolved.
 
 **Confirmed and provisional schemas are marked as such.** `confirmed` is part
 of the declaration, not a comment, so the distinction survives into the
-metadata a caller can read and into the tests. The sales and sample schemas
-were supplied verbatim from the real exports. The account-assignment schema was
-not, and is provisional — see :data:`ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA`.
+metadata a caller can read and into the tests. The declarations define transaction schemas
+and assignment identity/context schemas.
+Known optional snapshot totals are preserved as source context; invoice-based
+performance is recalculated from transactions.
 
 The declarations here describe the *source file*. They are not the shape of
 what gets stored: the Data Library stores the parsed frame exactly as it
@@ -137,8 +133,8 @@ class SourceSchema:
     label: str
     columns: tuple[SourceColumn, ...]
 
-    #: Whether these column names came from the real company export. False
-    #: means provisional: the shape is right and the names are not confirmed.
+    #: Whether these canonical column names are confirmed. False
+    #: marks a provisional schema whose names still need confirmation.
     confirmed: bool
 
     #: The column a reporting period is derived from (build plan 10B). ``None``
@@ -154,6 +150,9 @@ class SourceSchema:
     rep_column: str | None = None
 
     date_formats: tuple[str, ...] = DEFAULT_DATE_FORMATS
+
+    # Known optional source fields are preserved without a schema-change warning.
+    optional_column_names: tuple[str, ...] = ()
 
     @property
     def column_names(self) -> tuple[str, ...]:
@@ -192,15 +191,15 @@ class SourceSchema:
         Reported as a warning and kept in the stored version; see the class
         docstring.
         """
-        declared = set(self.column_names)
+        declared = set(self.column_names) | set(self.optional_column_names)
         return tuple(name for name in present if name not in declared)
 
 
 # ---------------------------------------------------------------------------
 # Sales and Samples
 #
-# CONFIRMED. Supplied verbatim from the real monthly exports, in the order the
-# exports produce. Sales and samples are exported by the same system and their
+# Canonical transaction columns, shared by the two separate datasets.
+# Sales and samples use the same declared header order and their
 # header rows are identical.
 # ---------------------------------------------------------------------------
 
@@ -249,9 +248,9 @@ _TRANSACTION_COLUMNS: tuple[SourceColumn, ...] = (
         name="Sales Person",
         kind=SourceColumnKind.TEXT,
         description=(
-            "The rep recorded on the transaction itself. Ownership for a "
-            "report comes from the account-assignment snapshot for the month, "
-            "not from this column."
+            "The rep recorded on the transaction itself. Performance attribution for a "
+            "report follows this field; the account-assignment snapshot states current ownership, "
+            "which is a separate fact."
         ),
     ),
     SourceColumn(
@@ -333,34 +332,13 @@ SAMPLES_SOURCE_SCHEMA = SourceSchema(
 # ---------------------------------------------------------------------------
 # Account Assignments
 #
-# UNCONFIRMED — PROVISIONAL.
+# Confirmed assignment identities and recognized optional context fields.
 # ---------------------------------------------------------------------------
 
-#: **This schema is provisional and has not been confirmed against the real
-#: account-assignment export.** `confirmed=False` records that in code, a test
-#: asserts it, and `docs/monthly-source-schemas.md` explains what to do about
-#: it. Every other schema in this module was supplied verbatim; this one was
-#: not, and pretending otherwise would be exactly the guess build plan 10A
-#: forbids.
-#:
-#: Two decisions make the provisional version as harmless as a provisional
-#: version can be:
-#:
-#: * **The two column names are not invented.** ``Customer`` and
-#:   ``Sales Person`` are taken verbatim from the confirmed transaction schema
-#:   above, which is the only evidence in the repository about how this company
-#:   spells those two things. A newly made-up spelling would be a guess; reusing
-#:   the confirmed one is at least a consistent guess, and it is the likeliest
-#:   to be right.
-#: * **It declares the minimum rather than the whole file.** Extra columns are
-#:   kept and warned about, never refused, so a real export carrying ten more
-#:   columns still imports and the full snapshot is still stored. The narrower
-#:   this declaration is, the smaller the chance that the provisional part
-#:   blocks a real file.
-#:
-#: To confirm it: replace the columns below with the real header row, set
-#: `confirmed=True`, and update the table in `docs/monthly-source-schemas.md`.
-#: Nothing else has to change — no service names a column of its own.
+#: Customer and Sales Person are the required identity columns. The declaration
+#: also recognizes four optional R12 totals. They are recognized without
+#: a schema-change warning and remain in the immutable source snapshot, but
+#: the performance engine recalculates its values using invoice attribution.
 ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA = SourceSchema(
     dataset_id=ACCOUNT_ASSIGNMENTS.id,
     label="Account Assignments",
@@ -383,7 +361,8 @@ ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA = SourceSchema(
             ),
         ),
     ),
-    confirmed=False,
+    confirmed=True,
+    optional_column_names=("Prior R12", "Current R12", "$ Change", "% Change"),
     # A snapshot carries no date of its own — it states ownership as it stands.
     # Its reporting month is supplied explicitly by the caller instead, which
     # is the "explicit user selection" build plan 10B prefers to a guess.

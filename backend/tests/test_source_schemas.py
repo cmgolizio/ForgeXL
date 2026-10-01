@@ -8,7 +8,7 @@ confirmed schemas say what the export says.
 
 The one thing here that is not confirmed is the account-assignment schema, and
 that is asserted too: `confirmed` is False, and a test says so, so the
-provisional status cannot quietly become permanent by being forgotten.
+confirmed status and verified optional fields remain explicit.
 """
 
 from __future__ import annotations
@@ -69,34 +69,21 @@ def test_the_transaction_schemas_are_confirmed(schema) -> None:
     assert schema.confirmed is True
 
 
-def test_the_account_assignment_schema_is_marked_unconfirmed() -> None:
-    """It was not supplied, and pretending otherwise would be the guess 10A forbids.
-
-    This test is the reason the provisional status cannot be lost: confirming
-    the schema means editing the declaration *and* this assertion, which is a
-    deliberate act rather than a forgotten one.
-    """
-    assert ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA.confirmed is False
+def test_the_account_assignment_schema_is_confirmed_by_the_supplied_export() -> None:
+    """The supplied assignment workbook confirms these exact column names."""
+    assert ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA.confirmed is True
 
 
-def test_the_provisional_schema_reuses_confirmed_spellings() -> None:
-    """Its two column names come from the confirmed schema, not from invention.
-
-    ``Customer`` and ``Sales Person`` are how this company's confirmed export
-    spells those two things. A provisional schema that made up a third spelling
-    would be a worse guess than one that is at least consistent.
-    """
+def test_the_assignment_schema_uses_the_confirmed_identity_spellings() -> None:
+    """Required identities match the actual export without aliases."""
     for column in ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA.column_names:
         assert column in SALES_SOURCE_SCHEMA.column_names
 
 
-def test_the_provisional_schema_declares_a_minimum_rather_than_a_whole_file() -> None:
-    """Narrow on purpose: extra columns are kept and warned about, not refused.
-
-    The fewer columns a provisional schema requires, the smaller the chance
-    that the unconfirmed part of it blocks a real export.
-    """
+def test_the_assignment_schema_requires_identity_and_recognizes_optional_totals() -> None:
+    """The four verified optional fields are context, not invoice totals."""
     assert len(ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA.columns) == 2
+    assert ACCOUNT_ASSIGNMENTS_SOURCE_SCHEMA.optional_column_names == ("Prior R12", "Current R12", "$ Change", "% Change")
 
 
 # ---------------------------------------------------------------------------

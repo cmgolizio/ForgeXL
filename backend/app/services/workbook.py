@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import io
 import re
+from datetime import datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -293,6 +294,9 @@ class Sheet:
     #: as a spreadsheet.
     hide_gridlines: bool = False
 
+    #: Reader-facing source/coverage notes. Presentation only, no calculations.
+    notes: tuple[str, ...] = ()
+
     def resolved_columns(self) -> tuple[Column, ...]:
         """This sheet's columns, filled in from the frame when unstated."""
         if self.columns:
@@ -333,12 +337,12 @@ def render_workbook(sheets: Sequence[Sheet]) -> bytes:
     prepared = [(sheet, _prepare(sheet)) for sheet in entries]
 
     for sheet, frame in prepared:
-        heading_rows = int(bool(sheet.title)) + int(bool(sheet.subtitle))
+        heading_rows = int(bool(sheet.title)) + int(bool(sheet.subtitle)) + len(sheet.notes)
         extra_rows = (
             heading_rows + int(heading_rows > 0) + int(sheet.total_row is not None)
         )
         check_fits_worksheet(frame, label=sheet.name, extra_rows=extra_rows)
-        for text in (sheet.title, sheet.subtitle):
+        for text in (sheet.title, sheet.subtitle, *sheet.notes):
             check_cell_text(text, label=sheet.name)
         if sheet.total_row is not None:
             check_cell_text(sheet.total_label, label=sheet.name)
@@ -351,6 +355,8 @@ def render_workbook(sheets: Sequence[Sheet]) -> bytes:
     buffer = io.BytesIO()
     try:
         with xlsxwriter.Workbook(buffer, dict(WORKBOOK_OPTIONS)) as workbook:
+            # A workbook is determined by its inputs, including its XML metadata.
+            workbook.set_properties({"created": datetime(2000, 1, 1)})
             styles = _Styles(workbook)
             for name, table_name, (sheet, frame) in zip(
                 names, table_names, prepared, strict=True
@@ -399,6 +405,10 @@ class _Styles:
                 "italic": True,
             }
         )
+        self.note = workbook.add_format({
+            "font_name": REPORT_FONT, "font_size": SUBTITLE_FONT_SIZE,
+            "font_color": TITLE_FONT_COLOR, "text_wrap": True, "valign": "vcenter",
+        })
         self.header = {
             "bold": True,
             "font_name": REPORT_FONT,
@@ -543,6 +553,16 @@ def _write_heading(
         row += 1
     if sheet.subtitle:
         worksheet.write(row, 0, sheet.subtitle, styles.subtitle)
+        row += 1
+    columns = sheet.resolved_columns()
+    frame = _prepare(sheet) if sheet.notes else None
+    width = sum(_column_width(column, frame) for column in columns) if frame is not None else 0
+    for note in sheet.notes:
+        worksheet.set_row(row, max(28, 14 * (1 + int(len(note) / max(1, width - 4)))))
+        if len(columns) > 1:
+            worksheet.merge_range(row, 0, row, len(columns) - 1, note, styles.note)
+        else:
+            worksheet.write(row, 0, note, styles.note)
         row += 1
     # One blank row between the heading and the table, when there is a heading.
     return row + 1 if row else 0

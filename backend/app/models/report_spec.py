@@ -1,42 +1,13 @@
-"""The frozen business definitions of the Monthly Sales Rep Report (13A).
+"""Software contract for monthly report calculations and workbook views.
 
-Build plan 13A requires the report's rules to be written down *before* the
-calculation engine exists, so there is something to check the engine against:
+Rules declare exact source roles, performance attribution, calendar windows,
+measures and validation behavior. Confidence records whether a configured rule
+is fixed or remains a provisional supplementary definition. Production-source
+provenance and acceptance findings are retained in private review material;
+this module contains policy declarations and no business records.
 
-    Do not invent a formula merely because it appears reasonable. If the
-    existing report does not establish a rule clearly, document the ambiguity
-    and resolve it before implementation.
-
-This module is that specification in code, and `docs/monthly-sales-rep-report-spec.md`
-is the same specification in prose. The engine
-(:mod:`app.services.monthly_report`) reads these declarations; it never spells
-a rule of its own. A rule therefore appears in this repository once, exactly
-the way a source column name appears in
-:mod:`app.models.source_schemas` once.
-
-**Every rule carries its confidence, and the provisional ones say so.**
-:class:`Confidence` is part of the declaration rather than a comment, so the
-distinction survives into the tests and into anything that reads the spec. The
-precedent is Phase 10A's account-assignment schema, which is marked
-``confirmed=False`` for the same reason: this repository has never been given
-the finished Excel report or the Power Query behind it, so a rule that was
-*derived* from it would be a fabrication. What is declared here instead is:
-
-* **confirmed** — established by something in the repository: the confirmed
-  source schemas of Phase 10A, a sentence of the build plan, or a rule this
-  application already enforces elsewhere.
-* **provisional** — a definition the real report must confirm. Each one states
-  the reasoning behind the default chosen, and each is the smallest, most
-  conservative reading available, so confirming it is an edit to one line here
-  rather than a rewrite of the engine.
-
-:data:`PROVISIONAL_RULES` is derived, not maintained by hand, and
-`test_report_spec.py` asserts it is non-empty for as long as any rule is
-unconfirmed. When the real report is supplied, change the rule's
-:class:`Confidence` here, adjust its value if the real definition differs, and
-the engine follows.
-
-Nothing in this module reads a file, a clock or a database. It is declarations.
+Nothing here reads files, clocks, source workbooks or databases. Calculation
+services read these declarations; presentation services receive their results.
 """
 
 from __future__ import annotations
@@ -66,7 +37,7 @@ REPORT_ACTION_ID = "monthly_sales_rep_report"
 #: is specified by :data:`REPORT_RULES`, part of which is still provisional, so
 #: claiming 1.0.0 would assert a stability the definitions do not yet have.
 #: Raise it to 1.0.0 in the same change that clears :data:`PROVISIONAL_RULES`.
-REPORT_ACTION_VERSION = "0.1.1"
+REPORT_ACTION_VERSION = "0.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +99,7 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
-            "docs/monthly-source-schemas.md, Phase 10A. The account-assignment "
-            "schema is itself marked UNCONFIRMED there; this rule inherits "
-            "that status from it rather than restating it."
+            'The canonical schema declarations define required identities and measures. Optional snapshot totals remain context rather than replacements for transaction aggregates.'
         ),
     ),
     # -- Reporting period -------------------------------------------------
@@ -152,21 +121,10 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
-        key="comparison_windows",
-        statement=(
-            "Five windows: the reporting month, the month before it, the same "
-            "month one year earlier, year to date, and the same year-to-date "
-            "window one year earlier. All five are calendar windows, "
-            "inclusive of both ends."
-        ),
-        confidence=Confidence.PROVISIONAL,
-        basis=(
-            "Build plan 13C names month-over-month, year-over-year, "
-            "current-period and prior-period calculations, so these five are "
-            "the smallest set that covers all four. Whether the finished "
-            "report shows a rolling twelve months, a quarter or a trailing "
-            "average as well is not established here."
-        ),
+        key='comparison_windows',
+        statement='The reporting month, prior month, same month last year, current and prior YTD, current R12 and prior R12 are calendar windows inclusive of both ends. Missing interior months are exposed as incomplete history.',
+        confidence=Confidence.CONFIRMED,
+        basis='Calendar windows support monthly, YTD and rolling-year views. Explicit month coverage prevents an incomplete rolling period from being presented as a complete annual total.',
     ),
     # -- Measures ---------------------------------------------------------
     Rule(
@@ -185,34 +143,16 @@ REPORT_RULES: tuple[Rule, ...] = (
         basis="Declared as units on the line in the confirmed schema.",
     ),
     Rule(
-        key="credits",
-        statement=(
-            "Credits and returns are included at their signed value; nothing "
-            "is filtered out by Invoice Type."
-        ),
+        key='credits',
+        statement='Sales credits and returns, and sample credits, are summed at their signed source values in their respective datasets.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "The confirmed schema states Quantity is negative on a credit or "
-            "return, which is only useful if credits are summed with sales. "
-            "Excluding a row would also be the silent dropping build plan "
-            "section 3.3 forbids."
-        ),
+        basis='Net activity is the sum of signed values. Sales and sample credits remain in their own datasets, and credit signs are preserved rather than negated twice.',
     ),
     Rule(
-        key="known_invoice_types",
-        statement=(
-            "Invoice and Credit are the expected Invoice Type values. Any "
-            "other value is reported as a warning and its rows are still "
-            "counted."
-        ),
-        confidence=Confidence.PROVISIONAL,
-        basis=(
-            "The real set of Invoice Type values has not been supplied. Build "
-            "plan 13H requires unexpected invoice types to be detected, so "
-            "they are named and reported; they are a warning rather than a "
-            "refusal because every row is counted regardless of its type, so "
-            "an unfamiliar label changes no total."
-        ),
+        key='known_invoice_types',
+        statement='Sales contain Invoice and Credit Invoice; samples contain Sample Invoice and Sample Credit Invoice. An unfamiliar, blank or wrong-dataset type fails rather than changing totals silently.',
+        confidence=Confidence.CONFIRMED,
+        basis='Each dataset accepts an explicit pair of document types. Refusing other labels prevents an unknown document kind from silently changing sales or sample calculations.',
     ),
     Rule(
         key="money_precision",
@@ -222,11 +162,7 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
-            "Two decimals is the precision the source data itself carries. "
-            "Rounding an aggregate to it removes floating-point residue that "
-            "would otherwise make one total read differently in a workbook "
-            "and in a CSV; it is a statement of the sum at the source's own "
-            "precision, not a change to any value."
+            'Raw currency precision is preserved. Aggregated reporting money is rounded to two decimals and footer money sums displayed groups, making presentation and stored result values agree.'
         ),
     ),
     Rule(
@@ -245,19 +181,10 @@ REPORT_RULES: tuple[Rule, ...] = (
     ),
     # -- Ownership --------------------------------------------------------
     Rule(
-        key="ownership",
-        statement=(
-            "An account belongs to the rep the assignment snapshot names for "
-            "the reporting month. Sales Person on the transaction is never "
-            "used to attribute revenue."
-        ),
+        key='ownership',
+        statement='Revenue and sample activity follow Sales Person on each transaction. The reporting-month assignment snapshot supplies roster and account-list context only, and never reattributes historical activity.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "Build plan 9E is explicit that a month's report must use that "
-            "month's ownership snapshot, and the confirmed sales schema "
-            "records that Sales Person on a transaction is not the report's "
-            "source of ownership."
-        ),
+        basis='Invoice salesperson is the configured performance identity. Snapshot ownership is a separate contextual fact and never replaces that identity on historical transactions.',
     ),
     Rule(
         key="ownership_matching",
@@ -273,65 +200,29 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
-        key="unowned_accounts",
-        statement=(
-            "An account with activity in any report window and no owner in "
-            "the snapshot fails the report. An account named in the snapshot "
-            "with no activity is not a problem."
-        ),
+        key='unowned_accounts',
+        statement='Sales need a nonblank Customer and Sales Person. Samples need Sales Person; sample Customer can be blank. Missing current ownership never erases invoice performance.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "Build plan 13H lists missing account ownership and requires a "
-            "failure where a condition makes the report unreliable. Revenue "
-            "from an unowned account appears in the company total and in no "
-            "rep's report, so every rep's share of the company would be "
-            "wrong while every number still looked plausible."
-        ),
+        basis='Performance attribution comes from the transaction identity. Sales require an account, while product-based sample views can retain samples with no known account.',
     ),
     Rule(
-        key="duplicate_ownership",
-        statement=(
-            "An account the snapshot assigns to two different reps fails the "
-            "report."
-        ),
+        key='duplicate_ownership',
+        statement='Conflicting owners in the snapshot are reported, but never multiply or reassign invoice-attributed revenue.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "Build plan 13H lists duplicate account ownership. The ingestion "
-            "layer already refuses such a snapshot (Phase 10E); this is the "
-            "same rule re-checked where the report is built, because a "
-            "version committed by another path would otherwise double-count "
-            "an account."
-        ),
+        basis='Performance does not join through the ownership map. Conflicting context can therefore be qualified without multiplying revenue, while snapshot ingestion retains strict ownership checks.',
     ),
     # -- Rep roster -------------------------------------------------------
     Rule(
-        key="rep_roster",
-        statement=(
-            "The reps are exactly the distinct non-blank Sales Person values "
-            "in the assignment snapshot for the reporting month. A rep with "
-            "no activity still receives a report."
-        ),
+        key='rep_roster',
+        statement='Every nonblank rep in the reporting-month snapshot or with sales/sample activity in current R12 receives a workbook, including snapshot reps with no activity.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "Build plan 13D forbids a hard-coded roster and requires it to "
-            "come from the authoritative reporting-period data, which for "
-            "ownership is the snapshot. A rep who sold nothing needs to see "
-            "that as much as one who sold well."
-        ),
+        basis='A dynamic roster combines snapshot members with current-R12 transaction activity. This retains idle assigned reps and active invoice reps without a hard-coded name list.',
     ),
     Rule(
-        key="unrecognised_reps",
-        statement=(
-            "A Sales Person named on a transaction but absent from the "
-            "snapshot is reported as a warning and receives no report."
-        ),
+        key='unrecognised_reps',
+        statement='Transaction reps absent from the snapshot are reported as a warning. Their transactions keep their invoice rep, and reps active in current R12 are included in the roster.',
         confidence=Confidence.CONFIRMED,
-        basis=(
-            "Build plan 13H lists unrecognised sales reps. It is a warning "
-            "rather than a refusal because that column attributes nothing: "
-            "the revenue on the row is still attributed through its account's "
-            "owner, so no total is affected."
-        ),
+        basis='A current assignment list cannot establish who performed every historical sale. Retaining the invoice identity avoids silently reassigning or dropping that activity.',
     ),
     # -- Placements -------------------------------------------------------
     Rule(
@@ -343,8 +234,8 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
         confidence=Confidence.PROVISIONAL,
         basis=(
-            "The finished report's placement definition has not been "
-            "supplied. This is the plainest reading of a new placement, it is "
+            "Placement sections were not among the six accepted worksheets. "
+            "This supplementary preview is the plainest reading of a new placement; it is "
             "reproducible because the Run records every history version it "
             "read, and it never counts a credit as a placement. A fixed "
             "look-back window — twelve months, say, so a product bought two "
@@ -424,20 +315,10 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
-        key="comparison_index",
-        statement=(
-            "The company-versus-rep index is the rep's share of a supplier "
-            "divided by the company's share of that supplier."
-        ),
-        confidence=Confidence.PROVISIONAL,
-        basis=(
-            "Build plan 13F requires a company-versus-rep supplier "
-            "comparison but does not define its measure. A ratio of shares is "
-            "the standard form — 1.0 means the rep sells that supplier in the "
-            "same proportion as the company — and the two shares it is built "
-            "from are reported beside it, so the comparison is legible even "
-            "if the finished report expresses it differently."
-        ),
+        key='comparison_index',
+        statement="The accepted supplier comparison is rep net supplier sales divided by company net supplier sales; rep supplier share is divided by that rep's total monthly net sales.",
+        confidence=Confidence.CONFIRMED,
+        basis='The two supplier ratios measure different relationships: supplier mix within a rep and a rep share within company supplier activity. Their denominators are explicitly separate.',
     ),
     # -- Presentation-independent ordering --------------------------------
     Rule(
@@ -458,8 +339,9 @@ REPORT_RULES: tuple[Rule, ...] = (
     Rule(
         key="totals",
         statement=(
-            "A displayed total is the sum of the rows shown in that table for "
-            "that rep, calculated by the engine and never by the workbook."
+            "Footer amounts sum the rows shown for that rep. Footer "
+            "percentages are calculated from the summed amounts, never by "
+            "adding percentages. Every footer is calculated before rendering."
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
@@ -469,20 +351,10 @@ REPORT_RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
-        key="duplicate_source_rows",
-        statement=(
-            "Rows that repeat identically within the reporting month are "
-            "reported as a warning; none is removed."
-        ),
-        confidence=Confidence.PROVISIONAL,
-        basis=(
-            "Build plan 13H lists duplicate monthly source data. Two "
-            "identical invoice lines can be genuine, so removing one would be "
-            "the silent dropping section 3.3 forbids; counting them is the "
-            "signal. 'Identical across every column' is the definition this "
-            "application already uses for a duplicate row (build plan "
-            "section 26)."
-        ),
+        key='duplicate_source_rows',
+        statement='Identical source rows are reported and preserved. Overlapping files must be reconciled before import; neither source rows nor correction files are deduplicated automatically.',
+        confidence=Confidence.CONFIRMED,
+        basis='Equality alone cannot distinguish a legitimate repeated line from an overlapping input. Reporting repetitions preserves source values while prompting explicit reconciliation.',
     ),
 )
 
@@ -598,7 +470,9 @@ REP_COLUMN = "Sales Rep"
 # ---------------------------------------------------------------------------
 
 #: Invoice Type values the report expects to see (rule ``known_invoice_types``).
-KNOWN_INVOICE_TYPES: tuple[str, ...] = ("Invoice", "Credit")
+SALES_INVOICE_TYPES: tuple[str, ...] = ("Invoice", "Credit Invoice")
+SAMPLE_INVOICE_TYPES: tuple[str, ...] = ("Sample Invoice", "Sample Credit Invoice")
+KNOWN_INVOICE_TYPES: tuple[str, ...] = (*SALES_INVOICE_TYPES, *SAMPLE_INVOICE_TYPES)
 
 #: Decimal places an aggregated money figure is stated to (rule
 #: ``money_precision``).
@@ -617,6 +491,8 @@ class WindowKey(str, Enum):
     PRIOR_YEAR_MONTH = "prior_year_month"
     YEAR_TO_DATE = "year_to_date"
     PRIOR_YEAR_TO_DATE = "prior_year_to_date"
+    ROLLING_YEAR = "rolling_year"
+    PRIOR_ROLLING_YEAR = "prior_rolling_year"
 
 
 #: How each window is labelled in a report table.
@@ -626,6 +502,8 @@ WINDOW_LABELS: dict[WindowKey, str] = {
     WindowKey.PRIOR_YEAR_MONTH: "Same Month Last Year",
     WindowKey.YEAR_TO_DATE: "Year to Date",
     WindowKey.PRIOR_YEAR_TO_DATE: "Prior Year to Date",
+    WindowKey.ROLLING_YEAR: "Current R12",
+    WindowKey.PRIOR_ROLLING_YEAR: "Prior R12",
 }
 
 
@@ -782,6 +660,18 @@ BUILD_PLAN_13F_CATEGORIES: tuple[str, ...] = (
 )
 
 
+# Accepted workbook views, derived from the supplied six report sections.
+REPORT_SECTIONS += (
+    ReportSection("monthly_samples", "Monthly Samples by Product", "Net sample bottles by supplier and producer/selection.", ("samples",)),
+    ReportSection("rolling_samples", "Samples R12", "Chronological monthly net sample bottles over current R12.", ("samples",)),
+    ReportSection("rolling_account_sales", "Sales R12 by Account", "Invoice-attributed current R12 net sales by account.", ("account performance",)),
+    ReportSection("monthly_supplier_sales", "Monthly Supplier Sales", "Monthly net sales, rep mix and share of company supplier sales.", ("company-vs-rep supplier comparison",)),
+    ReportSection("rolling_product_accounts", "Product and Account R12", "Current R12 net bottles by producer/selection and customer.", ("product performance",)),
+    ReportSection("rolling_account_comparison", "Account R12 Comparison", "Current versus prior R12 net sales, change and status.", ("account performance",)),
+    ReportSection("workbook_totals", "Workbook Totals", "Precalculated numeric totals for the six accepted workbook sections.", ("rep summary",)),
+)
+
+
 def section(section_id: str) -> ReportSection:
     """Return the declared section called `section_id`.
 
@@ -830,6 +720,18 @@ class Condition:
 
 CONDITIONS: tuple[Condition, ...] = (
     Condition(
+        code="MISSING_TRANSACTION_REP",
+        severity=Severity.ERROR,
+        summary="A transaction in a reporting window has no invoice salesperson.",
+        basis="The performance attribution cannot be established without it.",
+    ),
+    Condition(
+        code="MISSING_TRANSACTION_ACCOUNT",
+        severity=Severity.ERROR,
+        summary="A sales transaction in a reporting window has no Customer.",
+        basis="An account-level performance report cannot place that transaction.",
+    ),
+    Condition(
         code="EMPTY_SALES_HISTORY",
         severity=Severity.ERROR,
         summary="The sales history the Run read has no rows.",
@@ -861,23 +763,24 @@ CONDITIONS: tuple[Condition, ...] = (
     ),
     Condition(
         code="MISSING_ACCOUNT_OWNERSHIP",
-        severity=Severity.ERROR,
+        severity=Severity.WARNING,
         summary=(
             "An account with activity in a report window has no owner in the "
             "snapshot."
         ),
         basis=(
-            "Its revenue would be in the company total and in no rep's "
-            "report, so every rep's share of the company would be wrong."
+            "Retained as a legacy condition identifier. Invoice attribution "
+            "does not require a current owner to retain the transaction."
         ),
     ),
     Condition(
         code="DUPLICATE_ACCOUNT_OWNERSHIP",
-        severity=Severity.ERROR,
+        severity=Severity.WARNING,
         summary="The snapshot assigns one account to two different reps.",
         basis=(
-            "The account's revenue would be counted twice, once in each rep's "
-            "report, and the rep totals would not add up to the company's."
+            "The engine never joins performance through the owner map. "
+            "A conflict qualifies assignment context without multiplying sales; "
+            "library ingestion still refuses a conflicting snapshot."
         ),
     ),
     Condition(
@@ -905,18 +808,18 @@ CONDITIONS: tuple[Condition, ...] = (
             "A Sales Person on a transaction is not named in the snapshot."
         ),
         basis=(
-            "That column attributes nothing: revenue follows the account's "
-            "owner, so no total is affected."
+            "Invoice attribution retains this rep's performance. Active R12 "
+            "reps also receive a workbook even when absent from the snapshot."
         ),
     ),
     Condition(
         code="UNEXPECTED_INVOICE_TYPE",
-        severity=Severity.WARNING,
+        severity=Severity.ERROR,
         summary="An Invoice Type value is not one the specification expects.",
         basis=(
-            "Every row is counted whatever its type, so an unfamiliar label "
-            "changes no figure. It is reported because build plan 13H asks "
-            "for it and because it may mean the export changed."
+            "Only the two declared types for each dataset are accepted. "
+            "An unfamiliar or wrong-dataset type cannot be safely interpreted "
+            "as sales or samples and fails before any artifact is produced."
         ),
     ),
     Condition(
@@ -933,7 +836,7 @@ CONDITIONS: tuple[Condition, ...] = (
         code="DUPLICATE_SOURCE_ROWS",
         severity=Severity.WARNING,
         summary=(
-            "Rows repeat identically within the reporting month."
+            "Source rows repeat identically anywhere in selected sales/sample history."
         ),
         basis=(
             "Two identical invoice lines can be genuine, so none is removed; "
@@ -945,12 +848,12 @@ CONDITIONS: tuple[Condition, ...] = (
         code="MISSING_COMPARISON_PERIOD",
         severity=Severity.WARNING,
         summary=(
-            "A comparison window contains no rows, so its growth figures "
-            "cannot be calculated."
+            "A comparison window lacks at least one calendar month."
         ),
         basis=(
-            "The reporting month's own figures are unaffected, and a growth "
-            "column with no answer reports none rather than zero."
+            "Missing imports cannot be distinguished from a true zero month. "
+            "Accepted R12 views suppress unavailable totals and growth; the "
+            "reporting month's own figures remain usable."
         ),
     ),
     Condition(

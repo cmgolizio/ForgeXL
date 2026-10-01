@@ -1,5 +1,20 @@
 # Phases 0–13 audit and Phase 14 readiness
 
+## Follow-up: evidence received and Phase 14 implemented
+
+The implemented six-section contract resolves the earlier layout and policy
+gate. Version `0.2.0` supersedes the proposed twelve-sheet structure and
+snapshot-owner performance assumption. See
+[monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) and
+[phase-14-validation.md](phase-14-validation.md) for current behavior and public
+automated evidence. Production-source findings are retained privately.
+
+Placement previews and the true-zero sample-month policy remain provisional.
+Production completed-month acceptance and Excel for Mac manual opening remain
+outstanding; neither is recorded as passed.
+
+## Original audit record (before those inputs arrived)
+
 Audited on 2026-10-01 against `main` at
 `bea1905a3b907797cc4bd751ab189cd826019e64` ("Phase 13 Complete").
 The corrected report Action is version `0.1.1`.
@@ -150,7 +165,7 @@ proposal, not an accepted existing layout.
 Per-rep sheets contain only that rep's rows, including a roster member with no
 activity. Company tables and data-quality warnings are shared context in each
 workbook. Names include the rep and reporting month, e.g.
-`Beth Comeaux - September 2026.xlsx`; the batch is
+`Rep Alpha - September 2026.xlsx`; the batch is
 `September 2026 Sales Rep Reports.zip`.
 
 ## Execution after the decision

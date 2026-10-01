@@ -234,7 +234,7 @@ def execute_run(
             action, result, input_records, library_records
         )
         artifact_records, artifact_files = _collect_artifacts(result)
-        produced = RunResult.of(tables, artifact_files)
+        produced = RunResult.of(tables, artifact_files, result.artifact_bundle_filename)
 
         completed_at = now()
         run = run_store.update_run(
