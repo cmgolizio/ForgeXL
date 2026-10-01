@@ -185,16 +185,13 @@ def test_a_rep_the_snapshot_adds_appears_without_a_code_change() -> None:
     assert "Dana Ruiz" in prepared.reps
 
 
-def test_a_rep_the_snapshot_drops_stops_appearing() -> None:
-    without_kevin = golden.assignment_frame(
-        tuple(pair for pair in golden.OWNERSHIP if pair[1] != KEVIN)
-        + ((BISTRO, BETH),)
-    )
-
+def test_a_rep_the_snapshot_drops_keeps_invoice_performance() -> None:
+    without_kevin = golden.assignment_frame(tuple(pair for pair in golden.OWNERSHIP if pair[1] != KEVIN) + ((BISTRO, BETH),))
     prepared = prepare(assignments=without_kevin)
-
-    assert KEVIN not in prepared.reps
-    assert prepared.reps == (BETH, JENNIFER)
+    assert prepared.usable
+    assert prepared.reps == (BETH, JENNIFER, KEVIN)
+    tables = engine.build_tables(prepared)
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==KEVIN)["Revenue"][0] == 240.0
 
 
 def test_a_rep_with_no_activity_is_still_on_the_roster(clean) -> None:
@@ -218,16 +215,11 @@ def test_a_blank_rep_in_the_snapshot_is_not_a_rep() -> None:
     assert prepared.reps == (BETH, JENNIFER, KEVIN)
 
 
-def test_the_roster_is_not_read_from_the_transactions() -> None:
-    """Ownership is the snapshot's job, not the invoice's (build plan 9E)."""
-    renamed = golden.sales_frame().with_columns(
-        pl.lit("Someone Else").alias(TRANSACTION_COLUMNS.transaction_rep)
-    )
-
-    prepared = prepare(sales=renamed)
-
-    assert "Someone Else" not in prepared.reps
-    assert prepared.reps == (BETH, JENNIFER, KEVIN)
+def test_active_invoice_reps_are_part_of_the_roster() -> None:
+    changed = golden.sales_frame().with_columns(pl.lit("Someone Else").alias(TRANSACTION_COLUMNS.transaction_rep))
+    prepared = prepare(sales=changed)
+    assert "Someone Else" in prepared.reps
+    assert engine.build_tables(prepared)["rep_summary"].filter(pl.col(REP_COLUMN)=="Someone Else")["Revenue"][0] == 995.0
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +489,7 @@ def test_a_product_the_account_already_bought_is_not_a_placement(clean) -> None:
 def test_a_credit_is_never_a_placement() -> None:
     """Only a positive quantity counts as a purchase."""
     credit_only = golden.sales_frame(("2026-09",)).filter(
-        pl.col(TRANSACTION_COLUMNS.invoice_type) == "Credit"
+        pl.col(TRANSACTION_COLUMNS.invoice_type) == "Credit Invoice"
     )
 
     prepared = prepare(sales=credit_only, samples=golden.sample_frame(("2026-09",)))
@@ -652,6 +644,110 @@ def test_a_measure_is_never_read_as_zero() -> None:
         engine.build_tables(prepared)
 
 
+@pytest.mark.parametrize("column", [REVENUE, QUANTITY])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -float("inf"), "NaN", "inf", "-inf"]
+)
+@pytest.mark.parametrize("source", ["sales", "samples"])
+def test_non_finite_measures_stop_the_report(column, value, source) -> None:
+    frame = golden.sales_frame() if source == "sales" else golden.sample_frame()
+    if isinstance(value, float):
+        frame = frame.with_columns(pl.col(column).cast(pl.Float64))
+    changed = golden.replace_value(frame, column, frame.height - 1, value)
+
+    prepared = prepare(**{source: changed})
+
+    assert "NON_NUMERIC_MEASURE" in codes(prepared.errors)
+    assert not prepared.usable
+    with pytest.raises(ValueError):
+        engine.build_tables(prepared)
+
+
+@pytest.mark.parametrize("column", [REVENUE, QUANTITY])
+def test_reading_a_measure_cannot_round_an_integer(column) -> None:
+    sales = golden.sales_frame().with_columns(pl.col(column).cast(pl.Int64))
+    changed = golden.replace_value(sales, column, 0, 9_007_199_254_740_993)
+
+    prepared = prepare(sales=changed)
+
+    assert "NON_NUMERIC_MEASURE" in codes(prepared.errors)
+    assert not prepared.usable
+
+
+@pytest.mark.parametrize("column", TRANSACTION_COLUMNS.product_key)
+def test_blank_product_fields_preserve_comparisons_and_account_counts(column) -> None:
+    sales = golden.sales_frame().with_columns(pl.lit(None, pl.String).alias(column))
+
+    prepared = prepare(sales=sales)
+    assert prepared.usable, codes(prepared.errors)
+    products = engine.build_tables(prepared)["product_performance"]
+
+    assert products.height == 4
+    assert (
+        products.select(REP_COLUMN, *TRANSACTION_COLUMNS.product_key).unique().height
+        == 4
+    )
+    assert products["Accounts"].to_list() == [1, 1, 1, 1]
+    beth = products.filter(pl.col(REP_COLUMN) == BETH)
+    assert beth["Revenue"].sum() == 755.0
+    assert beth["Prior Month Revenue"].sum() == 300.0
+    assert beth["Last Year Revenue"].sum() == 500.0
+
+
+def test_unexpected_columns_cannot_override_prepared_ownership() -> None:
+    sales = golden.sales_frame().with_columns(pl.lit(KEVIN).alias(engine.OWNER))
+
+    tables = engine.build_tables(prepare(sales=sales))
+
+    assert dict(tables["rep_summary"].select(REP_COLUMN, "Revenue").iter_rows()) == {
+        BETH: 755.0,
+        KEVIN: 240.0,
+        JENNIFER: 0.0,
+    }
+    assert sales[engine.OWNER].to_list() == [KEVIN] * sales.height
+
+
+@pytest.mark.parametrize(
+    "sales_dtype,ownership_dtype",
+    [(pl.Int64, pl.Int64), (pl.Int64, pl.String), (pl.String, pl.Int64)],
+)
+def test_typed_account_identifiers_match_the_ownership_map(
+    sales_dtype, ownership_dtype
+) -> None:
+    identifiers = {ACME: 1, BISTRO: 2, CORNER: 3, HARBOUR: 4}
+    sales = golden.sales_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(sales_dtype)
+    )
+    samples = golden.sample_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(sales_dtype)
+    )
+    assignments = golden.assignment_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(ownership_dtype)
+    )
+
+    prepared = prepare(sales=sales, samples=samples, assignments=assignments)
+    assert prepared.usable, codes(prepared.errors)
+    summary = engine.build_tables(prepared)["rep_summary"]
+    assert summary.filter(pl.col(REP_COLUMN) == BETH)["Revenue"][0] == 755.0
+    assert sales.schema[CUSTOMER] == sales_dtype
+    assert assignments.schema[CUSTOMER] == ownership_dtype
+
+
+def test_a_blank_supplier_keeps_rep_revenue_in_the_company_comparison() -> None:
+    sales = golden.sales_frame().with_columns(
+        pl.lit(None, pl.String).alias(TRANSACTION_COLUMNS.supplier)
+    )
+    comparison = engine.build_tables(prepare(sales=sales))["supplier_comparison"]
+
+    assert comparison.height == 3
+    assert dict(comparison.select(REP_COLUMN, "Rep Revenue").iter_rows()) == {
+        BETH: 755.0,
+        KEVIN: 240.0,
+        JENNIFER: 0.0,
+    }
+    assert comparison["Company Revenue"].to_list() == [995.0] * 3
+
+
 def test_an_unreadable_invoice_date_stops_the_report() -> None:
     broken = golden.replace_value(
         golden.sales_frame(), DATE_COLUMN, 8, "not a date"
@@ -678,20 +774,12 @@ def test_a_blank_invoice_date_stops_the_report() -> None:
     assert "MALFORMED_INVOICE_DATE" in codes(prepared.errors)
 
 
-def test_an_account_with_activity_and_no_owner_stops_the_report() -> None:
-    orphaned = golden.assignment_frame(
-        tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER)
-    )
-
+def test_an_account_without_current_ownership_keeps_invoice_performance() -> None:
+    orphaned = golden.assignment_frame(tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER))
     prepared = prepare(assignments=orphaned)
-
-    assert "MISSING_ACCOUNT_OWNERSHIP" in codes(prepared.errors)
-    (issue,) = [
-        item
-        for item in prepared.errors
-        if item.code == "MISSING_ACCOUNT_OWNERSHIP"
-    ]
-    assert CORNER in issue.details["accounts"]
+    assert prepared.usable
+    row = engine.build_tables(prepared)["account_performance"].filter((pl.col(CUSTOMER)==CORNER) & (pl.col(REP_COLUMN)==BETH))
+    assert row["Revenue"][0] == 180.0
 
 
 def test_an_account_with_no_activity_and_no_owner_is_fine() -> None:
@@ -706,20 +794,15 @@ def test_an_account_with_no_activity_and_no_owner_is_fine() -> None:
     assert JENNIFER not in prepared.reps
 
 
-def test_an_account_owned_by_two_reps_stops_the_report() -> None:
-    conflicted = golden.assignment_frame(
-        (*golden.OWNERSHIP, (ACME, KEVIN))
-    )
-
+def test_conflicting_current_owners_warn_without_multiplying_invoice_sales() -> None:
+    conflicted = golden.assignment_frame((*golden.OWNERSHIP, (ACME, KEVIN)))
     prepared = prepare(assignments=conflicted)
-
-    assert "DUPLICATE_ACCOUNT_OWNERSHIP" in codes(prepared.errors)
-    (issue,) = [
-        item
-        for item in prepared.errors
-        if item.code == "DUPLICATE_ACCOUNT_OWNERSHIP"
-    ]
-    assert ACME in issue.details["accounts"]
+    assert prepared.usable
+    assert "DUPLICATE_ACCOUNT_OWNERSHIP" in codes(prepared.warnings)
+    tables = engine.build_tables(prepared)
+    assert tables["company_summary"]["Revenue"][0] == 995.0
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==BETH)["Revenue"][0] == 755.0
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==KEVIN)["Revenue"][0] == 240.0
 
 
 def test_an_account_listed_twice_with_the_same_rep_is_fine() -> None:
@@ -758,25 +841,10 @@ def test_a_month_with_genuinely_no_samples_is_not_a_failure() -> None:
 
 
 def test_every_error_names_the_input_it_came_from() -> None:
-    orphaned = golden.assignment_frame(
-        tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER)
-    )
-
-    prepared = engine.prepare(
-        golden.sales_frame(),
-        golden.sample_frame(),
-        orphaned,
-        sales_slot="sales_history",
-        samples_slot="sample_history",
-        assignments_slot="account_assignments",
-    )
-
-    (issue,) = [
-        item
-        for item in prepared.errors
-        if item.code == "MISSING_ACCOUNT_OWNERSHIP"
-    ]
-    assert issue.slot_id == "account_assignments"
+    blank = golden.replace_value(golden.sales_frame(), TRANSACTION_COLUMNS.transaction_rep, 11, "")
+    prepared = engine.prepare(blank, golden.sample_frame(), golden.assignment_frame(), sales_slot="sales_history", samples_slot="sample_history", assignments_slot="account_assignments")
+    (issue,) = [item for item in prepared.errors if item.code == "MISSING_TRANSACTION_REP"]
+    assert issue.slot_id == "sales_history"
 
 
 def test_no_table_is_built_when_the_report_is_unsafe() -> None:
@@ -812,29 +880,21 @@ def test_a_transaction_rep_the_snapshot_does_not_name_is_a_warning() -> None:
     assert "UNRECOGNISED_SALES_REP" in codes(prepared.warnings)
 
 
-def test_an_unrecognised_rep_changes_no_figure() -> None:
-    """Revenue follows the account's owner, not the invoice's rep."""
-    renamed = golden.sales_frame().with_columns(
-        pl.lit("Temp Cover").alias(TRANSACTION_COLUMNS.transaction_rep)
-    )
-
-    original = engine.build_tables(prepare())["rep_summary"]
-    altered = engine.build_tables(prepare(sales=renamed))["rep_summary"]
-
-    assert original.equals(altered)
+def test_an_unrecognised_invoice_rep_keeps_company_total_and_changes_attribution() -> None:
+    renamed = golden.sales_frame().with_columns(pl.lit("Temp Cover").alias(TRANSACTION_COLUMNS.transaction_rep))
+    tables = engine.build_tables(prepare(sales=renamed))
+    assert tables["company_summary"]["Revenue"][0] == 995.0
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN)=="Temp Cover")["Revenue"][0] == 995.0
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==BETH)["Revenue"][0] == 0.0
 
 
-def test_an_unexpected_invoice_type_is_a_warning_and_still_counted() -> None:
-    relabelled = golden.replace_value(
-        golden.sales_frame(), TRANSACTION_COLUMNS.invoice_type, 11, "Rebate"
-    )
-
+def test_an_unexpected_invoice_type_refuses_unsafe_totals() -> None:
+    relabelled = golden.replace_value(golden.sales_frame(), TRANSACTION_COLUMNS.invoice_type, 11, "Rebate")
     prepared = prepare(sales=relabelled)
-    tables = engine.build_tables(prepared)
-
-    assert "UNEXPECTED_INVOICE_TYPE" in codes(prepared.warnings)
-    # The credit is still counted: the company total is unchanged.
-    assert tables["company_summary"]["Revenue"][0] == 995.00
+    assert "UNEXPECTED_INVOICE_TYPE" in codes(prepared.errors)
+    assert not prepared.usable
+    with pytest.raises(ValueError):
+        engine.build_tables(prepared)
 
 
 def test_an_extra_source_column_is_a_warning_and_changes_nothing() -> None:
@@ -941,7 +1001,7 @@ def test_the_metrics_are_counts(clean) -> None:
         "sales_rows": 5,
         "sample_rows": 2,
         "placements": 2,
-        "warnings": 2,
+        "warnings": 3,
     }
     assert all(isinstance(value, int) for value in metrics.values())
 
@@ -951,15 +1011,14 @@ def test_the_metrics_are_counts(clean) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ownership_is_matched_exactly(clean) -> None:
-    """`acme wine bar` is not `Acme Wine Bar` (rule ``ownership_matching``)."""
-    lowered = golden.replace_value(
-        golden.sales_frame(), CUSTOMER, 8, ACME.lower()
-    )
-
-    prepared = prepare(sales=lowered)
-
-    assert "MISSING_ACCOUNT_OWNERSHIP" in codes(prepared.errors)
+def test_account_identifiers_are_not_fuzzy_matched_to_current_ownership() -> None:
+    changed = golden.assignment_frame().with_columns(pl.col(CUSTOMER).str.to_lowercase())
+    prepared = prepare(assignments=changed)
+    assert prepared.usable
+    tables = engine.build_tables(prepared)
+    assert tables["company_summary"]["Revenue"][0] == 995.0
+    assert CORNER in tables["account_performance"][CUSTOMER].to_list()
+    assert CORNER.lower() in tables["account_performance"][CUSTOMER].to_list()
 
 
 def test_the_ownership_map_names_the_report_column_not_the_source_one(

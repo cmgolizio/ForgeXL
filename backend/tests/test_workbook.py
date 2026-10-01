@@ -42,6 +42,7 @@ import warnings
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import fastexcel
 import openpyxl
@@ -49,6 +50,7 @@ import polars as pl
 import pytest
 
 from app.errors import ExportTooLargeError
+from app.services import export
 from app.services.export import MAX_CELL_CHARACTERS
 from app.services.workbook import (
     BODY_FONT_SIZE,
@@ -813,6 +815,64 @@ class TestConsistentStyling:
 
 class TestTheExportGuardsStillApply:
     """The renderer inherits Phase 6F/7's rules rather than restating them."""
+
+    @pytest.mark.parametrize(
+        "options,extra_rows",
+        [
+            ({"title": "Report"}, 2),
+            ({"subtitle": "September"}, 2),
+            ({"notes": ("Coverage note",)}, 2),
+            ({"total_row": {"n": 10}}, 1),
+            ({"title": "Report", "subtitle": "September", "total_row": {"n": 10}}, 4),
+        ],
+    )
+    def test_headings_and_totals_share_the_worksheet_row_budget(
+        self, monkeypatch, options, extra_rows
+    ) -> None:
+        monkeypatch.setattr(export, "MAX_WORKSHEET_ROWS", 5)
+        frame = pl.DataFrame({"n": range(6 - extra_rows)})
+
+        with pytest.raises(ExportTooLargeError) as raised:
+            render_sheet_bytes(Sheet(name="Summary", frame=frame, **options))
+
+        assert raised.value.details["limit"] == "rows"
+        assert raised.value.details["extra_rows"] == extra_rows
+
+    def test_a_total_at_the_last_available_row_is_kept(self, monkeypatch) -> None:
+        monkeypatch.setattr(export, "MAX_WORKSHEET_ROWS", 5)
+        sheet = Sheet(
+            name="Summary",
+            frame=pl.DataFrame({"n": [10]}),
+            title="Report",
+            subtitle="September",
+            total_row={"n": 10},
+        )
+
+        reopened = _reopen(render_sheet_bytes(sheet))["Summary"]
+
+        assert reopened["A6"].value == 10
+
+    @pytest.mark.parametrize(
+        "field", ["title", "subtitle", "total_label", "total_value", "header", "note"]
+    )
+    def test_every_presentation_cell_must_fit(self, field) -> None:
+        text = "x" * (MAX_CELL_CHARACTERS + 1)
+        options: dict[str, Any] = {"total_row": {}} if field == "total_label" else {}
+        if field == "note":
+            options["notes"] = (text,)
+        elif field == "total_value":
+            options["total_row"] = {"n": text}
+        elif field == "header":
+            options["columns"] = (Column("n", header=text),)
+        else:
+            options[field] = text
+
+        with pytest.raises(ExportTooLargeError) as raised:
+            render_sheet_bytes(
+                Sheet(name="Summary", frame=pl.DataFrame({"n": [1]}), **options)
+            )
+
+        assert raised.value.details["limit"] == "cell_characters"
 
     def test_a_result_the_format_cannot_hold_is_refused(self) -> None:
         frame = pl.DataFrame({"Note": ["x" * (MAX_CELL_CHARACTERS + 1)]})

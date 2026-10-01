@@ -550,6 +550,7 @@ def _sheet_names(payload: bytes) -> list[str]:
         for name in re.findall(r'<sheet name="([^"]*)"', workbook)
     ]
 
+
 # ---------------------------------------------------------------------------
 # XLSX format capacity (build plan 7B, 7F; section 3.3)
 #
@@ -731,3 +732,11 @@ def test_a_null_only_text_column_does_not_confuse_the_guard() -> None:
     export.check_fits_worksheet(frame, label="Empty")  # must not raise
 
     assert export.to_xlsx_bytes(frame, worksheet="R")
+def test_a_column_heading_cannot_be_silently_truncated() -> None:
+    name = "x" * (export.MAX_CELL_CHARACTERS + 1)
+    frame = pl.DataFrame({name: [1]})
+
+    with pytest.raises(ExportTooLargeError) as raised:
+        export.to_xlsx_bytes(frame, worksheet="R")
+
+    assert raised.value.details["limit"] == "cell_characters"

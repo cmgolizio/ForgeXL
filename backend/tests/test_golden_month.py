@@ -422,12 +422,14 @@ def test_the_action_returns_every_declared_table() -> None:
         assert isinstance(frame, pl.DataFrame)
 
 
-def test_the_action_produces_no_artifact() -> None:
-    """Phase 13 calculates; Phase 14 renders (build plan Phase 13 exit)."""
+def test_the_action_produces_one_workbook_per_rep() -> None:
     action = registry.get_action(REPORT_ACTION_ID)
     assert action is not None
-
-    assert action.run(_action_inputs()).artifacts == ()
+    result = action.run(_action_inputs())
+    assert {artifact.filename for artifact in result.artifacts} == {
+        "Beth Comeaux - September 2026.xlsx", "Kevin Wardell - September 2026.xlsx", "Jennifer Jones - September 2026.xlsx"}
+    assert all(artifact.payload.startswith(b"PK") for artifact in result.artifacts)
+    assert result.artifact_bundle_filename == "September 2026 Sales Rep Reports.zip"
 
 
 def test_the_action_states_no_affected_row_count() -> None:
@@ -439,17 +441,11 @@ def test_the_action_states_no_affected_row_count() -> None:
 
 
 def test_the_action_refuses_before_it_calculates() -> None:
-    """Build plan 13H: fail rather than produce a plausible workbook."""
     action = registry.get_action(REPORT_ACTION_ID)
     assert action is not None
     inputs = _action_inputs()
-    inputs[ASSIGNMENTS_SLOT] = golden.assignment_frame(
-        tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER)
-    )
-
-    issues = action.validate(inputs)
-
-    assert [issue.code for issue in issues] == ["MISSING_ACCOUNT_OWNERSHIP"]
+    inputs[SALES_SLOT] = golden.replace_value(inputs[SALES_SLOT], TRANSACTION_COLUMNS.transaction_rep, 11, "")
+    assert [issue.code for issue in action.validate(inputs)] == ["MISSING_TRANSACTION_REP"]
 
 
 def test_the_action_passes_validation_on_a_clean_month() -> None:
@@ -614,14 +610,96 @@ def test_a_month_that_was_never_imported_fails_clearly(stocked_library) -> None:
     ]
 
 
+@pytest.mark.parametrize("period", ["2026-08", "2026-10"])
+def test_ownership_must_be_for_the_sales_reporting_month(
+    stocked_library, period
+) -> None:
+    from app.errors import RunValidationError
+
+    commit_account_assignments(
+        SourceFile(
+            filename="assignments.csv", payload=golden.assignment_table().as_csv()
+        ),
+        period=period,
+    )
+    with pytest.raises(RunValidationError) as failure:
+        _run_the_report(**{ASSIGNMENTS_SLOT: f"period:{period}"})
+
+    assert failure.value.code == "MISMATCHED_REPORTING_PERIODS"
+    assert failure.value.issues[0].slot_id == ASSIGNMENTS_SLOT
+
+
+def test_sample_versions_must_reach_the_reporting_month(stocked_library) -> None:
+    from app.errors import RunValidationError
+
+    with pytest.raises(RunValidationError) as failure:
+        _run_the_report(**{SAMPLES_SLOT: "period:2026-08"})
+
+    assert failure.value.code == "MISMATCHED_REPORTING_PERIODS"
+
+
+def test_the_report_uses_explicitly_chosen_dates_from_ingestion(data_library) -> None:
+    from app.models.source_schemas import US_DATE
+
+    date_column = TRANSACTION_COLUMNS.date
+    sales = golden.sales_frame((GOLDEN_MONTH,)).filter(
+        pl.col(date_column).str.to_date("%Y-%m-%d").dt.day() <= 9
+    )
+    samples = golden.sample_frame((GOLDEN_MONTH,))
+    for commit, frame, name in (
+        (commit_monthly_sales, sales, "sales.csv"),
+        (commit_monthly_samples, samples, "samples.csv"),
+    ):
+        formatted = frame.with_columns(
+            pl.col(date_column).str.to_date("%Y-%m-%d").dt.strftime(US_DATE)
+        )
+        commit(
+            SourceFile(filename=name, payload=formatted.write_csv().encode()),
+            date_format=US_DATE,
+            today=date(2026, 10, 1),
+        )
+    commit_account_assignments(
+        SourceFile(
+            filename="assignments.csv", payload=golden.assignment_table().as_csv()
+        ),
+        period=GOLDEN_MONTH,
+    )
+    outcome = _run_the_report()
+    assert outcome.result is not None
+    assert (
+        outcome.result.primary.filter(pl.col(REP_COLUMN) == BETH)["Revenue"][0] == 755.0
+    )
+
+
+def test_a_report_cannot_merge_two_ownership_snapshots(stocked_library) -> None:
+    from app.errors import RunValidationError
+
+    commit_account_assignments(
+        SourceFile(
+            filename="assignments.csv", payload=golden.assignment_table().as_csv()
+        ),
+        period="2026-08",
+    )
+    with pytest.raises(RunValidationError) as failure:
+        _run_the_report(**{ASSIGNMENTS_SLOT: "history"})
+
+    assert failure.value.code == "INVALID_DATASET_SELECTOR"
+
+
 def test_bounding_the_history_moves_the_reporting_period(
     stocked_library,
 ) -> None:
+    commit_account_assignments(
+        SourceFile(
+            filename="assignments.csv", payload=golden.assignment_table().as_csv()
+        ),
+        period="2026-08",
+    )
     outcome = _run_the_report(
         **{
             SALES_SLOT: "history:2026-08",
             SAMPLES_SLOT: "history:2026-08",
-            ASSIGNMENTS_SLOT: f"period:{GOLDEN_MONTH}",
+            ASSIGNMENTS_SLOT: "period:2026-08",
         }
     )
     result = outcome.result
@@ -660,7 +738,7 @@ def test_the_whole_report_downloads_as_one_workbook(
 
     assert response.status_code == 200
     sheets = fastexcel.read_excel(response.content).sheet_names
-    assert len(sheets) == 12
+    assert len(sheets) == 19
     assert "Rep Summary" in sheets
 
 
@@ -674,34 +752,13 @@ def test_the_manifest_carries_the_reports_metrics(stocked_library) -> None:
         "sales_rows": 5,
         "sample_rows": 2,
         "placements": 2,
-        "warnings": 2,
+        "warnings": 3,
     }
 
 
-def test_an_unreliable_month_fails_the_run_with_its_condition(
-    stocked_library,
-) -> None:
-    """The snapshot for August names an account September's data trades with.
-
-    Committing a snapshot that omits Corner Bottle and then reporting on it
-    fails the Run before a table is built, with the condition that says why.
-    """
-    from app.errors import RunValidationError
-
-    commit_account_assignments(
-        SourceFile(
-            filename="assignments-2026-08.csv",
-            payload=golden.assignments(
-                tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER),
-                name="partial",
-            ).as_csv(),
-        ),
-        period="2026-08",
-    )
-
-    with pytest.raises(RunValidationError) as failure:
-        _run_the_report(**{ASSIGNMENTS_SLOT: "period:2026-08"})
-
-    assert "MISSING_ACCOUNT_OWNERSHIP" in [
-        issue.code for issue in failure.value.issues
-    ]
+def test_partial_current_ownership_does_not_erase_invoice_performance(stocked_library) -> None:
+    commit_account_assignments(SourceFile(filename="assignments-corrected.csv", payload=golden.assignments(tuple(pair for pair in golden.OWNERSHIP if pair[0] != CORNER), name="partial").as_csv()),
+        period=GOLDEN_MONTH, replaces=stocked_library.current_version("account_assignments", GOLDEN_MONTH).version_id, reason="Corrected ownership snapshot")
+    outcome = _run_the_report()
+    assert outcome.result is not None
+    assert outcome.result.primary.filter(pl.col(REP_COLUMN)==BETH)["Revenue"][0] == 755.0

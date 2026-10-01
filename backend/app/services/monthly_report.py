@@ -10,8 +10,8 @@ The shape of the work follows build plan 13C-13H exactly:
 
     resolved frames
         -> one reporting period, resolved once            (13C)
-        -> one prepared model: dates, measures, ownership (13E)
-        -> the rep roster, read from the snapshot         (13D)
+        -> one prepared model: dates, measures, invoice reps (13E)
+        -> the rep roster, from snapshot and R12 activity    (13D)
         -> validation                                     (13H)
         -> company figures, calculated once               (13G)
         -> every report table                             (13F)
@@ -49,7 +49,8 @@ from app.models.report_spec import (
     ASSIGNMENTS_CUSTOMER_COLUMN,
     ASSIGNMENTS_REP_COLUMN,
     ASSIGNMENTS_SCHEMA,
-    KNOWN_INVOICE_TYPES,
+    SALES_INVOICE_TYPES,
+    SAMPLE_INVOICE_TYPES,
     MINIMUM_PLACEMENT_HISTORY_MONTHS,
     MONEY_DECIMALS,
     PROVISIONAL_RULES,
@@ -70,8 +71,8 @@ from app.services.reporting_period import period_of, read_dates
 # ---------------------------------------------------------------------------
 # Internal column names
 #
-# Prefixed so they can never collide with a source column, however the export
-# changes. They exist only inside the prepared frames and never reach a report
+# Reserved in the prepared copy so an unexpected source column cannot override
+# a derived value. They exist only inside prepared frames and never reach a report
 # table (build plan 6E.6: audit and working data stay out of the user's data).
 # ---------------------------------------------------------------------------
 
@@ -93,6 +94,8 @@ WINDOW_PREFIXES: dict[WindowKey, str] = {
     WindowKey.PRIOR_YEAR_MONTH: "Last Year ",
     WindowKey.YEAR_TO_DATE: "YTD ",
     WindowKey.PRIOR_YEAR_TO_DATE: "Prior YTD ",
+    WindowKey.ROLLING_YEAR: "R12 ",
+    WindowKey.PRIOR_ROLLING_YEAR: "Prior R12 ",
 }
 
 
@@ -207,6 +210,12 @@ def report_period(month: str) -> ReportPeriod:
             end=_month_end(last_year, last_number),
         ),
     )
+    r12_year, r12_month = _shift_month(year, number, -11)
+    prior_r12_year, prior_r12_month = _shift_month(year, number, -23)
+    windows += (
+        Window(WindowKey.ROLLING_YEAR, WINDOW_LABELS[WindowKey.ROLLING_YEAR], date(r12_year, r12_month, 1), _month_end(year, number)),
+        Window(WindowKey.PRIOR_ROLLING_YEAR, WINDOW_LABELS[WindowKey.PRIOR_ROLLING_YEAR], date(prior_r12_year, prior_r12_month, 1), _month_end(year - 1, number)),
+    )
     return ReportPeriod(month=month, windows=windows)
 
 
@@ -228,13 +237,13 @@ class PreparedReport:
     #: None only when preparation failed before a period could be derived.
     period: ReportPeriod | None
 
-    #: Sales rows with their date, numeric measures and owning rep attached.
+    #: Sales rows with their date, numeric measures and invoice rep attached.
     sales: pl.DataFrame
 
     #: Sample rows, prepared the same way.
     samples: pl.DataFrame
 
-    #: `Customer` -> `Sales Rep`, one row per account.
+    #: Snapshot Customer/rep context; direct-call conflicts remain explicit.
     ownership: pl.DataFrame
 
     #: Every rep the report covers, in name order (build plan 13D).
@@ -345,24 +354,30 @@ def prepare(
     period = report_period(months[-1]) if months else None
 
     if period is not None:
-        prepared_sales = _attach_owner(prepared_sales, ownership)
-        prepared_samples = _attach_owner(prepared_samples, ownership)
+        prepared_sales = _attach_invoice_rep(prepared_sales)
+        prepared_samples = _attach_invoice_rep(prepared_samples)
 
-        _check_ownership_covers_activity(
-            prepared_sales, period, collected, slot_id=assignments_slot
+        _check_transaction_identity(
+            prepared_sales, period, collected, slot_id=sales_slot
         )
-        _check_ownership_covers_activity(
-            prepared_samples, period, collected, slot_id=assignments_slot
+        _check_transaction_identity(
+            prepared_samples, period, collected, slot_id=samples_slot, require_account=False
         )
         _check_sample_period(prepared_samples, period, collected, samples_slot)
         _check_history_depth(months, period, collected, sales_slot)
         _check_comparison_windows(prepared_sales, period, collected)
         _check_duplicate_rows(sales, prepared_sales, period, collected, sales_slot)
-        _check_invoice_types(prepared_sales, collected, sales_slot)
-        _check_invoice_types(prepared_samples, collected, samples_slot)
+        _check_duplicate_rows(samples, prepared_samples, period, collected, samples_slot)
+        _check_invoice_types(prepared_sales, SALES_INVOICE_TYPES, collected, sales_slot)
+        _check_invoice_types(prepared_samples, SAMPLE_INVOICE_TYPES, collected, samples_slot)
         _check_unrecognised_reps(
             prepared_sales, prepared_samples, reps, collected, sales_slot
         )
+        active_reps = set(reps)
+        for frame in (prepared_sales, prepared_samples):
+            active_reps.update(frame.filter(period.window(WindowKey.ROLLING_YEAR).covers())[OWNER].drop_nulls().to_list())
+        reps = tuple(sorted(active_reps))
+
 
     _check_source_columns(sales, SALES_SCHEMA, collected, sales_slot)
     _check_source_columns(samples, SAMPLES_SCHEMA, collected, samples_slot)
@@ -391,13 +406,10 @@ def _prepare_ownership(
 ) -> tuple[pl.DataFrame, tuple[str, ...]]:
     """Read the snapshot into `Customer` -> `Sales Rep` (build plan 9E, 13D).
 
-    A row whose account or rep is blank is left out of the map: it answers
-    neither question the snapshot exists to answer. Nothing is dropped
-    silently by doing so — an account that ends up with no owner and has
-    activity is reported as ``MISSING_ACCOUNT_OWNERSHIP``, which is the
-    condition that actually matters. The ingestion layer already refuses such
-    a snapshot outright (build plan 10E); this is the same rule holding for a
-    version that reached the library another way.
+    This map supplies roster and account-list context, never performance
+    attribution. Library ingestion refuses blank or conflicting assignments;
+    the engine can qualify a directly supplied conflict without joining it
+    through transaction rows or multiplying sales.
     """
     customer = ASSIGNMENTS_CUSTOMER_COLUMN
     rep = ASSIGNMENTS_REP_COLUMN
@@ -429,8 +441,8 @@ def _prepare_ownership(
             "The account-assignment snapshot gives more than one rep to "
             f"{_human_list(accounts[:MAX_EXAMPLES])}"
             f"{'' if conflicts.height <= MAX_EXAMPLES else ', and others'}. "
-            "Each account must have exactly one owner, or its sales would be "
-            "counted in more than one report.",
+            "Resolve the ownership conflict before importing this snapshot. "
+            "Performance stays with each invoice salesperson and is not multiplied.",
             details={"accounts": accounts, "account_count": conflicts.height},
             slot_id=slot_id,
         )
@@ -460,14 +472,17 @@ def _prepare_transactions(
     report fails. The frame handed in is never modified (build plan 13E).
     """
     columns = TRANSACTION_COLUMNS
-    if not {columns.date, columns.quantity, columns.revenue} <= set(
-        frame.columns
-    ):
+    frame = frame.drop(
+        [
+            name
+            for name in (DATE, MONTH, REVENUE, QUANTITY, OWNER)
+            if name in frame.columns
+        ]
+    )
+    if not {columns.date, columns.quantity, columns.revenue} <= set(frame.columns):
         return _empty_transactions(frame)
 
-    dates, _format, issues = read_dates(
-        frame, schema, columns.date, slot_id=slot_id
-    )
+    dates, _format, issues = read_dates(frame, schema, columns.date, slot_id=slot_id)
     if issues:
         collected.add(
             "MALFORMED_INVOICE_DATE",
@@ -476,8 +491,7 @@ def _prepare_transactions(
             details={
                 "column": columns.date,
                 "issues": [
-                    {"code": item.code, "message": item.message}
-                    for item in issues
+                    {"code": item.code, "message": item.message} for item in issues
                 ],
             },
             slot_id=slot_id,
@@ -504,9 +518,7 @@ def _prepare_transactions(
             prepared, source, target, schema, collected, slot_id=slot_id
         )
 
-    return prepared.with_columns(
-        pl.col(DATE).dt.strftime("%Y-%m").alias(MONTH)
-    )
+    return prepared.with_columns(pl.col(DATE).dt.strftime("%Y-%m").alias(MONTH))
 
 
 def _with_measure(
@@ -536,7 +548,7 @@ def _with_measure(
 
     if series.dtype == pl.String:
         numeric = pl.col(source).cast(pl.Float64, strict=False)
-    elif series.dtype.is_numeric():
+    elif series.dtype.is_numeric() or series.dtype == pl.Null:
         numeric = pl.col(source).cast(pl.Float64)
     else:
         collected.add(
@@ -565,12 +577,16 @@ def _with_measure(
             slot_id=slot_id,
         )
 
-    unreadable = prepared.filter(~blank & pl.col(target).is_null())
+    unsafe = pl.col(target).is_null() | ~pl.col(target).is_finite()
+    if series.dtype.is_integer():
+        restored = pl.col(target).cast(series.dtype, strict=False)
+        unsafe = unsafe | restored.is_null() | (restored != pl.col(source))
+    unreadable = prepared.filter(~blank & unsafe)
     if unreadable.height:
         collected.add(
             "NON_NUMERIC_MEASURE",
             f"{unreadable.height} row(s) of {schema.label} have a {source} "
-            "that is not a number.",
+            "that cannot be read as a finite number without losing precision.",
             details={
                 "column": source,
                 "row_count": unreadable.height,
@@ -582,27 +598,15 @@ def _with_measure(
     return prepared
 
 
-def _attach_owner(
-    frame: pl.DataFrame, ownership: pl.DataFrame
-) -> pl.DataFrame:
-    """Join each transaction to the rep who owns its account.
-
-    A left join, matched exactly on `Customer` (rule ``ownership_matching``).
-    A row whose account is not in the snapshot keeps a null owner and is
-    reported by :func:`_check_ownership_covers_activity`; it is never assigned
-    to the rep named on the document, because that is not what ownership means
-    (build plan 9E).
-    """
+def _attach_invoice_rep(frame: pl.DataFrame) -> pl.DataFrame:
+    """Attribute performance to the invoice rep, without an ownership join."""
     customer = TRANSACTION_COLUMNS.customer
-    if customer not in frame.columns or frame.height == 0:
+    rep = TRANSACTION_COLUMNS.transaction_rep
+    if rep not in frame.columns:
         return frame.with_columns(pl.lit(None, pl.String).alias(OWNER))
-
-    return frame.join(
-        ownership.rename({ASSIGNMENTS_CUSTOMER_COLUMN: customer}).rename(
-            {REP_COLUMN: OWNER}
-        ),
-        on=customer,
-        how="left",
+    return frame.with_columns(
+        pl.col(customer).cast(pl.String),
+        pl.when(_is_blank(pl.col(rep))).then(None).otherwise(pl.col(rep).cast(pl.String)).alias(OWNER),
     )
 
 
@@ -611,50 +615,27 @@ def _attach_owner(
 # ---------------------------------------------------------------------------
 
 
-def _check_ownership_covers_activity(
+def _check_transaction_identity(
     frame: pl.DataFrame,
     period: ReportPeriod,
     collected: _Collected,
     *,
     slot_id: str | None,
+    require_account: bool = True,
 ) -> None:
-    """Fail on an account that traded in a report window and has no owner.
-
-    Scoped to the windows the report actually measures. An account that
-    traded three years ago and has since closed is not a problem the current
-    snapshot has to answer for; one that traded this month is.
-    """
-    if frame.height == 0 or OWNER not in frame.columns:
-        return
-
-    covered = _in_any_window(period)
-    orphans = (
-        frame.filter(covered & pl.col(OWNER).is_null())
-        .group_by(TRANSACTION_COLUMNS.customer)
-        .agg(
-            pl.len().alias("rows"),
-            pl.col(REVENUE).sum().alias("revenue"),
-        )
-        .sort("revenue", descending=True)
-    )
-    if orphans.height == 0:
-        return
-
-    accounts = orphans[TRANSACTION_COLUMNS.customer].to_list()
-    collected.add(
-        "MISSING_ACCOUNT_OWNERSHIP",
-        f"{orphans.height} account(s) traded inside a reporting window and "
-        "are not in the account-assignment snapshot: "
-        f"{_human_list([_label(name) for name in accounts[:MAX_EXAMPLES]])}"
-        f"{'' if orphans.height <= MAX_EXAMPLES else ', and others'}. Their "
-        "sales would be in the company total and in no rep's report.",
-        details={
-            "accounts": [_label(name) for name in accounts],
-            "account_count": orphans.height,
-            "row_count": int(orphans["rows"].sum()),
-        },
-        slot_id=slot_id,
-    )
+    """Refuse missing invoice identities; ownership never assigns performance."""
+    for column, code in (
+        (OWNER, "MISSING_TRANSACTION_REP"),
+        (TRANSACTION_COLUMNS.customer, "MISSING_TRANSACTION_ACCOUNT"),
+    ):
+        # Sample views allow an unknown account. The configured sample
+        # sections measure the invoice rep and product, without inventing an account.
+        if column == TRANSACTION_COLUMNS.customer and not require_account:
+            continue
+        bad = frame.filter(_in_any_window(period) & _is_blank(pl.col(column)))
+        if bad.height:
+            collected.add(code, f"{bad.height} transaction row(s) have a blank {column}.",
+                {"row_count": bad.height, "column": TRANSACTION_COLUMNS.transaction_rep if column == OWNER else column}, slot_id)
 
 
 def _check_sample_period(
@@ -717,26 +698,27 @@ def _check_history_depth(
     )
 
 
-def _check_comparison_windows(
-    sales: pl.DataFrame, period: ReportPeriod, collected: _Collected
-) -> None:
-    """Warn for each comparison window the history cannot fill."""
-    empty = [
-        window
-        for window in period.windows
-        if window.key is not WindowKey.CURRENT_MONTH
-        and sales.filter(window.covers()).height == 0
-    ]
-    if not empty:
-        return
+def months_in_window(window: Window) -> tuple[str, ...]:
+    """Calendar months required by a window, including interior months."""
+    year, month = window.start.year, window.start.month
+    result = []
+    while date(year, month, 1) <= window.end:
+        result.append(f"{year:04d}-{month:02d}")
+        year, month = _shift_month(year, month, 1)
+    return tuple(result)
 
-    collected.add(
-        "MISSING_COMPARISON_PERIOD",
-        "The sales history contains no rows for "
-        f"{_human_list([window.label.lower() for window in empty])}, so the "
-        "growth figures against it are reported as absent rather than as zero.",
-        details={"windows": [window.key.value for window in empty]},
-    )
+
+def missing_months(frame: pl.DataFrame, window: Window) -> tuple[str, ...]:
+    return tuple(month for month in months_in_window(window) if month not in _months_of(frame))
+
+
+def _check_comparison_windows(sales: pl.DataFrame, period: ReportPeriod, collected: _Collected) -> None:
+    incomplete = {window.key.value: list(missing_months(sales, window))
+                  for window in period.windows if window.key is not WindowKey.CURRENT_MONTH and missing_months(sales, window)}
+    if incomplete:
+        collected.add("MISSING_COMPARISON_PERIOD",
+            "Comparison history is incomplete. Missing months cannot be distinguished from zero activity. The accepted R12 comparison suppresses unavailable totals and growth.",
+            {"windows": list(incomplete), "missing_months": incomplete})
 
 
 def _check_duplicate_rows(
@@ -746,7 +728,7 @@ def _check_duplicate_rows(
     collected: _Collected,
     slot_id: str | None,
 ) -> None:
-    """Warn when identical rows repeat inside the reporting month.
+    """Warn for identical source rows anywhere in the selected history.
 
     Compared across every source column, which is this application's own
     definition of a duplicate row (build plan section 26). None is removed:
@@ -756,18 +738,18 @@ def _check_duplicate_rows(
     if prepared.height == 0:
         return
 
-    month = prepared.filter(period.window(WindowKey.CURRENT_MONTH).covers())
-    columns = [name for name in source.columns if name in month.columns]
-    if not columns or month.height == 0:
+    columns = [name for name in source.columns if name in prepared.columns]
+    if not columns:
         return
 
-    repeated = month.height - month.select(columns).unique().height
+    repeated = prepared.height - prepared.select(columns).unique().height
     if repeated <= 0:
         return
 
     collected.add(
         "DUPLICATE_SOURCE_ROWS",
-        f"{repeated} row(s) in {period.label} repeat another row exactly. "
+        f"{repeated} row(s) in the selected {slot_id or 'transaction'} history "
+        "repeat another row exactly. "
         "None has been removed — two identical invoice lines can be genuine — "
         "but a month imported twice would look like this.",
         details={"report_month": period.month, "row_count": repeated},
@@ -776,36 +758,19 @@ def _check_duplicate_rows(
 
 
 def _check_invoice_types(
-    frame: pl.DataFrame, collected: _Collected, slot_id: str | None
+    frame: pl.DataFrame, expected: Sequence[str], collected: _Collected, slot_id: str | None
 ) -> None:
-    """Warn for an Invoice Type the specification does not expect."""
+    """Refuse an Invoice Type the specification does not expect."""
     column = TRANSACTION_COLUMNS.invoice_type
     if frame.height == 0 or column not in frame.columns:
         return
 
-    seen = [
-        value
-        for value in frame.get_column(column).cast(pl.String).unique().to_list()
-        if value is not None and value.strip()
-    ]
-    unexpected = sorted(set(seen) - set(KNOWN_INVOICE_TYPES))
-    if not unexpected:
-        return
-
-    collected.add(
-        "UNEXPECTED_INVOICE_TYPE",
-        f"{_human_list(unexpected)} "
-        f"{'is' if len(unexpected) == 1 else 'are'} not "
-        f"{'a value' if len(unexpected) == 1 else 'values'} the report "
-        f"expects in {column}. Every row is counted whatever its type, so no "
-        "figure changes; the export may have changed.",
-        details={
-            "column": column,
-            "unexpected": unexpected,
-            "expected": list(KNOWN_INVOICE_TYPES),
-        },
-        slot_id=slot_id,
-    )
+    seen = set(frame.get_column(column).cast(pl.String).unique().to_list())
+    unexpected = sorted(_label(value) for value in seen if value not in expected)
+    if unexpected:
+        collected.add("UNEXPECTED_INVOICE_TYPE",
+            f"{_human_list(unexpected)} cannot be counted in this dataset. Expected {_human_list(expected)}; separate sales and sample rows explicitly before import.",
+            {"column": column, "unexpected": unexpected, "expected": list(expected)}, slot_id)
 
 
 def _check_unrecognised_reps(
@@ -838,9 +803,8 @@ def _check_unrecognised_reps(
         f"{_human_list(unknown)} "
         f"{'appears' if len(unknown) == 1 else 'appear'} on transactions but "
         f"{'is' if len(unknown) == 1 else 'are'} not in the "
-        "account-assignment snapshot, so no report is produced for "
-        f"{'them' if len(unknown) > 1 else 'them'}. Revenue is unaffected: it "
-        "follows each account's owner.",
+        "account-assignment snapshot. Activity stays with each invoice "
+        "salesperson; reps active in current R12 also receive a workbook.",
         details={"reps": unknown, "column": column},
         slot_id=slot_id,
     )
@@ -923,7 +887,7 @@ def company_figures(prepared: PreparedReport) -> CompanyFigures:
     summary = summary.with_columns(
         pl.lit(period.label).alias("Reporting Period"),
         pl.lit(len(prepared.reps), pl.Int64).alias("Sales Reps"),
-        pl.lit(prepared.ownership.height, pl.Int64).alias("Accounts"),
+        pl.lit(prepared.ownership[ASSIGNMENTS_CUSTOMER_COLUMN].n_unique(), pl.Int64).alias("Accounts"),
         pl.lit(_placements(sales, period).height, pl.Int64).alias("Placements"),
     )
     summary = _with_sample_measures(summary, samples, period, group_by=())
@@ -974,7 +938,7 @@ def build_tables(prepared: PreparedReport) -> dict[str, pl.DataFrame]:
 
     company = company_figures(prepared)
 
-    return {
+    tables = {
         "rep_summary": _rep_summary(prepared, company),
         "company_summary": company.summary,
         "account_performance": _account_performance(prepared),
@@ -988,6 +952,10 @@ def build_tables(prepared: PreparedReport) -> dict[str, pl.DataFrame]:
         "sample_detail": _sample_detail(prepared),
         "data_quality": data_quality_table(prepared),
     }
+    from app.services.report_views import build_report_views
+    tables.update(build_report_views(prepared, tables))
+    return tables
+
 
 
 def _rep_summary(
@@ -1047,10 +1015,11 @@ def _account_performance(prepared: PreparedReport) -> pl.DataFrame:
     period = prepared.require_period()
     customer = TRANSACTION_COLUMNS.customer
 
-    owned = prepared.ownership.rename({ASSIGNMENTS_CUSTOMER_COLUMN: customer})
+    owned = prepared.ownership.rename({ASSIGNMENTS_CUSTOMER_COLUMN: customer}).select(REP_COLUMN, customer)
     measures = _windowed(
         prepared.sales, period, group_by=(OWNER, customer)
     ).rename({OWNER: REP_COLUMN})
+    owned = pl.concat([owned, measures.select(REP_COLUMN, customer)], how="vertical").unique().sort([REP_COLUMN, customer])
     placements = (
         _placements(prepared.sales, period)
         .group_by([OWNER, customer])
@@ -1154,7 +1123,7 @@ def _supplier_comparison(
     ).join(company_figures_, how="cross")
 
     table = (
-        grid.join(rep_figures, on=[REP_COLUMN, supplier], how="left")
+        grid.join(rep_figures, on=[REP_COLUMN, supplier], how="left", nulls_equal=True)
         .with_columns(pl.col("Rep Revenue").fill_null(0.0))
         .with_columns(
             _share(
@@ -1163,12 +1132,9 @@ def _supplier_comparison(
             ).alias("Rep Share")
         )
         .with_columns(
-            (pl.col("Rep Share") - pl.col("Company Share")).alias(
-                "Share Difference"
-            ),
+            (pl.col("Rep Share") - pl.col("Company Share")).alias("Share Difference"),
             pl.when(
-                pl.col("Company Share").is_not_null()
-                & (pl.col("Company Share") != 0)
+                pl.col("Company Share").is_not_null() & (pl.col("Company Share") != 0)
             )
             .then(pl.col("Rep Share") / pl.col("Company Share"))
             .otherwise(None)
@@ -1197,9 +1163,9 @@ def _product_performance(prepared: PreparedReport) -> pl.DataFrame:
     period = prepared.require_period()
     key = list(TRANSACTION_COLUMNS.product_key)
 
-    table = _windowed(
-        prepared.sales, period, group_by=(OWNER, *key)
-    ).rename({OWNER: REP_COLUMN})
+    table = _windowed(prepared.sales, period, group_by=(OWNER, *key)).rename(
+        {OWNER: REP_COLUMN}
+    )
     table = table.filter(pl.col(REP_COLUMN).is_not_null())
 
     accounts = (
@@ -1212,14 +1178,12 @@ def _product_performance(prepared: PreparedReport) -> pl.DataFrame:
         .rename({OWNER: REP_COLUMN})
     )
 
-    table = table.join(accounts, on=[REP_COLUMN, *key], how="left")
+    table = table.join(accounts, on=[REP_COLUMN, *key], how="left", nulls_equal=True)
     table = _fill_counts(table, ["Accounts"])
 
-    return table.select(
-        REP_COLUMN, *key, *_measure_column_order(), "Accounts"
-    ).sort(
-        [REP_COLUMN, "Revenue", TRANSACTION_COLUMNS.sku],
-        descending=[False, True, False],
+    return table.select(REP_COLUMN, *key, *_measure_column_order(), "Accounts").sort(
+        [REP_COLUMN, "Revenue", *key],
+        descending=[False, True, *([False] * len(key))],
         nulls_last=True,
     )
 
@@ -1437,7 +1401,7 @@ def _windowed(
         # are stacked side by side; `hstack` is the operation that says both
         # of those things and checks the second.
         table = (
-            table.join(part, on=keys, how="full", coalesce=True)
+            table.join(part, on=keys, how="full", coalesce=True, nulls_equal=True)
             if keys
             else table.hstack(part)
         )

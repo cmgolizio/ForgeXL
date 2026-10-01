@@ -95,6 +95,8 @@ def test_get_actions_serialises_every_definition_field(client_with_actions):
                         # which is what this one has always meant.
                         "source": "upload",
                         "dataset_id": None,
+                        "period_matches": None,
+                        "interpret_dates": False,
                     }
                 ],
                 "outputs": [
@@ -173,6 +175,8 @@ def test_get_actions_is_fully_json_serialisable(client):
                 # without knowing which Actions exist.
                 "source",
                 "dataset_id",
+                "period_matches",
+                "interpret_dates",
             }
             assert slot["source"] in {"upload", "library"}
             if slot["source"] == "upload":

@@ -566,6 +566,8 @@ class LocalDataLibrary(DataLibrary):
                 source_sha256=commit.source_sha256,
                 parser_engine=commit.parser_engine,
                 worksheet=commit.worksheet,
+                date_column=commit.date_column,
+                date_format=commit.date_format,
                 row_count=frame.height,
                 column_count=frame.width,
                 column_schema=results.column_schema(frame),

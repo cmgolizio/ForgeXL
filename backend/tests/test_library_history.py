@@ -171,6 +171,61 @@ def test_a_history_selector_is_moving_and_must_be_resolved() -> None:
     assert DatasetSelector.parse("history:2026-09").is_moving is True
 
 
+def test_exact_version_sets_replay_a_run_after_a_month_is_corrected(
+    three_months,
+) -> None:
+    first = execute_run(_HistoryAction(), {}, {"sales_history": "history"})
+    records = first.manifest.library_inputs
+    reference = "versions:" + ",".join(
+        record.version_id for record in reversed(records)
+    )
+    selector = DatasetSelector.parse(reference)
+    assert selector.selects_many and not selector.is_moving
+
+    commit(
+        three_months,
+        "2026-07",
+        rows=7,
+        replaces=records[1].version_id,
+        reason="Corrected July export",
+    )
+    second = execute_run(_HistoryAction(), {}, {"sales_history": reference})
+
+    assert second.result is not None and first.result is not None
+    assert second.result.primary.equals(first.result.primary)
+    assert [item.version_id for item in second.manifest.library_inputs] == [
+        item.version_id for item in records
+    ]
+    assert resolve("history").frame.height == 11
+
+
+@pytest.mark.parametrize("value", ["", "../invalid", ",", "latest"])
+def test_invalid_exact_version_sets_are_refused(value) -> None:
+    with pytest.raises(InvalidDatasetSelectorError):
+        DatasetSelector.parse("versions:" + value)
+
+
+def test_an_exact_version_set_cannot_duplicate_a_version(three_months) -> None:
+    version = resolve("history").versions[0].version
+    with pytest.raises(InvalidDatasetSelectorError):
+        DatasetSelector.parse(f"versions:{version.version_id},{version.version_id}")
+
+
+def test_an_exact_version_set_cannot_double_count_a_corrected_month(
+    three_months,
+) -> None:
+    version = resolve("history").versions[0].version
+    replacement = commit(
+        three_months,
+        "2026-06",
+        rows=4,
+        replaces=version.version_id,
+        reason="Correction",
+    )
+    with pytest.raises(InvalidDatasetSelectorError):
+        resolve(f"versions:{version.version_id},{replacement.version_id}")
+
+
 @pytest.mark.parametrize(
     "text", ["histories", "history 2026-09", "history:", "history:September"]
 )
@@ -344,6 +399,51 @@ def test_months_differing_only_in_type_are_merged(library) -> None:
 
     assert resolved.frame.height == 4
     assert resolved.frame.schema[COLUMNS[2]] == pl.Float64
+
+
+def test_numeric_widening_cannot_change_an_integer_value(library) -> None:
+    frame = month_frame("2026-06", rows=1).with_columns(
+        pl.lit(9_007_199_254_740_993, pl.Int64).alias(COLUMNS[2])
+    )
+    library.commit_version(
+        SALES_HISTORY.id,
+        DatasetCommit.from_upload(
+            frame, period="2026-06", filename="june.csv", payload=b"june"
+        ),
+    )
+    commit(library, "2026-07", rows=1)
+
+    with pytest.raises(InconsistentDatasetVersionsError) as failure:
+        resolve("history")
+
+    assert failure.value.details["column"] == COLUMNS[2]
+    assert failure.value.details["period"] == "2026-06"
+
+
+@pytest.mark.parametrize("numeric_type", [pl.Int64, pl.Float64])
+def test_numeric_widening_cannot_turn_a_boolean_into_a_measure(
+    library, numeric_type
+) -> None:
+    for period, value in (
+        ("2026-06", pl.lit(True)),
+        ("2026-07", pl.lit(2, numeric_type)),
+    ):
+        frame = month_frame(period, rows=1).with_columns(value.alias(COLUMNS[2]))
+        library.commit_version(
+            SALES_HISTORY.id,
+            DatasetCommit.from_upload(
+                frame,
+                period=period,
+                filename=f"{period}.csv",
+                payload=period.encode(),
+            ),
+        )
+
+    with pytest.raises(InconsistentDatasetVersionsError) as failure:
+        resolve("history")
+
+    assert failure.value.details["column"] == COLUMNS[2]
+    assert failure.value.details["stored_dtype"] == "Boolean"
 
 
 def test_a_reordered_month_is_merged_not_refused(library) -> None:

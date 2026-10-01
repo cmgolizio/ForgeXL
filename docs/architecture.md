@@ -1,10 +1,13 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 12 — the fourth phase of the post-POC
-expansion. Phases 0–8 built and validated the proof of concept; Phase 9 added
-the persistent Data Library described in §5a, Phase 10 the monthly ingestion
-layer in §5b, Phase 11 the library-backed Action inputs in §5c, and Phase 12
-the rich artifact output framework in §5d.
+**Status:** implemented through Phase 14 on 2026-10-01. The configured report
+contract defines six sections. Source
+reconciliation and automated acceptance are recorded in
+[phase-14-validation.md](phase-14-validation.md); complete company credits/sample
+coverage and manual Excel for Mac opening remain pending.
+Phases 0–8 built the proof of concept; Phase 9 added the Data Library (§5a),
+Phase 10 ingestion (§5b), Phase 11 library-backed inputs (§5c), Phase 12 generic
+artifacts/rendering (§5d), and Phases 13–14 the report and workbook batch (§5e).
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -337,9 +340,12 @@ already offered.
   monthly cycle are validated first, so "September sales committed but the
   September ownership snapshot silently failed" cannot happen by a file being
   wrong. A refusal leaves the library exactly as it was.
-- **The stored frame is the uploaded frame.** No column renamed, added,
-  reordered, coerced or dropped. The month, the date range, the parser engine
-  and the source hash are metadata _on the version_, never written into rows.
+- **The stored frame is the parsed source frame.** No column renamed, added,
+  reordered, repaired or dropped after parsing. CSV columns declared as text
+  in the source schema bypass numeric inference to preserve identifiers such
+  as `000123`; typed spreadsheet cells retain their original parser behavior.
+  The month, date range, parser engine, source hash and chosen date
+  interpretation are metadata _on the version_, never written into rows.
 
 ### Two entry points
 
@@ -359,6 +365,12 @@ snapshot is legitimately byte-identical from one month to the next.
 Correcting a committed month is deliberate and separate: commit a replacement
 naming the version it supersedes and why (9D). The old version stays readable,
 so the report built from it can still be reproduced.
+
+New versions record optional `date_column` / `date_format` metadata as a pair;
+older JSON records remain readable without them. An explicit replacement can
+record a missing or corrected interpretation of the same source bytes, with a
+reason. An unchanged interpretation is still a duplicate. No existing version
+is rewritten or guessed into a new format.
 
 The accepted schemas, every refusal and every warning are documented in
 [`monthly-source-schemas.md`](monthly-source-schemas.md). The
@@ -404,17 +416,19 @@ POST /api/runs
 
 **Which dataset is read is declared by the Action; which version is chosen per
 Run.** The client never names a dataset, so no client-supplied string decides
-what gets opened. It names a version, in one of three forms:
+what gets opened. It names versions using these forms:
 
 | reference              | means                                              |
 | ---------------------- | -------------------------------------------------- |
 | `latest`               | the live version with the greatest reporting month |
 | `period:2026-09`       | the live version for that month                    |
 | `version:<version id>` | that exact version, superseded or not              |
+| `versions:<id>,<id>,...` | that exact set, including superseded versions     |
 | `history`              | every live version, oldest month first             |
 | `history:2026-09`      | every live version through that month              |
 
-The last two were added in Phase 13 and are the only forms that name a **set**.
+`history` was added in Phase 13; `versions:` was added in the audit to replay
+its recorded input sets after corrections. Both name a **set**.
 Build plan 13B requires a report Action's inputs to "include the historical
 information required by the report specification", and the year-over-year and
 year-to-date windows of 13C span more months than one version holds — the
@@ -430,7 +444,18 @@ Months whose exports carry different columns are refused with
 `INCONSISTENT_DATASET_VERSIONS` rather than reconciled — merging them would
 mean inventing values for one month or dropping a column from the other. Months
 that differ only in *type*, which a CSV month and a workbook month can, are
-merged: the widening changes no value.
+merged when the types are compatible. Integer-to-float widening is checked
+for a loss of precision; boolean-to-number coercion is also refused with
+`INCONSISTENT_DATASET_VERSIONS`. An exact set contains at most one version per month; snapshot
+datasets cannot combine multiple versions.
+
+An input slot may declare `interpret_dates=True`. Resolution applies each
+version's recorded format to its own working frame before concatenation,
+allowing CSV text dates and spreadsheet date cells in the same report. The
+raw loaded frames and stored versions remain unchanged. A slot may also name
+another slot with `period_matches`: the runner compares their newest resolved
+periods before invoking Action validation. The monthly report requires its
+sample history and ownership snapshot to end at the selected sales month.
 
 `latest` is the greatest **month**, not the most recent commit. The two differ
 exactly when an old month is corrected: restating March after June was imported
@@ -438,7 +463,7 @@ commits a March version last, and answering "latest" with March would be wrong.
 
 ### Reproducible Runs
 
-Only `version:` is fixed; every other form moves. Build plan 11D allows a
+`version:` and `versions:` are fixed; every other form moves. Build plan 11D allows a
 moving form at selection and forbids one at execution, so resolution happens
 once, before the Action runs, and the Run records **both**: `requested`
 (`latest`) and `version_id` (what that resolved to). A Run therefore says what
@@ -452,8 +477,9 @@ later Run would have to name back is written down.
 The consequence is the reason the phase exists. Committing a newer version, or
 superseding the one a Run used, cannot change what that Run says it used — the
 record is a resolved ID, not a question. Re-running with
-`version:<recorded id>` reproduces the original result against the original
-source state, and a superseded version stays loadable by ID forever.
+`version:<recorded id>` for a snapshot and
+`versions:<recorded id>,<recorded id>,...` for each history slot reproduces the
+original source state, and a superseded version stays loadable by ID forever.
 
 ### What did not change
 
@@ -567,7 +593,7 @@ that name through RFC 6266's `filename*` parameter.
 
 `app.services.archive` bundles a Run's artifacts into one ZIP, in memory.
 Entry names are re-checked against the flat-filename rule on the way in — the
-model already refused a separator, a `..` or a control character when the
+model already refused a separator, a traversal name or a control character when the
 artifact was built, and the archive writer does not rely on someone else having
 checked (build plan 12F). Entries are stamped with the Run's own completion
 time rather than with "now", so re-downloading a bundle returns the same bytes.
@@ -576,7 +602,8 @@ time rather than with "now", so re-downloading a bundle returns the same bytes.
 
 - **The Action contract.** `ActionResult.artifacts` defaults to empty. Every
   Action written before Phase 12 is valid and unchanged, and the contract
-  freeze asserts that neither registered Action produces an artifact.
+  freeze asserts that neither proof Action produces an artifact. Phase 14
+  adds an optional bundle filename without changing those defaults.
 - **`MANIFEST_SCHEMA_VERSION` stays at 2.** `RunManifest.artifacts` defaults to
   empty, so a manifest written before this phase still validates.
 - **The Run pipeline writes nothing.** An artifact is bytes an Action produced,
@@ -584,102 +611,94 @@ time rather than with "now", so re-downloading a bundle returns the same bytes.
 - **The tabular side.** Preview, per-output export and the whole-Run workbook
   are untouched, and an artifact-producing Run uses all of them normally.
 
-### Not built
+### Current artifact delivery
 
-No registered Action produces an artifact, so the frontend's "Generated Files"
-section renders for no Action that ships today. That is deliberate: build plan
-12B keeps artifacts optional and 12G asks only for generic support, which is
-what the section is — every line of it comes from `manifest.artifacts`. The
-first Action that produces one is build plan Phase 14's rep workbooks: Phase 13
-registered the report Action and it returns tables only, because Phase 13's
-exit criterion is the calculations "before any attention is paid to workbook
-appearance".
+The Monthly Sales Rep Report produces every rep workbook in one successful
+Run. The existing generic Generated Files section can render their metadata,
+and the existing routes download one artifact or all of them in a ZIP. A named
+bundle travels as optional runtime result state; the route uses it instead of
+its generic fallback. Neither the manifest schema nor the proof Actions change.
 
-Artifacts are also not persisted. They live and die with their Run, exactly as
-result frames do. The Data Library stores source and history data; build plan
-12C is explicit that it "does not automatically become a permanent report
-archive".
+Artifacts are not persisted. They live and die with their Run, exactly as
+result frames do. The Data Library remains an immutable source/history store,
+not a report archive.
 
 ---
 
-## 5e. The monthly report engine (Phase 13)
+## 5e. The monthly report and workbook batch (Phases 13–14)
 
-The first Action that reads the Data Library, and the first whose behaviour is
-specified by a document rather than by a paragraph of the build plan.
+The report reads three resolved DataFrames and delegates preparation,
+calculation and presentation to separate pure services:
 
-```text
-sales_history      history:2026-09  ─┐
-sample_history     history:2026-09  ─┤ app/services/input_resolution.py
-account_assignments period:2026-09  ─┘        ↓
-                                     three DataFrames
-                                              ↓
-              app/actions/monthly_sales_rep_report.py   the Action contract
-                                              ↓
-              app/services/monthly_report.py            the arithmetic
-                   ↑
-              app/models/report_spec.py                 the definitions
-                                              ↓
-                              twelve result tables, keyed by Sales Rep
-                                              ↓
-                          [Phase 14] app/services/workbook.py
-```
 
-Three modules, and the split is the point:
 
-| module | owns |
-| ------ | ---- |
-| `app/models/report_spec.py` | the business definitions: what revenue is, what a placement is, which conditions fail a report. Declarations only — it reads no file and no clock. |
-| `app/services/monthly_report.py` | the arithmetic. It spells no rule of its own; it reads the declarations. |
-| `app/actions/monthly_sales_rep_report.py` | the Action contract — ID, version, slots, outputs, the validation hook — and nothing else. |
+| Module | Responsibility |
+| --- | --- |
+| `models/report_spec.py` | Rule confidence, source roles, windows, outputs and validation severity. |
+| `services/monthly_report.py` | One period/prepared model, invoice rep identities, dynamic roster, shared company calculations and twelve supplementary tables. |
+| `services/report_views.py` | Six accepted views and precomputed footer amounts/ratios. |
+| `services/report_workbooks.py` | Per-rep slicing, period/coverage notes, formatting policy and safe names. No business calculations. |
+| `services/workbook.py` | Pure generic rendering into XLSX bytes; capacity checks, numeric formats, literal cells, filters and frozen headers. |
+| `actions/monthly_sales_rep_report.py` | Thin Action contract and delegation; returns tables, all workbooks and the month-specific ZIP name. |
 
-`docs/monthly-sales-rep-report-spec.md` is the same specification in prose and
-is the authoritative one.
+[monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) records the
+exact six worksheets, formulas, coverage and acceptance scope.
 
-### One period, resolved once
+### One reporting period and seven calendar windows
 
-Build plan 13C: no section of the report decides for itself what "this month"
-means. The reporting period is the greatest calendar month present in
-`Invoice Date` across the sales history the Run read — from the data, never
-from a filename — and all five comparison windows are derived from it. The Run
-chooses it explicitly by bounding its history selector, and that bounding month
-must exist, so the month derived is always the month requested.
+The greatest month in the selected sales data defines the period. Bounding
+`history:YYYY-MM` requires that month to exist. Seven inclusive windows cover
+the reporting month, prior month, same month last year, both YTD periods, and
+current/prior R12. Month-presence checks include interior gaps. Accepted R12
+views blank unavailable totals and growth; supplementary previews retain
+explicitly qualified available-row sums.
 
-### The roster comes from the snapshot
+### Invoice performance and snapshot context
 
-Build plan 13D forbids a hard-coded rep list. The reps are the distinct
-non-blank `Sales Person` values in the account-assignment snapshot for the
-month, and every figure is attributed by that snapshot rather than by the rep
-named on the invoice (build plan 9E). A rep who sold nothing still gets a row;
-a rep named only on transactions gets a warning and no report.
+Invoice salesperson is the configured performance identity, superseding the
+previous account-owner performance assumption. Transactions retain their
+`Sales Person`; the month-specific snapshot contributes current ownership and
+account-list/roster context. It never moves historical performance to a new
+owner. Snapshot reps plus reps active in current-R12 sales/samples receive
+workbooks. Idle snapshot reps retain zero-activity reports; unknown active reps
+are warned about and included.
 
 ### Prepared once, company once
 
-Build plan 13E and 13G, in one sentence each: dates, measures and ownership
-are attached once per Run rather than once per rep, and the company's figures
-are calculated once and joined in, so two reps can never be shown company
-totals that disagree.
+Preparation and company aggregations are shared across all reps. Company
+supplier amounts are calculated once and joined into accepted supplier views.
+Footer percentages are ratios of precomputed footer amounts, not sums of row
+percentages. Sources remain unchanged, including subcent prices, fractional
+quantities, accents and original identifiers.
 
-### Fail, or qualify
+### Fail or qualify
 
-Build plan 13H splits the conditions the report detects in two, and the
-specification says which is which:
+Action validation fails with a structured 422 before artifacts are published
+for unsafe measures, missing invoice reps/sales accounts, unreadable dates,
+wrong/unknown invoice types, or mismatched input periods. Samples may have
+blank customers. Unknown reps, source-schema additions, repeated source rows,
+missing historical months and direct-call assignment conflicts qualify the
+report. Library ingestion still refuses a conflicting ownership snapshot.
+Remaining provisional placement/sample-period definitions appear in Data
+Quality; placements are excluded from the accepted workbooks.
 
-- **Errors** are returned from the Action's `validate()` hook, so the Run fails
-  with a structured 422 **before** a single table is calculated. A blank
-  measure, an unowned account with activity, an account owned twice, an
-  unreadable date, a sample history that skips the month.
-- **Warnings** travel in the `data_quality` result table, because an Action has
-  no warning channel of its own and everything `validate()` returns fails the
-  Run. An unrecognised rep, an unexpected invoice type, an added source column,
-  repeated rows, an empty comparison window, a short placement history — and,
-  on every Run for now, that some of the report's definitions are still
-  provisional.
+### Batch publication and presentation
 
-### Not built
+One rendering policy produces six sheets per rep. Amounts and percentages
+stay numeric; note rows and footer rows participate in capacity checks.
+Filenames preserve the reporting period and safely resolve case-insensitive
+collisions, character limits and UTF-8 byte limits. A fixed XLSX creation
+property removes the rendering clock from byte reproducibility.
 
-No workbook. Build plan Phase 13 produces tables and Phase 14 renders them,
-with the report renderer Phase 12 already built and tested. No frontend either:
-the reporting-period picker is build plan 15A.
+The runner publishes result tables and the entire artifact set together.
+If any workbook fails rendering, the failed Run exposes no partial batch.
+The generic artifact ZIP contains each workbook once and uses
+`<Month Year> Sales Rep Reports.zip`; individual downloads remain available.
+
+Phase 15's period picker, ingestion UI and dedicated monthly reporting flow
+are not implemented here. Phase 14 is reachable through `POST /api/runs` with
+explicit library selectors, or in-process. Manual Excel for Mac acceptance and
+full-company completed-month validation are recorded as outstanding.
 
 ---
 
@@ -734,16 +753,19 @@ claiming, now demonstrated rather than asserted.
   `UNKNOWN_DATASET` / `UNKNOWN_DATASET_VERSION` / 404 rather than a directory
   lookup.
 - **A dataset reference is refused, not interpreted** (`INVALID_DATASET_SELECTOR`
-  / 422, added in Phase 11). `latest`, `period:YYYY-MM` and
-  `version:<version id>` are the three accepted forms; `current`, `newest` or
+  / 422, added in Phase 11). `latest`, `period:YYYY-MM`,
+  `version:<version id>`, `versions:<id>,<id>,...` and `history[:YYYY-MM]`
+  are accepted forms; `current`, `newest` or
   a bare month is reported rather than matched to a near neighbour, the same
   way an unrecognised Action ID is. A reference also never names the dataset —
   the Action declares that — so no client string chooses what gets opened.
 - **An artifact filename is a flat name, never a path** (build plan 12F,
-  added in Phase 12). Separators, `..`, a leading dot, control characters,
+  added in Phase 12). Separators, traversal names, a leading dot, control characters,
   reserved Windows device names and trailing dots or spaces are all refused
   when the artifact is constructed, and checked again when it is written into
-  the ZIP. A filename reaches a `Content-Disposition` header and a ZIP entry
+  the ZIP. Names are capped at 150 characters and 255 UTF-8 bytes, including
+  the extension; the filename helper preserves accents while fitting both.
+  A filename reaches a `Content-Disposition` header and a ZIP entry
   name, so it cannot be allowed to name a location in either.
 - **A reporting month is read from data, never from a filename** (build plan
   10B). An uploaded file's name is metadata here too: it supplies the extension
@@ -779,8 +801,11 @@ claiming, now demonstrated rather than asserted.
   (`EXPORT_TOO_LARGE` / 422, added in Phase 7). The XLSX format holds
   1,048,575 data rows, 16,384 columns and 32,767 characters in a cell; past any
   of those, xlsxwriter silently shortens the value or Polars raises an error
-  nothing caught. `export.check_fits_worksheet` measures the result first and
-  says which limit was exceeded, where, and that CSV has none of them.
+  nothing caught. `export.check_fits_worksheet` measures the result first,
+  including header text. Rich rendering also reserves rows for titles,
+  subtitles, spacing and supplied totals, and checks presentation text before
+  writing. These checks prevent a polished workbook from silently losing its
+  last rows or shortening a heading.
 - **CORS is an exact allowlist** — `http://127.0.0.1:3000` and
   `http://localhost:3000`. Never a wildcard.
 - **Errors are structured**: `{"error": {"code", "message", "details"}}`. A

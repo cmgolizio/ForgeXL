@@ -21,6 +21,7 @@ import polars as pl
 import pytest
 
 from app.errors import (
+    DataLibraryError,
     IngestionValidationError,
     InvalidDatasetCommitError,
     UnknownDatasetError,
@@ -996,3 +997,151 @@ def test_ingestion_writes_nothing_outside_the_library(quarantine) -> None:
     )
 
     assert list(quarantine.rglob("*")) == []
+def test_monthly_csv_identifiers_keep_their_leading_zeroes() -> None:
+    table = ms.transactions(
+        [
+            ms.transaction_row(
+                invoice_date="2026-09-04",
+                invoice_number="000123",
+                customer="0007",
+                sku="00100",
+                vintage="02021",
+            )
+        ]
+    )
+    version = commit_monthly_sales(source(table), today=TODAY)
+    frame = data_library.load_version(SALES_HISTORY.id, version.version_id)
+
+    for column, expected in {
+        "Invoice Number": "000123",
+        "Customer": "0007",
+        "SKU": "00100",
+        "Vintage": "02021",
+    }.items():
+        assert frame[column][0] == expected
+        assert frame.schema[column] == pl.String
+
+    ownership = commit_account_assignments(
+        source(ms.assignments((("0007", "Beth Comeaux"),))), period="2026-09"
+    )
+    assert (
+        data_library.load_version(ACCOUNT_ASSIGNMENTS.id, ownership.version_id)[
+            "Customer"
+        ][0]
+        == "0007"
+    )
+
+
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_ingestion_preserves_a_chosen_date_interpretation(bootstrap) -> None:
+    from app.models.schemas import ActionInput, ActionInputSource
+    from app.models.source_schemas import US_DATE
+    from app.services.input_resolution import resolve_slot
+    from app.services.data_library import LocalDataLibrary
+
+    file = source(ms.transactions([ms.transaction_row(invoice_date="09/04/2026")]))
+    version = (
+        bootstrap_history(SALES_HISTORY.id, file, date_format=US_DATE, today=TODAY)[0]
+        if bootstrap
+        else commit_monthly_sales(file, date_format=US_DATE, today=TODAY)
+    )
+    root = data_library.DATA_LIBRARY.root  # type: ignore[attr-defined]
+    reopened = LocalDataLibrary(root)
+    stored = reopened.get_version(SALES_HISTORY.id, version.version_id)
+    raw = reopened.load_version(SALES_HISTORY.id, version.version_id)
+    assert stored.date_column == "Invoice Date" and stored.date_format == US_DATE
+    assert raw["Invoice Date"][0] == "09/04/2026"
+
+    slot = ActionInput(
+        id="sales",
+        label="Sales",
+        source=ActionInputSource.LIBRARY,
+        dataset_id=SALES_HISTORY.id,
+        interpret_dates=True,
+    )
+    resolved = resolve_slot(slot, f"version:{stored.version_id}")
+    assert resolved.frame["Invoice Date"][0] == date(2026, 9, 4)
+    assert resolved.versions[0].frame.equals(raw)
+
+
+def test_a_legacy_date_interpretation_can_be_corrected_without_changing_bytes() -> None:
+    from app.models.library import DatasetCommit
+    from app.models.source_schemas import US_DATE
+
+    file = source(ms.transactions([ms.transaction_row(invoice_date="09/04/2026")]))
+    validated = validate_source(
+        SALES_HISTORY.id, file, date_format=US_DATE, today=TODAY
+    )
+    assert validated.frame is not None
+    data_library.ensure_dataset(SALES_HISTORY)
+    legacy = data_library.commit_version(
+        SALES_HISTORY.id,
+        DatasetCommit.from_upload(
+            validated.frame,
+            payload=file.payload,
+            filename=file.filename,
+            period="2026-09",
+        ),
+    )
+    corrected = commit_monthly_sales(
+        file,
+        date_format=US_DATE,
+        today=TODAY,
+        replaces=legacy.version_id,
+        reason="Record the original explicit US date interpretation.",
+    )
+
+    assert corrected.supersedes == legacy.version_id
+    assert corrected.source_sha256 == legacy.source_sha256
+    assert corrected.date_format == US_DATE
+    assert data_library.load_version(SALES_HISTORY.id, corrected.version_id).equals(
+        data_library.load_version(SALES_HISTORY.id, legacy.version_id)
+    )
+    with pytest.raises(IngestionValidationError) as raised:
+        commit_monthly_sales(
+            file,
+            date_format=US_DATE,
+            today=TODAY,
+            replaces=corrected.version_id,
+            reason="An unchanged interpretation is still a duplicate.",
+        )
+    assert raised.value.code == "DUPLICATE_SOURCE_FILE"
+
+
+@pytest.mark.parametrize(
+    "failed_dataset", [SALES_HISTORY.id, SAMPLE_HISTORY.id, ACCOUNT_ASSIGNMENTS.id]
+)
+def test_a_storage_failure_reports_the_files_already_committed(
+    monkeypatch, failed_dataset
+) -> None:
+    commit = data_library.commit_version
+
+    def failing_commit(dataset_id, request):
+        if dataset_id == failed_dataset:
+            raise DataLibraryError(
+                "The dataset could not be written.",
+                details={"dataset_id": dataset_id, "reason": "Disk is full."},
+            )
+        return commit(dataset_id, request)
+
+    monkeypatch.setattr(data_library, "commit_version", failing_commit)
+    outcome = import_reporting_cycle(
+        sales=sales("2026-09"),
+        samples=samples("2026-09"),
+        assignments=assignments(),
+        period="2026-09",
+        today=TODAY,
+    )
+
+    order = (SALES_HISTORY.id, SAMPLE_HISTORY.id, ACCOUNT_ASSIGNMENTS.id)
+    preceding = order[:order.index(failed_dataset)]
+    assert not outcome.ok
+    assert outcome.partial is bool(preceding)
+    assert outcome.committed_dataset_ids() == preceding
+    assert outcome.uncommitted_dataset_ids() == order[len(preceding):]
+    (error,) = outcome.errors
+    assert error.code == "DATA_LIBRARY_ERROR"
+    assert error.slot_id == failed_dataset
+    assert error.details["reason"] == "Disk is full."
+    for dataset_id in order:
+        assert len(versions(dataset_id)) == int(dataset_id in preceding)

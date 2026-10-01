@@ -367,6 +367,28 @@ def test_missing_required_columns_fail_the_run() -> None:
     assert raised.value.details["missing_columns"] == ["Volume"]
 
 
+def test_action_validation_waits_for_a_valid_required_schema() -> None:
+    class NeedsVolume(_Exploding):
+        inputs = (
+            ActionInput(
+                id="source_file",
+                label="Source File",
+                accepted_extensions=(".csv",),
+                required_columns=("Volume",),
+            ),
+        )
+
+        def validate(self, inputs: Mapping[str, pl.DataFrame]) -> list[ValidationIssue]:
+            inputs["source_file"].get_column("Volume")
+            return []
+
+    with pytest.raises(RunValidationError) as raised:
+        execute_run(NeedsVolume(), {"source_file": upload("s.csv", _sales_csv())})
+
+    assert raised.value.code == "MISSING_COLUMNS"
+    assert _only_run().status is RunStatus.FAILED
+
+
 def test_column_comparison_is_exact() -> None:
     """Build plan 3.7: 'Sales Person' is not 'Salesperson'."""
     action = make_action("schema_action", required_columns=("Salesperson",))

@@ -32,10 +32,10 @@ reordered, coerced or dropped, and the dates this module reads are used to
 describe the version rather than to rewrite it. The Data Library holds the full
 source snapshot (build plan 10E), and a report normalises on read.
 
-**Nothing here changes Phase 9.** No model, no interface and no stored record
-gained a field. Ingestion is built entirely on `commit_version` and the derived
-queries the library already offers, which is what the Phase 9 entry predicted
-it should need.
+**The library interface remains unchanged.** Ingestion uses `commit_version`
+and the derived queries. The audit adds optional date-interpretation metadata
+to new versions so a report can apply the same explicit format in a working
+copy. Existing version records and source frames remain unchanged.
 
 **Sales and samples never share anything but a shape.** Build plan 10D:
 "Sales and samples must remain logically distinct datasets even if their source
@@ -53,6 +53,7 @@ from datetime import date
 import polars as pl
 
 from app.errors import (
+    DataLibraryError,
     EmptyUploadError,
     IngestionValidationError,
     InputValidationError,
@@ -73,7 +74,12 @@ from app.models.library import (
     parse_period,
 )
 from app.models.schemas import ValidationIssue
-from app.models.source_schemas import SOURCE_SCHEMAS, SourceSchema, schema_for
+from app.models.source_schemas import (
+    SOURCE_SCHEMAS,
+    SourceColumnKind,
+    SourceSchema,
+    schema_for,
+)
 from app.services import data_library, parser, reporting_period, storage
 
 #: How many offending rows an error message names before it stops counting.
@@ -153,6 +159,7 @@ class SourceValidation:
     #: A version of this dataset already committed from these exact bytes
     #: (build plan 10C.5), or None.
     duplicate_of: DatasetVersion | None
+    date_format: str | None = None
 
     errors: tuple[ValidationIssue, ...] = ()
     warnings: tuple[ValidationIssue, ...] = ()
@@ -344,16 +351,27 @@ def validate_source(
     errors.extend(row_errors)
     warnings.extend(row_warnings)
 
-    duplicate = _already_imported(schema.dataset_id, file.sha256, period)
+    duplicate = _already_imported(
+        schema.dataset_id, file.sha256, period, preferred_version=replaces
+    )
+    if (
+        duplicate is not None
+        and replaces == duplicate.version_id
+        and detection.date_format is not None
+        and (duplicate.date_column, duplicate.date_format)
+        != (schema.period_column, detection.date_format)
+    ):
+        # An explicit correction can restore a legacy version's missing date
+        # interpretation without changing its source bytes. The library still
+        # requires a replacement reason and keeps the original version intact.
+        duplicate = None
 
     # Both of these are true of a re-uploaded file — the month is covered
     # *because* this very file covered it — and "you have already imported this
     # file" is the more specific and more useful of the two diagnoses. So the
     # period check only speaks when the duplicate check has not.
     if duplicate is None:
-        errors.extend(
-            _already_covered_errors(schema, period, replaces=replaces)
-        )
+        errors.extend(_already_covered_errors(schema, period, replaces=replaces))
 
     if duplicate is not None:
         errors.append(
@@ -393,6 +411,7 @@ def validate_source(
         min_date=detection.min_date,
         max_date=detection.max_date,
         duplicate_of=duplicate,
+        date_format=detection.date_format,
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
@@ -634,8 +653,10 @@ def import_reporting_cycle(
     for validation in outcome.validations:
         try:
             version = _commit_validated(validation)
-        except (InvalidDatasetCommitError, UnknownDatasetError) as error:
-            # A refusal from the library itself, after validation passed. Say
+        except (
+            DataLibraryError, InvalidDatasetCommitError, UnknownDatasetError
+        ) as error:
+            # A refusal or storage failure after validation passed. Say
             # exactly what did and did not land rather than unwinding what did:
             # committed history is real and build plan 15C requires it to
             # survive a later failure.
@@ -757,7 +778,9 @@ def bootstrap_history(
     # row belongs to, and two definitions are how a row gets counted in one
     # month and stored in another.
     dates, _, _ = reporting_period.read_dates(
-        frame, validation.schema, validation.schema.period_column or "",
+        frame,
+        validation.schema,
+        validation.schema.period_column or "",
         date_format=date_format,
     )
     months = dates.dt.strftime("%Y-%m")
@@ -777,6 +800,12 @@ def bootstrap_history(
                     period=month,
                     parser_engine=validation.parsed.parser_engine,
                     worksheet=validation.parsed.worksheet,
+                    date_column=(
+                        validation.schema.period_column
+                        if validation.date_format
+                        else None
+                    ),
+                    date_format=validation.date_format,
                     min_date=in_month.min(),
                     max_date=in_month.max(),
                 ),
@@ -842,6 +871,10 @@ def _commit_validated(
             period=validation.period,
             parser_engine=validation.parsed.parser_engine,
             worksheet=validation.parsed.worksheet,
+            date_column=(
+                validation.schema.period_column if validation.date_format else None
+            ),
+            date_format=validation.date_format,
             min_date=validation.min_date,
             max_date=validation.max_date,
             supersedes=replaces,
@@ -875,7 +908,15 @@ def _parse(
         return None
 
     try:
-        return parser.parse_tabular_bytes(file.payload, file.extension)
+        return parser.parse_tabular_bytes(
+            file.payload,
+            file.extension,
+            text_columns=tuple(
+                column.name
+                for column in schema.columns
+                if column.kind is SourceColumnKind.TEXT
+            ),
+        )
     except InputValidationError as error:
         errors.append(error.as_validation_issue(schema.dataset_id))
         return None
@@ -1309,7 +1350,11 @@ def _already_covered_errors(
 
 
 def _already_imported(
-    dataset_id: str, digest: str, period: str | None
+    dataset_id: str,
+    digest: str,
+    period: str | None,
+    *,
+    preferred_version: str | None = None,
 ) -> DatasetVersion | None:
     """The version already committed from these exact bytes for this month (10C.5).
 
@@ -1335,7 +1380,9 @@ def _already_imported(
         versions = data_library.list_versions(dataset_id)
     except UnknownDatasetError:
         return None  # nothing has ever been committed here
-    for version in versions:
+    for version in sorted(
+        versions, key=lambda item: item.version_id != preferred_version
+    ):
         if version.source_sha256 == digest and version.period == period:
             return version
     return None

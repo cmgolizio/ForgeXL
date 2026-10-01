@@ -150,7 +150,7 @@ def test_the_provisional_rules_are_derived_from_the_declarations() -> None:
 
 
 def test_the_specification_is_not_yet_confirmed() -> None:
-    """The report has never been supplied, so some rules remain provisional.
+    """Supplementary placement and sample-period rules remain provisional.
 
     This test is expected to fail the day the last rule is confirmed, and
     that is deliberate: the change that confirms it must also raise the
@@ -317,6 +317,8 @@ def test_the_five_windows_are_declared_and_labelled() -> None:
         "prior_year_month",
         "year_to_date",
         "prior_year_to_date",
+        "rolling_year",
+        "prior_rolling_year",
     ]
     for key in WindowKey:
         assert WINDOW_LABELS[key].strip()
@@ -456,31 +458,12 @@ def test_build_plan_13h_names_this_condition_and_it_is_declared(code) -> None:
 
 
 def test_a_condition_that_would_state_something_false_is_an_error() -> None:
-    """13H: fail where a condition makes the report unreliable."""
-    for code in (
-        "MISSING_ACCOUNT_OWNERSHIP",
-        "DUPLICATE_ACCOUNT_OWNERSHIP",
-        "MISSING_MEASURE",
-        "NON_NUMERIC_MEASURE",
-        "MALFORMED_INVOICE_DATE",
-        "SAMPLE_PERIOD_MISMATCH",
-        "EMPTY_SALES_HISTORY",
-        "NO_SALES_REPS",
-    ):
+    for code in ("MISSING_TRANSACTION_REP", "MISSING_TRANSACTION_ACCOUNT", "UNEXPECTED_INVOICE_TYPE", "MISSING_MEASURE", "NON_NUMERIC_MEASURE", "MALFORMED_INVOICE_DATE", "SAMPLE_PERIOD_MISMATCH", "EMPTY_SALES_HISTORY", "NO_SALES_REPS"):
         assert severity_of(code) is Severity.ERROR
 
 
 def test_a_condition_that_changes_no_figure_is_a_warning() -> None:
-    """13H: warnings only where continuing is genuinely safe."""
-    for code in (
-        "UNRECOGNISED_SALES_REP",
-        "UNEXPECTED_INVOICE_TYPE",
-        "UNEXPECTED_SOURCE_COLUMNS",
-        "DUPLICATE_SOURCE_ROWS",
-        "MISSING_COMPARISON_PERIOD",
-        "SHORT_PLACEMENT_HISTORY",
-        "PROVISIONAL_REPORT_RULES",
-    ):
+    for code in ("UNRECOGNISED_SALES_REP", "MISSING_ACCOUNT_OWNERSHIP", "DUPLICATE_ACCOUNT_OWNERSHIP", "UNEXPECTED_SOURCE_COLUMNS", "DUPLICATE_SOURCE_ROWS", "MISSING_COMPARISON_PERIOD", "SHORT_PLACEMENT_HISTORY", "PROVISIONAL_REPORT_RULES"):
         assert severity_of(code) is Severity.WARNING
 
 
@@ -490,8 +473,8 @@ def test_a_condition_that_changes_no_figure_is_a_warning() -> None:
 
 
 def test_the_expected_invoice_types_are_declared() -> None:
-    assert KNOWN_INVOICE_TYPES == ("Invoice", "Credit")
-    assert rule("known_invoice_types").confidence is Confidence.PROVISIONAL
+    assert KNOWN_INVOICE_TYPES == ("Invoice", "Credit Invoice", "Sample Invoice", "Sample Credit Invoice")
+    assert rule("known_invoice_types").confidence is Confidence.CONFIRMED
 
 
 def test_money_is_stated_at_the_sources_own_precision() -> None:

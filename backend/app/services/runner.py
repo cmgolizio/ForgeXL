@@ -201,9 +201,7 @@ def execute_run(
 
         input_records = tuple(_input_metadata(loaded, parsed))
         library_records = tuple(
-            record
-            for item in resolved.values()
-            for record in item.as_metadata()
+            record for item in resolved.values() for record in item.as_metadata()
         )
         # The uploaded bytes have served their purpose: everything downstream
         # works from the dataframes and this metadata. Releasing them here
@@ -218,7 +216,10 @@ def execute_run(
         frames = _frames_by_slot(parsed, resolved)
 
         if not issues:
+            issues.extend(_validate_library_periods(action, resolved))
+        if not issues:
             issues.extend(_validate_datasets(action, frames))
+        if not issues:
             issues.extend(action.validate(frames))
 
         run = run_store.update_run(
@@ -233,7 +234,7 @@ def execute_run(
             action, result, input_records, library_records
         )
         artifact_records, artifact_files = _collect_artifacts(result)
-        produced = RunResult.of(tables, artifact_files)
+        produced = RunResult.of(tables, artifact_files, result.artifact_bundle_filename)
 
         completed_at = now()
         run = run_store.update_run(
@@ -371,6 +372,40 @@ def _parse_inputs(
             issues.append(error.as_validation_issue(slot.id))
 
     return parsed, issues
+
+
+def _validate_library_periods(
+    action: Action, resolved: Mapping[str, ResolvedLibrarySlot]
+) -> list[ValidationIssue]:
+    """Enforce declared period relationships while provenance is in hand."""
+    issues: list[ValidationIssue] = []
+    for slot in action.inputs:
+        if slot.period_matches is None or slot.id not in resolved:
+            continue
+        target = resolved.get(slot.period_matches)
+        if target is None:
+            raise ValueError(
+                f"Input slot {slot.id!r} names an unresolved period_matches slot."
+            )
+        actual = resolved[slot.id].version.period
+        expected = target.version.period
+        if actual is not None and actual == expected:
+            continue
+        issues.append(
+            ValidationIssue(
+                code="MISMATCHED_REPORTING_PERIODS",
+                message=f"{slot.label} covers {actual or 'no single reporting month'}, "
+                f"but {target.dataset_label} reports on {expected or 'no single reporting month'}. "
+                "Select versions for the same reporting month.",
+                details={
+                    "period": actual,
+                    "expected_period": expected,
+                    "period_matches": slot.period_matches,
+                },
+                slot_id=slot.id,
+            )
+        )
+    return issues
 
 
 def _validate_datasets(

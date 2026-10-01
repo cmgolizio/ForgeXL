@@ -115,6 +115,13 @@ def test_csv_bytes_become_a_dataframe_with_their_shape_recorded() -> None:
     assert parsed.frame.rows() == [("A1", 750), ("A2", 1500)]
 
 
+def test_numeric_csv_headers_are_compared_by_their_exact_spelling() -> None:
+    parsed = parser.parse_tabular_bytes(b"001,1\n2,3\n", ".csv")
+
+    assert parsed.columns == ("001", "1")
+    assert parsed.frame.row(0) == (2, 3)
+
+
 def test_a_header_only_csv_is_a_valid_dataset_with_no_rows() -> None:
     parsed = parser.parse_tabular_bytes(csv_bytes(["A", "B"], []), ".csv")
 

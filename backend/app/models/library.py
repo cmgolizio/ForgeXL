@@ -159,7 +159,7 @@ class DatasetSelectorKind(str, Enum):
     Build plan 11D allows a *moving* concept at selection time and forbids one
     at execution time: "A moving concept such as `latest` or `current` may be
     used during input selection, but it must be resolved to immutable version
-    IDs before the Action executes." These three kinds are that distinction
+    IDs before the Action executes." These kinds are that distinction
     made explicit — :attr:`LATEST` and :attr:`PERIOD` are questions the library
     answers, :attr:`VERSION` is already the answer.
     """
@@ -176,8 +176,12 @@ class DatasetSelectorKind(str, Enum):
     #: is what every other kind resolves *to*, and what a Run records.
     VERSION = "version"
 
+    #: A fixed set of exact versions, for replaying a recorded history Run
+    #: after one or more months have been superseded.
+    VERSIONS = "versions"
+
     #: Every live version of the dataset, optionally bounded at a month.
-    #: Unlike the three above it names a *set*, because build plan 13B
+    #: It names a *set*, because build plan 13B
     #: requires an Action's inputs to "include the historical information
     #: required by the report specification" and a year-over-year comparison
     #: spans more months than one version holds. Every version it resolves to
@@ -203,12 +207,13 @@ class DatasetSelector:
     ``latest``                  the newest live version
     ``period:2026-09``          the live version for September 2026
     ``version:<version id>``    that exact version, superseded or not
+    ``versions:<id>,<id>,...``   an exact version set, superseded or not
     ``history``                 every live version, oldest month first
     ``history:2026-09``         every live version through September 2026
     ==========================  ==========================================
 
-    The first three name one version and the last two name a set. Which of
-    those a selector is, is :attr:`selects_many`.
+    The first three name one version and the remaining forms name a set.
+    Which of those a selector is, is :attr:`selects_many`.
 
     A frozen dataclass rather than a Pydantic model for the same reason
     :class:`DatasetCommit` is one: it is an internal value, and what reaches
@@ -246,7 +251,7 @@ class DatasetSelector:
         spellings of the same request record identically.
 
         Raises:
-            InvalidDatasetSelectorError: the text is not one of the three
+            InvalidDatasetSelectorError: the text is not one of the
                 accepted forms, or its value is not a valid period or version
                 ID. Nothing is guessed: an unrecognised selector is refused
                 rather than resolved to a near match, exactly as an
@@ -254,8 +259,8 @@ class DatasetSelector:
         """
         if not isinstance(raw, str) or not raw.strip():
             raise InvalidDatasetSelectorError(
-                "Name the dataset version to use: 'latest', 'period:YYYY-MM' "
-                "or 'version:<version id>'.",
+                "Name the dataset versions to use: 'latest', 'period:YYYY-MM', "
+                "'version:<id>', 'history[:YYYY-MM]' or 'versions:<id>,<id>,...'.",
                 details={"selector": raw},
             )
 
@@ -273,9 +278,7 @@ class DatasetSelector:
 
         if keyword == DatasetSelectorKind.HISTORY.value:
             with _as_selector_failure(raw):
-                return cls(
-                    kind=DatasetSelectorKind.HISTORY, value=parse_period(value)
-                )
+                return cls(kind=DatasetSelectorKind.HISTORY, value=parse_period(value))
 
         if keyword == DatasetSelectorKind.PERIOD.value:
             with _as_selector_failure(raw):
@@ -287,6 +290,16 @@ class DatasetSelector:
                     kind=DatasetSelectorKind.VERSION, value=parse_version_id(value)
                 )
 
+        if keyword == DatasetSelectorKind.VERSIONS.value:
+            with _as_selector_failure(raw):
+                ids = tuple(parse_version_id(item.strip()) for item in value.split(","))
+            if len(set(ids)) != len(ids):
+                raise InvalidDatasetSelectorError(
+                    "An exact version set cannot name the same version twice.",
+                    details={"selector": raw},
+                )
+            return cls(kind=DatasetSelectorKind.VERSIONS, value=",".join(ids))
+
         raise cls._unreadable(raw)
 
     @staticmethod
@@ -294,7 +307,7 @@ class DatasetSelector:
         return InvalidDatasetSelectorError(
             f"{raw.strip()!r} does not name a dataset version. Use 'latest', "
             "'period:YYYY-MM', 'version:<version id>', 'history' or "
-            "'history:YYYY-MM'.",
+            "'history:YYYY-MM' or 'versions:<id>,<id>,...'.",
             details={"selector": raw},
         )
 
@@ -312,7 +325,10 @@ class DatasetSelector:
         reason build plan 11D exists: a moving selector is fine to *ask* with
         and must never be what a Run records having *used*.
         """
-        return self.kind is not DatasetSelectorKind.VERSION
+        return self.kind not in (
+            DatasetSelectorKind.VERSION,
+            DatasetSelectorKind.VERSIONS,
+        )
 
     @property
     def selects_many(self) -> bool:
@@ -322,7 +338,7 @@ class DatasetSelector:
         versions a Run records, never whether it records them: every version
         read is recorded by its immutable ID either way (build plan 11C).
         """
-        return self.kind is DatasetSelectorKind.HISTORY
+        return self.kind in (DatasetSelectorKind.HISTORY, DatasetSelectorKind.VERSIONS)
 
 
 @contextmanager
@@ -552,6 +568,14 @@ class DatasetVersion(BaseModel):
     worksheet: str | None = Field(
         default=None, description="Worksheet read from an XLSX source; null for CSV."
     )
+    date_column: str | None = None
+    date_format: str | None = Field(
+        default=None,
+        description=(
+            "The date interpretation validated at ingestion, including an "
+            "explicit choice for ambiguous text."
+        ),
+    )
 
     row_count: int
     column_count: int
@@ -575,6 +599,10 @@ class DatasetVersion(BaseModel):
 
     @model_validator(mode="after")
     def _check_identity_and_supersession(self) -> DatasetVersion:
+        if (self.date_column is None) != (self.date_format is None):
+            raise ValueError("date_column and date_format must be recorded together.")
+        if self.date_column is not None and self.date_column not in self.columns:
+            raise ValueError("date_column must name a stored column.")
         with _as_validation_failure():
             parse_dataset_id(self.dataset_id)
             parse_version_id(self.version_id)
@@ -597,9 +625,7 @@ class DatasetVersion(BaseModel):
             )
 
         if self.column_count != len(self.column_schema):
-            raise ValueError(
-                "column_count must match the number of columns described."
-            )
+            raise ValueError("column_count must match the number of columns described.")
         return self
 
     @property
@@ -634,6 +660,8 @@ class DatasetCommit:
     period: str | None = None
     parser_engine: str | None = None
     worksheet: str | None = None
+    date_column: str | None = None
+    date_format: str | None = None
     min_date: date | None = None
     max_date: date | None = None
 

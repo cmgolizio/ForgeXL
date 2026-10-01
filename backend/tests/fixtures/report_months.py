@@ -176,7 +176,7 @@ SALES_ROWS: dict[str, tuple[tuple[Any, ...], ...]] = {
             -2,
             30.00,
             -60.00,
-            invoice_type="Credit",
+            invoice_type="Credit Invoice",
         ),
     ),
 }
@@ -185,11 +185,11 @@ SALES_ROWS: dict[str, tuple[tuple[Any, ...], ...]] = {
 #: added to sales (build plan 10D).
 SAMPLE_ROWS: dict[str, tuple[tuple[Any, ...], ...]] = {
     "2026-08": (
-        _line("2026-08-20", ACME, "SMP-2608-1", "SKU-100", 3, 25.00, 75.00),
+        _line("2026-08-20", ACME, "SMP-2608-1", "SKU-100", 3, 25.00, 75.00, invoice_type="Sample Invoice"),
     ),
     "2026-09": (
-        _line("2026-09-04", ACME, "SMP-2609-1", "SKU-300", 2, 50.00, 100.00),
-        _line("2026-09-08", BISTRO, "SMP-2609-2", "SKU-100", 1, 25.00, 25.00),
+        _line("2026-09-04", ACME, "SMP-2609-1", "SKU-300", 2, 50.00, 100.00, invoice_type="Sample Invoice"),
+        _line("2026-09-08", BISTRO, "SMP-2609-2", "SKU-100", 1, 25.00, 25.00, invoice_type="Sample Invoice"),
     ),
 }
 
@@ -471,7 +471,7 @@ EXPECTED: dict[str, Any] = {
     # The conditions a clean golden month still reports. Both are true of it:
     # only three months precede the reporting month, and the specification is
     # not yet confirmed.
-    "warnings": ("PROVISIONAL_REPORT_RULES", "SHORT_PLACEMENT_HISTORY"),
+    "warnings": ("MISSING_COMPARISON_PERIOD", "PROVISIONAL_REPORT_RULES", "SHORT_PLACEMENT_HISTORY"),
 }
 
 

@@ -40,6 +40,11 @@ per month by construction (build plan 10G). The ``history`` selector added in
 Phase 13 therefore resolves a *set*: every live version of the dataset, in
 period order, optionally bounded at a month.
 
+The audit added ``versions:<id>,<id>,...`` to replay the full recorded set
+after a live month has been corrected. These IDs include superseded versions;
+the set may contain at most one version per month. Snapshot slots still read
+only one version.
+
 Nothing about build plan 11's guarantees changed to make that work:
 
 * every version is still immutable and still resolved before execution;
@@ -63,7 +68,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import polars as pl
 
@@ -74,6 +79,7 @@ from app.errors import (
     UnknownDatasetVersionError,
 )
 from app.models.library import (
+    DatasetKind,
     DatasetSelector,
     DatasetSelectorKind,
     DatasetVersion,
@@ -87,6 +93,7 @@ from app.models.schemas import (
     LibraryInputMetadata,
 )
 from app.services import data_library
+from app.services.reporting_period import parse_date_values
 
 #: The failures that mean "what you asked the library for is not there", as
 #: opposed to "the library is broken". The runner turns these into validation
@@ -162,7 +169,7 @@ class ResolvedLibrarySlot:
     """One library-backed slot, resolved to the versions it reads.
 
     A slot filled by ``latest``, ``period:`` or ``version:`` holds exactly one
-    entry in :attr:`versions`; a slot filled by ``history`` holds one per
+    entry in :attr:`versions`; ``history`` or ``versions:`` holds one per
     month, oldest first. :attr:`frame` is what the Action receives either way,
     which is why the Action cannot tell the two apart (build plan 11B).
 
@@ -237,6 +244,14 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibrarySlot:
     label = dataset_label(dataset_id)
 
     versions = resolve_versions(dataset_id, selector, label=label)
+    if len(versions) > 1 and any(
+        version.dataset_kind is DatasetKind.SNAPSHOT for version in versions
+    ):
+        raise InvalidDatasetSelectorError(
+            f"{label} is a snapshot dataset. Select one reporting month's version; "
+            "combining ownership snapshots would mix different account owners.",
+            details={"dataset_id": dataset_id, "selector": selector.as_text()},
+        )
     resolved = tuple(
         ResolvedLibraryInput(
             slot_id=slot.id,
@@ -255,8 +270,44 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibrarySlot:
         dataset_label=label,
         selector=selector,
         versions=resolved,
-        frame=_merge_versions(resolved, label=label),
+        frame=_merge_versions(
+            (
+                tuple(replace(item, frame=_interpret_dates(item)) for item in resolved)
+                if slot.interpret_dates
+                else resolved
+            ),
+            label=label,
+        ),
     )
+
+
+def _interpret_dates(item: ResolvedLibraryInput) -> pl.DataFrame:
+    """Use stored date provenance in a working copy; preserve the source frame."""
+    column = item.version.date_column
+    fmt = item.version.date_format
+    if column is None or fmt is None:
+        return item.frame
+    source = item.frame.get_column(column)
+    if source.dtype != pl.String:
+        raise InconsistentDatasetVersionsError(
+            "The stored date interpretation requires a text column.",
+            details={
+                "dataset_id": item.dataset_id,
+                "version_id": item.version.version_id,
+                "column": column,
+            },
+        )
+    parsed = parse_date_values(source, fmt)
+    if parsed.null_count() != source.null_count():
+        raise InconsistentDatasetVersionsError(
+            "The stored date interpretation cannot read every value in this version. Import a corrected version.",
+            details={
+                "dataset_id": item.dataset_id,
+                "version_id": item.version.version_id,
+                "column": column,
+            },
+        )
+    return item.frame.with_columns(parsed.alias(column))
 
 
 def resolve_versions(
@@ -271,6 +322,27 @@ def resolve_versions(
     """
     name = label or dataset_label(dataset_id)
 
+    if selector.kind is DatasetSelectorKind.VERSIONS:
+        assert selector.value is not None
+        versions = tuple(
+            resolve_version(
+                dataset_id,
+                DatasetSelector(kind=DatasetSelectorKind.VERSION, value=version_id),
+                label=name,
+            )
+            for version_id in selector.value.split(",")
+        )
+        periods = [version.period for version in versions]
+        if len(set(periods)) != len(periods):
+            raise InvalidDatasetSelectorError(
+                "An exact version set must name at most one version per reporting month.",
+                details={"dataset_id": dataset_id, "periods": periods},
+            )
+        return tuple(
+            sorted(
+                versions, key=lambda version: (version.period or "", version.created_at)
+            )
+        )
     if selector.kind is not DatasetSelectorKind.HISTORY:
         return (resolve_version(dataset_id, selector, label=name),)
 
@@ -362,7 +434,8 @@ def _merge_versions(
     values for one month or dropping a column from the other (build plan
     section 3.3). Types may differ and are widened: the same column stored as
     an integer in a CSV month and as a float in a workbook month is one
-    column, and no value changes.
+    column. Incompatible types and precision-losing integer-to-float widening
+    are refused rather than silently changing a value.
     """
     if len(resolved) == 1:
         return resolved[0].frame
@@ -389,10 +462,49 @@ def _merge_versions(
             },
         )
 
-    return pl.concat(
-        [item.frame.select(expected) for item in resolved],
-        how="vertical_relaxed",
-    )
+    try:
+        merged = pl.concat(
+            [item.frame.select(expected) for item in resolved],
+            how="vertical_relaxed",
+        )
+    except pl.exceptions.PolarsError as error:
+        raise InconsistentDatasetVersionsError(
+            f"The {label} months contain incompatible column types.",
+            details={"dataset_id": newest.dataset_id, "reason": str(error)},
+        ) from error
+    for item in resolved:
+        for column, dtype in item.frame.schema.items():
+            target = merged.schema[column]
+            if dtype == pl.Boolean and target.is_numeric():
+                raise InconsistentDatasetVersionsError(
+                    f"The {column} values in {item.version.period} are booleans, "
+                    "not numbers. Combining these months would turn true/false "
+                    "into numeric values.",
+                    details={
+                        "dataset_id": item.dataset_id,
+                        "period": item.version.period,
+                        "column": column,
+                        "stored_dtype": str(dtype),
+                        "merged_dtype": str(target),
+                    },
+                )
+            if not dtype.is_integer() or not target.is_float():
+                continue
+            source = item.frame[column]
+            restored = source.cast(target).cast(dtype, strict=False)
+            if not restored.equals(source):
+                raise InconsistentDatasetVersionsError(
+                    f"The {column} values in {item.version.period} cannot be "
+                    "combined with the other months without losing numeric precision.",
+                    details={
+                        "dataset_id": item.dataset_id,
+                        "period": item.version.period,
+                        "column": column,
+                        "stored_dtype": str(dtype),
+                        "merged_dtype": str(target),
+                    },
+                )
+    return merged
 
 
 def resolve_version(
@@ -410,6 +522,10 @@ def resolve_version(
     ``period:`` and ``latest`` see only live versions, because those ask what
     the dataset says *now*.
     """
+    if selector.selects_many:
+        raise ValueError(
+            "Use resolve_versions for a selector that names several versions."
+        )
     name = label or dataset_label(dataset_id)
     _require_dataset(dataset_id, name)
 

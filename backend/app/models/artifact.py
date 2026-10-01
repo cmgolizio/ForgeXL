@@ -89,10 +89,10 @@ ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 #: Cap on an artifact ID, so a pathological one cannot produce an unusable URL.
 MAX_ARTIFACT_ID_LENGTH = 120
 
-#: Cap on an artifact filename. Comfortably inside the 255-byte limit every
-#: common filesystem imposes, with room for the extension and for a ZIP
-#: extractor that adds a folder above it.
+#: Character cap keeps download names readable. A separate UTF-8 byte cap
+#: ensures that names with accents or non-Latin text can also be extracted.
 MAX_ARTIFACT_FILENAME_LENGTH = 150
+MAX_ARTIFACT_FILENAME_BYTES = 255
 
 #: Characters that must never appear in an artifact filename. The separators
 #: are what build plan 12F is about; the rest are refused by Windows, and a
@@ -142,7 +142,8 @@ def check_artifact_filename(filename: str) -> str:
       silently strips — a difference between the name offered and the name
       written is exactly the kind of quiet substitution this project refuses.
     * Its stem is not a reserved Windows device name.
-    * It fits :data:`MAX_ARTIFACT_FILENAME_LENGTH` characters.
+    * It fits :data:`MAX_ARTIFACT_FILENAME_LENGTH` characters and
+      :data:`MAX_ARTIFACT_FILENAME_BYTES` UTF-8 bytes.
 
     Raises:
         UnsafeArtifactFilenameError: naming which rule the filename broke.
@@ -153,14 +154,19 @@ def check_artifact_filename(filename: str) -> str:
         )
 
     if not filename.strip():
-        raise UnsafeArtifactFilenameError(
-            "An artifact filename cannot be empty."
-        )
+        raise UnsafeArtifactFilenameError("An artifact filename cannot be empty.")
 
     if len(filename) > MAX_ARTIFACT_FILENAME_LENGTH:
         raise UnsafeArtifactFilenameError(
             f"Artifact filename {filename!r} is {len(filename)} characters; "
             f"the limit is {MAX_ARTIFACT_FILENAME_LENGTH}."
+        )
+
+    byte_length = len(filename.encode("utf-8"))
+    if byte_length > MAX_ARTIFACT_FILENAME_BYTES:
+        raise UnsafeArtifactFilenameError(
+            f"Artifact filename {filename!r} is {byte_length} UTF-8 bytes; "
+            f"the limit is {MAX_ARTIFACT_FILENAME_BYTES}."
         )
 
     found = sorted(FORBIDDEN_FILENAME_CHARACTERS.intersection(filename))
@@ -228,11 +234,13 @@ def artifact_filename(stem: str, extension: str) -> str:
 
     cleaned = unicodedata.normalize("NFC", str(stem))
     cleaned = "".join(
-        " "
-        if character in FORBIDDEN_FILENAME_CHARACTERS
-        or character < " "
-        or character == "\x7f"
-        else character
+        (
+            " "
+            if character in FORBIDDEN_FILENAME_CHARACTERS
+            or character < " "
+            or character == "\x7f"
+            else character
+        )
         for character in cleaned
     )
     cleaned = " ".join(cleaned.split()).strip(" .")
@@ -243,7 +251,13 @@ def artifact_filename(stem: str, extension: str) -> str:
         cleaned = f"{cleaned} file"
 
     room = MAX_ARTIFACT_FILENAME_LENGTH - len(suffix)
-    cleaned = cleaned[:room].strip(" .") or FALLBACK_FILENAME_STEM
+    byte_room = MAX_ARTIFACT_FILENAME_BYTES - len(suffix.encode("utf-8"))
+    if room <= 0 or byte_room <= 0:
+        raise UnsafeArtifactFilenameError(
+            "The artifact extension leaves no room for a filename."
+        )
+    cleaned = cleaned[:room].encode("utf-8")[:byte_room].decode("utf-8", "ignore")
+    cleaned = cleaned.strip(" .") or FALLBACK_FILENAME_STEM
 
     return check_artifact_filename(f"{cleaned}{suffix}")
 
