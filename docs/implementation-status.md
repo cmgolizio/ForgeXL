@@ -1,15 +1,230 @@
 Implementation Status
-Last Updated: 2026-09-15 Current Phase: None Last Completed Phase: Phase 12 — Rich Artifact Output Framework. Phase 12 is complete. It is the fourth phase of the post-POC expansion. Phase 13 is not started; nothing for it has been scaffolded, stubbed or prepared — there is no report specification, no reporting Action, no rep roster and no calculation engine anywhere in the backend, and no registered Action produces an artifact.
+Last Updated: 2026-09-19 Current Phase: None Last Completed Phase: Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine. Phase 13 is complete. It is the fifth phase of the post-POC expansion. Phase 14 is not started; nothing for it has been scaffolded, stubbed or prepared — no Action renders a workbook, no registered Action produces an artifact, and there is no batch archive of anything.
 
-Architecture document. docs/architecture.md was created in Phase 6I (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1 persistence behaviour and the extension point for future persistence. Phase 9 added §5a, the persistent Data Library, Phase 10 added §5b, the monthly ingestion layer above it, Phase 11 added §5c, library-backed Action inputs, and Phase 12 added §5d, the rich artifact output framework. This file remains the phase-by-phase record.
+Architecture document. docs/architecture.md was created in Phase 6I (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1 persistence behaviour and the extension point for future persistence. Phase 9 added §5a, the persistent Data Library, Phase 10 added §5b, the monthly ingestion layer above it, Phase 11 added §5c, library-backed Action inputs, Phase 12 added §5d, the rich artifact output framework, and Phase 13 added §5e, the monthly report engine. This file remains the phase-by-phase record.
 
 Source schemas. docs/monthly-source-schemas.md was created in Phase 10A and is the authoritative description of the three recurring source files. The account-assignment schema in it is provisional and marked UNCONFIRMED.
+
+Report specification. docs/monthly-sales-rep-report-spec.md was created in Phase 13A and is the authoritative definition of the Monthly Sales Rep Report. Seven of its rules are provisional and marked as such in code; see Known Issue 109, which is the single most important thing to read before trusting a generated report.
 
 Build plan note. docs/build-plan.md was revised in commit 259615d ("changed build plan. Updated architecture"). Phase 6 is no longer "Results, Preview, Audit Summary, and Export UX" numbered 6.1–6.9; it is now "Filesystem-Independent Runtime, Results, Export, and Testing", split into subphases 6A–6I. The older Phase 6 scope survives inside 6E (results/preview/metrics/audit) and 6F (export). Entries written before that revision, and Known Issue 16 in particular, refer to the superseded numbering.
 
 This file is the durable cross-thread project state required by docs/build-plan.md §33. Every Phase must update it. docs/build-plan.md remains the authoritative architectural source of truth.
 
 Completed
+Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine
+Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
+
+Phase 13 is the first phase that uses all three post-POC foundations at once. It reads stored dataset versions through Phase 11's library-backed input slots, calculates a report, and returns its tables. It is also the first phase whose correctness is defined by a document rather than by a paragraph of the build plan — which is what 13A is for, and what made the rest of the phase checkable.
+
+The baseline was NOT clean, for the first time in four phases
+The check list the Phase 12 entry prescribes was run before any Phase 13 work, and two of its lines failed. Both were defects in the committed Phase 12 state, both are the family Known Issues 10, 31, 32, 37, 38, 70, 77, 83 and 85 name, and both were repaired before anything else was done.
+
+Check Result
+git show --name-status HEAD 19 files; the Phase 12 report lists 20, and names one that is spelled differently — FAILED
+pytest (baseline) 1,860 passed, not the 1,903 the Phase 12 entry documents — FAILED
+git branch -r main and this branch; origin/main is now at 0f772b5, so Known Issue 75 is resolved
+hyphenated module names none
+duplicate-content modules (md5) none
+npm run build module not found — FAILED, and the same cause as the first line
+npm run lint exit 0, no output
+npx pyright 0 errors
+The two repairs are Known Issues 106 and 107, and one more defect was found in this document itself and is Known Issue 108.
+
+src/components/workbench/ArtifactDownload.jsx was committed under that name while ActionRunner.jsx imports ArtifactDownloads (plural). npm run build failed outright: "Module not found: Can't resolve '@/components/workbench/ArtifactDownloads'". The application could not be built at HEAD. Repaired with git mv; no file content was edited, and the build then produced the same three routes it has produced since 6G. This is the second instance of exactly this defect — Known Issue 61 is ExportButton.jsx → ExportButtons.jsx, repaired in 6G for the same reason.
+backend/tests/test_artifact_download.py was absent from the tree. The Phase 12 entry lists it among the seven files that phase created, describes what it covers, and counts it in the 1,903 figure; commit 0f772b5 does not contain it. The 43 tests it represents had never run in the committed repository, so build plan Phase 12's exit criterion — "a test Action can generate multiple polished XLSX artifacts plus a ZIP bundle through generic ForgeXL infrastructure" — was unproven there. It was rewritten from the Phase 12 entry's own description of it, and is 35 tests rather than 43; the original is not recoverable and padding the count would be a claim about code nobody has.
+docs/implementation-status.md contained its entire contents twice, byte for byte, joined mid-line at "…needs nothing beyond what is written there.Implementation Status". 9,181 lines where 4,591 were meant. Deduplicated; the surviving copy is identical to both.
+Everything below was built on the repaired baseline: 1,895 passed, pyright clean, build succeeding.
+
+13A — The specification, and what could not be derived
+This is the phase's most important entry, and it is a problem statement rather than a result.
+
+Build plan 13A requires the specification to be derived from four things: "the current verified Excel monthly report", "the existing Power Query logic", "accepted business definitions" and "manually verified results from a completed month". None of the four exists in this repository or was supplied in this session. There is no workbook, no query, no worked example and no written definition anywhere in the tree — verified by searching it: no .xlsx, .xls, .csv or .ods file is committed, and nothing under docs/ describes a report.
+
+13A also says, in as many words: "Do not invent a formula merely because it appears reasonable. If the existing report does not establish a rule clearly, document the ambiguity and resolve it before implementation."
+
+So the specification was written the only honest way available, and it is the treatment Phase 10A already established for exactly this situation. docs/monthly-sales-rep-report-spec.md and backend/app/models/report_spec.py declare 25 rules, and every one carries its confidence in code rather than in a comment:
+
+confirmed 18 rules — established by the confirmed source schemas of Phase 10A, by a sentence of the build plan, or by a rule this application already enforces somewhere else.
+provisional 7 rules — a defensible default the finished report must confirm. Each states its reasoning and names the most likely alternative.
+The seven provisional rules are comparison_windows, known_invoice_types, placement, placement_history, sample_period, comparison_index and duplicate_source_rows. What each one does not know is listed in the specification document.
+
+Four things make the provisional part as harmless as a provisional part can be, and each is asserted by a test rather than promised:
+
+It is visible on every Run. PROVISIONAL_REPORT_RULES is a warning in the Data Quality table of every report produced, naming the rules by key, for as long as PROVISIONAL_RULES is non-empty. It disappears by itself when the last one is confirmed — the list is derived from the declarations, not maintained beside them.
+It is visible in the Action's version. 0.1.0, not 1.0.0. The two proof Actions are 1.0.0 because build plan sections 26 and 27 specify them completely; this Action's arithmetic is specified by a document that is partly provisional, and claiming 1.0.0 would assert a stability the definitions do not have. test_an_unconfirmed_specification_keeps_the_action_below_one_point_oh couples the two in both directions.
+Confirming a rule is a one-line change. The engine reads the declarations and spells no rule of its own, so KNOWN_INVOICE_TYPES, MINIMUM_PLACEMENT_HISTORY_MONTHS, the window set and the SAMPLE_PERIOD_MISMATCH severity each change in report_spec.py and the engine follows.
+Nothing was invented where evidence existed. Every column name is copied from the confirmed schema; every confirmed rule names what establishes it.
+test_the_specification_is_not_yet_confirmed fails the day the last rule is confirmed, which is deliberate: that change must also raise the version and update the document, and a failing test is what says so.
+
+The one place a source column is named twice
+ReportColumns in report_spec.py is the only place outside source_schemas.py where a source column is spelled, and it is unavoidable: something has to say which of the fifteen transaction columns holds the money. Every name in it is copied rather than invented, and a parametrized test asserts each still exists in the confirmed schema, so renaming a column there fails a test rather than producing a report built on a column that is gone.
+
+The owning rep is called Sales Rep in every table the report produces, never Sales Person. They are different facts — the rep on the document versus the account's owner — and using one name for both is precisely the "silently choose a semantically different field" of build plan section 3.3. A test asserts the two names differ and that Sales Rep is not a source column at all.
+
+13B — The Action, and the one thing Phase 11 could not do
+backend/app/actions/monthly_sales_rep_report.py. Three library-backed slots, twelve outputs, and a module short enough to read in a minute: the contract lives there and the arithmetic lives in app/services/monthly_report.py, against the declarations in app/models/report_spec.py. It is the same split app/services/workbook.py already has.
+
+One extension to Phase 11 was required, and it is this phase's only architectural change.
+
+A library-backed slot resolved to exactly one version. The Data Library stores one version per month by construction (build plan 10G), and build plan 13C requires year-over-year and year-to-date comparisons — which span up to two years of months. One version cannot supply them. Build plan 13B anticipates this in its own wording: the Action's inputs "should be resolved from exact Data Library versions and should include the historical information required by the report specification".
+
+So a fourth selector form was added:
+
+history every live version, oldest month first
+history:2026-09 every live version through that month
+Nothing about Phase 11's guarantees changed to allow it, and each is asserted in test_library_history.py:
+
+every version is still immutable and still resolved before the Action executes;
+every version read is still recorded individually, by its own ID, with its own period, source filename and hash — a history slot contributes one manifest entry per month rather than one summarising them, which is the stronger reading of build plan 11C;
+naming those IDs back reproduces the Run;
+the Action still receives {slot_id: DataFrame} and cannot tell how many months filled a slot.
+Two rules are the new form's own:
+
+The bounding month must exist. history:2026-09 against a library whose newest month is August fails with UNKNOWN_DATASET_VERSION rather than quietly reporting on August. This is what makes the reporting period derived from the data always equal to the month requested, and without it the whole of 13C's "one explicit reporting period" would rest on an assumption.
+Months that disagree about their columns are refused. INCONSISTENT_DATASET_VERSIONS, a new 422 naming the differing columns and the months that carry them. Merging them would mean inventing values for one month or dropping a column from the other. Months differing only in type — which a CSV month and a workbook month genuinely can — are merged, because widening an integer to a float changes no value.
+Recorded as Deviation 106. It is an addition in every respect: FROZEN_ROUTES is byte-identical for the third phase running, no schema field moved, MANIFEST_SCHEMA_VERSION stays at 2, and the three original selector forms behave exactly as they did.
+
+13C — One reporting period, resolved once
+The reporting period is the greatest calendar month present in Invoice Date across the sales history the Run read. From the data, never from a filename, which is the rule Phase 10B already established for ingestion; and the Run states it explicitly by bounding its selector, which the rule above makes binding.
+
+Five windows, all calendar windows inclusive of both ends, all derived from that one month: the reporting month, the month before it, the same month one year earlier, year to date, and the prior year to date. Build plan 13C's "Do not allow different sections of the same report to independently decide what 'current month' means" is enforced structurally — every table asks the ReportPeriod object, and no table computes a date.
+
+A leap February compares with a non-leap February without either being truncated, January compares with the December before it, and a window that contains no rows reports MISSING_COMPARISON_PERIOD and null growth rather than zero growth. Each has its own test.
+
+13D — The roster is read, never written down
+The reps are the distinct non-blank Sales Person values in the account-assignment snapshot for the month. No roster exists in the source code, and three tests prove the consequence build plan 13D asks for: a rep the snapshot adds appears, a rep the snapshot drops stops appearing, and renaming every rep on every transaction changes the roster not at all — because ownership is the snapshot's job (build plan 9E).
+
+A rep with no activity still gets a report row, with zeroes and null growth. Someone who sold nothing needs to see that as much as someone who sold well, and omitting them would make a rep's absence from the bundle ambiguous.
+
+13E — Prepared once
+One prepared model per Run: dates read through app.services.reporting_period.read_dates — the same reader ingestion uses, not a second one — measures cast strictly, ownership joined on. Every rep's figures are then a grouped aggregation over that one frame, so a company of forty reps costs one pass rather than forty.
+
+Nothing is mutated. A test clones all three input frames, runs the whole engine and asserts every one is unchanged, schema included (build plan 13E: "Do not mutate original Data Library versions").
+
+Preparation deliberately happens twice per Run — once in validate() and once in run(). An Action instance is registered at import time and reused for every Run, so it must hold no per-Run state (build plan section 24), and there is nowhere to cache the model between the two calls. Preparation is deterministic and side-effect free, so doing it twice gives the same answer twice; a test asserts that directly. Recorded as Deviation 109 rather than left as a silent cost.
+
+13F — Twelve tables
+Every category build plan 13F lists is answered, and the mapping is data (ReportSection.categories) rather than prose that could drift from it. test_every_13f_category_is_answered_by_a_section fails if a category has no table, and test_no_section_claims_a_category_build_plan_13f_does_not_list fails if a table claims one 13F never listed.
+
+rep_summary, account_performance, supplier_performance, supplier_comparison, product_performance, placements, placement_detail, samples and sample_detail carry a Sales Rep column and hold every rep's rows in one frame. company_summary and company_supplier_performance carry none, because they are the same for every rep (build plan 13G). data_quality is 13F's "supporting validation/detail tables".
+
+One frame per section rather than one per rep is forced and also right: an Action declares a fixed set of outputs and the roster is dynamic, so a table per rep could not be declared — and 13G wants the company's figures calculated once rather than rebuilt per rep, which is what one frame gives. Phase 14 slices them by Sales Rep.
+
+13G — Company figures, calculated once
+company_figures() runs once per Run and every rep's share, index and comparison reads it. A test asserts that every row for one supplier reports the same company revenue and the same company share, whichever rep it belongs to — two reps cannot be shown company totals that disagree.
+
+The company-versus-rep table gives every rep a row for every supplier the company sold, not only for the ones they sold themselves: a supplier a rep sells nothing of is the interesting row in a comparison, and dropping it would leave the gap invisible.
+
+Zero and null are kept apart throughout, which is build plan 13A's "treatment of zero/null values":
+
+a share whose whole is zero has no answer, and is null — a rep who sold nothing has no supplier mix;
+a share whose part is zero and whose whole is not is 0.0 — a rep who sells none of one supplier has a real 0% of it;
+growth against a zero or absent prior period is null, never 0;
+a count with no rows behind it is 0, because that is a fact.
+Every one has its own test, and _fill_counts is applied to counted columns only, never to a share or a growth figure.
+
+13H — Fail, or qualify
+Sixteen conditions, each declared with a severity and the reason for it. Build plan 13H's rule — "fail where a condition makes the report unsafe; warnings only when continuing is genuinely safe" — is applied by asking what the condition would do to the numbers while every number still looked plausible.
+
+Eight are errors, returned from the Action's validate() hook so the Run fails with a structured 422 before a single table is calculated: EMPTY_SALES_HISTORY, MALFORMED_INVOICE_DATE, NON_NUMERIC_MEASURE, MISSING_MEASURE, MISSING_ACCOUNT_OWNERSHIP, DUPLICATE_ACCOUNT_OWNERSHIP, NO_SALES_REPS, SAMPLE_PERIOD_MISMATCH.
+
+Seven are warnings and travel in the data_quality table: UNRECOGNISED_SALES_REP, UNEXPECTED_INVOICE_TYPE, UNEXPECTED_SOURCE_COLUMNS, DUPLICATE_SOURCE_ROWS, MISSING_COMPARISON_PERIOD, SHORT_PLACEMENT_HISTORY, PROVISIONAL_REPORT_RULES.
+
+Three of the splits are worth stating, because each could plausibly have gone the other way:
+
+An unowned account with activity fails. Its revenue would be in the company total and in no rep's report, so every rep's share of the company would be wrong. An unowned account with no activity is not a problem and is not reported — scoping the check to the windows the report measures is what keeps a closed account from blocking a month.
+An unrecognised rep on a transaction only warns. That column attributes nothing; revenue follows the account's owner. A test renames every rep on every transaction and asserts rep_summary is byte-identical.
+A blank measure fails and is never read as zero. Reading it as zero is a substitution that understates a total invisibly (build plan section 3.3). Neither is a currency-formatted value repaired: $1,234.56 and (45.00) are reported as NON_NUMERIC_MEASURE, and nothing is stripped before the cast, for the same reason Phase 10B does not strip a date.
+Warnings could not be returned from validate(): everything an Action returns there fails the Run, and an Action has no warning channel of its own. Putting them in a result table is also where a reader wants them — beside the report they qualify. Recorded as Deviation 107.
+
+13I — The golden month
+Build plan 13I asks for a previously completed monthly report whose values have been manually spot-checked. None exists here, so what is frozen instead is a month small enough to work out by hand and wide enough to exercise every rule: twelve sales rows and three sample rows across four months, three reps, four accounts, two suppliers, three products, one credit and two placements.
+
+Every figure in tests/fixtures/report_months.py EXPECTED was calculated from those rows with a pencil. A figure captured from a run would only prove the implementation agrees with itself.
+
+The month is shaped so that nothing is vacuous: all five windows contain rows; one rep owns two accounts and another one, so rep totals and company totals are different sums; one rep owns an account that never trades, so a silent rep still gets a row; the credit carries a negative quantity and a negative value, so the signed treatment of returns is visible in a total; two placements happen and two near-misses do not — a product the account already bought, and a credit; one rep sells a supplier the other does not, so the comparison has a zero row and a share above the company's; and accented producer and selection values travel through every table.
+
+The values, all asserted:
+
+Company September 2026 995.00 revenue, 33 units, 5 lines, 3 accounts sold
+month over month 540.00 prior → +84.259259%
+year over year 800.00 prior → +24.375%
+year to date 1,535.00 against 1,150.00 → +33.478261%
+Beth Comeaux 755.00, 75.879397% of the company, 2 placements
+Kevin Wardell 240.00 (300.00 invoiced less a 60.00 credit), −20% year over year
+Jennifer Jones 0.00, null growth, 0.0% share, still on the roster
+Suppliers Acme Imports 575.00 (57.788945%), Global Vines 420.00 (42.211055%)
+Kevin vs company Global Vines: 100% of his sales against 42.211055% of the company's — an index of 2.369048
+Placements (Acme Wine Bar, SKU-300) 200.00 on 2026-09-05; (Corner Bottle, SKU-200) 180.00 on 2026-09-09
+Samples 2 lines, 3 units, 125.00 — counted separately and never added to sales
+The rep revenues add to the company revenue exactly, which is true only because every account has exactly one owner; a test asserts it, and it is the arithmetic consequence of the two ownership errors being errors.
+
+What Phase 13 deliberately did not do
+No workbook, no artifact, no ZIP. Build plan Phase 13's exit criterion is the calculations "before any attention is paid to workbook appearance". The Action returns tables and test_the_action_produces_no_artifact asserts it. Known Issue 99 is therefore Phase 14's to close, not this phase's — the Phase 12 entry predicted otherwise and was reading 12E's example rather than 13's exit criterion.
+No new dependency. package.json, package-lock.json and backend/requirements.txt are untouched.
+No new route. FROZEN_ROUTES is byte-identical for the third phase running.
+No change to the Data Library. No model, interface or stored record gained a field, for the fifth phase running.
+No change to either proof Action. Both are still upload-backed, still 1.0.0, still artifact-free, and the contract freeze pins all three facts.
+The frontend needed one change, and it was not optional
+Phase 11's entry records that the frontend needed nothing because no registered Action had a library-backed slot. Registering one changed that: the Action selector can now reach an Action with nothing to upload, and ActionRunner rendered a FileUploadSlot for each of its three inputs — controls accepting no extensions, above a Run button that would submit a form with no references and be refused.
+
+So src/components/workbench/LibraryInputSlot.jsx was added: a read-only panel showing the slot's label, description and required columns, and saying there is nothing to upload. The Run button is disabled for any Action with such a slot, with one line saying the reporting period is chosen in the Monthly Reports workflow.
+
+It is entirely generic. Every branch is on input.source, which is backend metadata; no Action ID, slot ID or dataset name appears in any frontend file, and the two proof Actions render exactly as before. Verified in a real headless browser — see Tests. Recorded as Deviation 108, because build plan Phase 13 describes no UI and this is the smallest change that stops the application misrepresenting its own registry.
+
+Verification
+Check Result
+pytest (at HEAD, before any work) 1,860 passed — not the documented 1,903 (Known Issue 106)
+pytest (after the two repairs) 1,895 passed
+pytest (after Phase 13) 2,150 passed, 0 failures, 0 skips, 0 xfails — 255 added
+npx pyright 0 errors, 0 warnings, 0 informations
+npm run lint exit 0, silent
+npm run build exit 0 (it failed at HEAD), same three routes
+npm run dev + real HTTP both servers up; a report Run through /forge-api/* succeeded in 167 ms
+live library, real path four sales months, two sample months (one XLSX) and one snapshot committed to data/library/, then a report run against them
+report values over HTTP every figure matched the hand-worked ones exactly
+whole-run workbook 12 correctly named worksheets; percentages still Float64; accents intact
+real headless Chromium three Actions in the selector; three stored-data panels; Run disabled with its reason; proof Actions unchanged; no console errors
+git status during the live check data/ shows as ignored (!!), never untracked; removed afterwards
+The live check is the one thing no unit test can prove, because the suite redirects DATA_LIBRARY at a temporary directory. One was performed against the real config.LIBRARY_DIRECTORY: four sales months and one snapshot committed as CSV, two sample months committed as XLSX so the workbook path was exercised end to end (recorded as fastexcel-calamine, worksheet Data), then a report run through the Next.js proxy. The manifest recorded seven library versions across three slots, the company summary downloaded as CSV read September 2026,3,4,995.0,33.0,5,3,540.0,… and the whole-run workbook carried all twelve sheets. The directory was removed afterwards and git status confirmed at every step that git never saw it.
+
+Files created
+
+docs/monthly-sales-rep-report-spec.md — the 13A specification
+backend/app/models/report_spec.py — the same specification in code: 25 rules, 12 sections, 16 conditions, the column roles (13A)
+backend/app/services/monthly_report.py — the calculation engine: period, prepared model, company figures, every table, every check (13C–13H)
+backend/app/actions/monthly_sales_rep_report.py — the registered Action (13B, 13D)
+backend/tests/fixtures/report_months.py — the golden month and its hand-worked answers (13I)
+backend/tests/test_report_spec.py — 85 tests (13A)
+backend/tests/test_monthly_report.py — 77 tests (13C–13H)
+backend/tests/test_golden_month.py — 54 tests (13I, and the Action end to end)
+backend/tests/test_library_history.py — 31 tests (the history selector of 13B)
+backend/tests/test_artifact_download.py — 35 tests; the Phase 12 module that was never committed (Known Issue 106)
+src/components/workbench/LibraryInputSlot.jsx — a library-backed slot in the workbench
+Files modified
+
+backend/app/models/library.py — DatasetSelectorKind.HISTORY, its two text forms, selects_many
+backend/app/errors.py — InconsistentDatasetVersionsError
+backend/app/models/run.py — one docstring paragraph: library_inputs is one record per version read, not per slot
+backend/app/services/input_resolution.py — ResolvedLibrarySlot, resolve_versions, history_versions, \_merge_versions; resolve_slot now returns a slot rather than a version
+backend/app/services/runner.py — the library stage flattens a slot's versions into the manifest's records; two docstrings
+backend/app/actions/registry.py — the third Action imported and registered
+backend/tests/test_contract_freeze.py — four additions: the third Action in FROZEN_ACTIONS, a new FROZEN_PROOF_ACTIONS list the behavioural tests parametrize over, INCONSISTENT_DATASET_VERSIONS in FROZEN_ERRORS, and the new module in ACTION_MODULES. No frozen value moved and FROZEN_ROUTES is byte-identical.
+backend/tests/test_actions.py, backend/tests/test_api.py, backend/tests/test_library_inputs.py — three tests that pinned "both proof Actions" as the whole registry now pin them by name and by position, which is a stronger assertion than the sweep they replaced
+src/components/workbench/ActionRunner.jsx — an upload slot and a library slot render differently; the Run button accounts for the second
+README.md — the Monthly Sales Rep Report section and one link
+docs/architecture.md — §5e (the report engine), §5c (the history selector, the per-version records, the frontend note), two rows in §2, one row in §10, one paragraph in §5d
+docs/implementation-status.md
+Files renamed
+
+src/components/workbench/ArtifactDownload.jsx → src/components/workbench/ArtifactDownloads.jsx (Known Issue 107 — the build failed without it)
+Files deleted
+
+none
+package.json, package-lock.json and backend/requirements.txt are untouched — Phase 13 added no dependency.
+
+
 Phase 12 — Rich Artifact Output Framework
 Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
 
@@ -1091,7 +1306,21 @@ The runs_dir fixture was replaced, not just deleted. Over a hundred tests declar
 
 Three tests pointed config.DATA*DIRECTORY at a nonexistent path to prove nothing was written there. With the setting gone they watch the working directory instead — a stronger probe, since the backend now has nowhere configured at all. One new test, test_the_backend_has_no_data_directory* setting_left, pins the removal itself so it cannot be quietly undone.
 
-test_contract_freeze.py needed one change, and it is not a contract change. The Next Phase note said 6I had no reason to touch it. One test in it monkeypatched config.DATA_DIRECTORY, so the removal forced the same probe substitution as above. No frozen value moved: not a route, an error code, a metric key, a schema field or a limit. FROZEN_ROUTES is byte-identical. The module docstring records the amendment as the previous two are recorded.
+test_contract_freeze.py needed one change, and it is not a contract change. The A `history` selector was added to the Data Library reference forms, and it is this phase's only architectural change. Build plan Phase 11 resolved exactly one dataset version per input slot. The report needs a span of months — build plan 13C requires year-over-year and year-to-date comparisons, the library stores one version per month (10G), and one version cannot supply them — and build plan 13B anticipates it in its own wording: the Action's inputs "should be resolved from exact Data Library versions and should include the historical information required by the report specification". So `history` and `history:YYYY-MM` join `latest`, `period:` and `version:`. It is an addition in every respect that can be checked: no route (FROZEN_ROUTES is byte-identical for the third phase running), no schema field, no change to MANIFEST_SCHEMA_VERSION, and the three original forms behave exactly as before — asserted by the whole of the untouched test_library_inputs.py. Every Phase 11 guarantee is preserved and separately asserted in test_library_history.py: immutable versions, resolution before execution, every version recorded by its own ID, reproducibility by naming them back, and an Action that still receives one frame. Two rules are the new form's own and both exist to prevent a silent wrong answer: a bounding month that has no committed version fails rather than falling back to an earlier one, and months whose exports carry different columns are refused rather than merged.
+
+Warnings travel in a result table rather than through the Action's validation hook. Build plan 13H asks for warnings where continuing is genuinely safe, and an Action has no way to emit one: everything `Action.validate()` returns becomes a validation error and fails the Run. The seven warning conditions therefore appear in the `data_quality` output, which build plan 13F's "supporting validation/detail tables" provides for. It is also where a reader wants them — arriving with the report they qualify rather than in a channel that suppressed it. The alternative, a warning channel on the Action contract, would change a frozen interface for one Action's benefit and is a build-plan question rather than a local decision.
+
+One frontend component was added, although build plan Phase 13 describes no UI. Registering an Action with library-backed slots made the Action selector able to reach one, and ActionRunner rendered a FileUploadSlot for each of its three inputs: upload controls accepting no extensions, above a Run button that would submit a form with no references. The smallest change that stops the application misrepresenting its own registry is LibraryInputSlot.jsx — a read-only panel — and a disabled Run button with one line saying where the reporting period is chosen. Every branch is on `input.source`, which is backend metadata: no Action ID, slot ID or dataset name appears in any frontend file, and the two proof Actions render exactly as before. The reporting-period picker itself remains build plan 15A's.
+
+The report Action is version 0.1.0, not 1.0.0. Build plan 13B says "use an appropriate semantic version". The two proof Actions are 1.0.0 because build plan sections 26 and 27 specify their behaviour completely and it cannot move; this Action's arithmetic is specified by a document seven of whose rules are provisional (Known Issue 109), so 1.0.0 would assert a stability the definitions do not have. Every Run records the Action version, so a report generated today is distinguishable from one generated after the definitions are confirmed, and a test couples the version to the specification's status in both directions.
+
+The report engine lives in app/services/ rather than inside the Action module. Build plan 6D.3 keeps transformation logic out of React, upload handlers, FastAPI routes, parser utilities and export utilities — the pipeline layers — and build plan section 15 asks for clear modules and no giant files. A calculation engine imported by exactly one Action is neither a pipeline layer nor a second Action: it is that Action's logic, organised. The precedent is already in this repository — ingestion.py carries the ownership rules, reporting_period.py carries the month rules — and the split matches the one app/services/workbook.py already has with the Actions that will render reports. The Action module keeps the contract: ID, version, slots, outputs, validation hook. The contract freeze asserts the two application modules an Action may reach and that app.services.data_library is still not one of them.
+
+test_contract_freeze.py was amended an eighth time — every part of it an addition. A third Action in FROZEN_ACTIONS, a new FROZEN_PROOF_ACTIONS list, one error row (INCONSISTENT_DATASET_VERSIONS) and one entry in ACTION_MODULES. Nothing already frozen moved: not a route, an error code already listed, a metric key, a field's position or meaning, a limit, or the manifest version. The new list deserves its own note, because it is the only amendment that could be read as a weakening and is not. Eight behavioural tests — deterministic output, first-occurrence order, accents and blanks surviving, the row metrics adding up — drive an Action with one generic input frame and assert the deduplication rules build plan sections 26 and 27 fix. They are statements about those two Actions, and were parametrized over the whole inventory only because the whole inventory was those two. They now parametrize over FROZEN_PROOF_ACTIONS explicitly. Every contract check — identity, slots, outputs, metadata immutability, the run signature, no filesystem import, no artifact — still runs over all three.
+
+The report's expected figures are hand-worked from a synthetic month rather than taken from a completed monthly report. Build plan 13I asks for "at least one previously completed monthly report whose values have been manually spot-checked", reproduced as synthetic fixtures. No such report exists here (Known Issue 109), so the fixture is a month small enough to calculate by hand and wide enough to exercise every rule: all five windows populated, a rep with two accounts and a rep with one, a rep with none, a credit, two placements and two near-misses, a supplier one rep does not sell, and accents throughout. Every figure in EXPECTED was calculated from the rows with a pencil rather than captured from a run — a captured figure would only prove the implementation agrees with itself. What this does not prove is that the rules are the business's rules; that is what confirming the specification is for.
+
+Next Phase note said 6I had no reason to touch it. One test in it monkeypatched config.DATA_DIRECTORY, so the removal forced the same probe substitution as above. No frozen value moved: not a route, an error code, a metric key, a schema field or a limit. FROZEN_ROUTES is byte-identical. The module docstring records the amendment as the previous two are recorded.
 
 6I.2 — the Phase 6A audit re-run. Every search that document's §1 prescribes was re-run against backend/app and src. Results:
 
@@ -1203,7 +1432,25 @@ No application code was written. Phase 1 was not started.
 Audit conclusions
 
 A Next.js App Router project already exists and matches the build plan's required stack: JavaScript (no TypeScript), Tailwind CSS, ESLint. It must not be recreated (Phase 1.1).
-The project uses a src/ directory (src/app/). Build plan §10 sketches a root-level app/, but Phase 1.1 states: "Do not add a src/ folder unless the repository already uses one. Prefer the simplest existing convention." The repository already uses one, so src/ is retained. See Deviations From Build Plan.
+The project uses a src/ directory (src/app/). Build plan §10 sketches a root-level app/, but Phase 1.1 states: "Do not add a src/ folder unless the repository already uses one. Prefer the simplest existing convention." The repository already uses one, so src/ is retained. See The report's business definitions are not confirmed, and this is the most important thing on this page. Build plan 13A requires the specification to be derived from the current verified Excel monthly report, the existing Power Query logic, the accepted business definitions and a manually verified completed month. **None of those four exists in this repository or was supplied.** Seven of the report's 25 rules are therefore provisional defaults, marked `Confidence.PROVISIONAL` in app/models/report_spec.py and listed in docs/monthly-sales-rep-report-spec.md: comparison_windows, known_invoice_types, placement, placement_history, sample_period, comparison_index and duplicate_source_rows. What is genuinely unknown is which comparison windows the finished report shows, the real set of Invoice Type values, the finished report's placement definition and its look-back, whether a month with no imported sample file should fail or warn, how the company-versus-rep comparison is expressed, and what the business counts as a duplicated monthly import. A report generated today is arithmetically correct **against those defaults** and must not be treated as matching the existing manual report until each is checked. Three things make that visible rather than assumed: PROVISIONAL_REPORT_RULES appears in every Run's Data Quality table naming the rules, the Action's version is 0.1.0 rather than 1.0.0, and a test fails the day the last rule is confirmed so the version and the document are updated with it. Confirming one is a one-line change in report_spec.py; the engine reads the declarations and spells no rule of its own.
+
+The Phase 12 commit is missing a test module this document says it contains. backend/tests/test_artifact_download.py is listed among the seven files the Phase 12 entry created, is described in the test-module list, and is counted in its 1,903 figure. Commit 0f772b5 ("phase 12 complete") does not contain it: the tree at HEAD ran 1,860 tests. The 43 tests it stood for had never run in the committed repository, so build plan Phase 12's exit criterion was unproven there. Repaired in Phase 13 by rewriting it from the Phase 12 entry's own description — 35 tests covering both artifact routes, the batch ZIP, its safety and determinism, the RFC 6266 filename handling and the exit criterion end to end. It is 35 and not 43 because the original is not recoverable and padding the count would be a claim about code nobody has. This is the eleventh instance of the family Known Issues 10, 31, 32, 37, 38, 70, 77, 83 and 85 name, and the second where a phase entry describes a file that is not in its commit. The check that caught it is the one the Phase 12 entry itself prescribes first — run the suite and compare the figure — which is now worth more than ever.
+
+The Phase 12 commit could not be built. src/components/workbench/ArtifactDownload.jsx was committed under that name while src/components/workbench/ActionRunner.jsx imports @/components/workbench/ArtifactDownloads. npm run build failed outright at HEAD with "Module not found", so the application could not be produced from the committed tree at all — and the Phase 12 entry records npm run build as exit 0, which it cannot have been with that commit. Repaired in Phase 13 with git mv; no file content was edited. This is the second instance of exactly this defect: Known Issue 61 is ExportButton.jsx → ExportButtons.jsx, found and repaired in 6G for the same reason. Two occurrences of one mistake in one repository is a pattern, and the check that catches it is npm run build, which the start-of-phase list already includes — it was not run, or its failure was not acted on.
+
+docs/implementation-status.md contained itself twice. The committed file was 9,181 lines where 4,591 were meant: the entire document appeared a second time, byte for byte, joined mid-line at "…needs nothing beyond what is written there.Implementation Status". Both copies were verified identical before one was removed. Harmless to the application and corrosive to this document's purpose — a reader following it finds every entry, every known issue and every deviation twice, with no way to tell which copy a later session edited. Nothing in the start-of-phase check list looks at this file's own integrity; a line count is the cheap check.
+
+A reporting-period mismatch between the sales history and the ownership snapshot cannot be detected. The report derives its month from the sales data and takes whatever account-assignment snapshot the Run resolved. It cannot cross-check the two, because build plan 11B is explicit that an Action receives DataFrames and never version metadata — so the engine cannot see that the snapshot it was handed is September's while the sales history it was handed ends in August. The user states both months explicitly (history:2026-09 beside period:2026-09) and the Run manifest records the snapshot's period, so a mismatch is visible after the fact; it is not refused. Build plan 13H lists reporting-period mismatch among the conditions to detect and this is the part of it that cannot be detected from inside an Action. Build plan 15A's workflow resolves all three slots from one chosen period, which removes the possibility rather than detecting it, and is the right place to fix it.
+
+Placements depend on how much history the Run read. The placement rule is "first positive sale anywhere in the sales history this Run read", so a Run bounded at history:2026-09 over four stored months and the same Run over forty months can disagree about whether a placement is new. That is a property of the rule rather than a defect — it is reproducible, because the Run records every version it read — but it means a report's placement count is only as meaningful as the history behind it. SHORT_PLACEMENT_HISTORY warns when fewer than twelve months precede the reporting month. The rule itself is provisional (Known Issue 109); a fixed look-back window is the most likely alternative and is one line.
+
+The engine prepares its model twice per Run. validate() and run() each call prepare(), because an Action instance is registered once and reused for every Run and so may hold no per-Run state (build plan section 24). Preparation is one pass over the sales and sample frames — date reading, two casts, one join — so the cost is roughly a second pass over the inputs, not a second report. It was measured at 167 ms for the whole Run against four stored months over real HTTP. If a real company's history makes it matter, the answer is a per-call cache passed between the two hooks, which would be a change to the Action contract and therefore a build-plan question rather than a local optimisation.
+
+The report holds every rep's rows in one frame per section, uncapped. Twelve tables, each with a Sales Rep column, held in memory for the life of the Run like any result. That is what makes build plan 13G's "calculate company data once" possible and what Phase 14 will slice by rep. For a real month — tens of thousands of transaction rows and a few dozen reps — the detail tables are the largest and are bounded by the reporting month's own row count. There is no cap and deliberately none: build plan §7 asks for evidence before infrastructure.
+
+Nothing opens a generated report in Excel. Unchanged from Known Issue 105 and now worth acting on: Phase 13 produces the tables Phase 14 will render, and the first workbook a person sees will be Phase 14's. Opening one on the target Mac is still worth doing once.
+
+Deviations From Build Plan.
 The frontend was still the unmodified Create Next App starter. Cleaning it up is Phase 1.2 and was deliberately not done in Phase 0.
 No backend existed. No backend/, data/, components/, lib/, or scripts/ directory existed yet.
 node_modules/ was not installed; no npm install had been run.
@@ -1866,6 +2113,13 @@ whole-Run workbook when >1 result
 (renamed from ExportButton.jsx in 6G: the
 file was misnamed and no importer resolved
 — see Known Issue 61)
+src/components/workbench/LibraryInputSlot.jsx (13)
+a slot that reads stored data: label,
+description, required columns and a line
+saying there is nothing to upload. Rendered
+whenever input.source is "library", which is
+backend metadata — no Action ID, slot ID or
+dataset name appears in it.
 src/components/workbench/ArtifactDownloads.jsx (12G)
 the files a Run produced: one row per
 artifact with its label, filename, kind and
@@ -1897,6 +2151,9 @@ base.py Action contract + ActionResult
 registry.py ActionRegistry, ACTION*REGISTRY, lookups
 exact_duplicate_remover.py
 product_master_builder.py
+monthly_sales_rep_report.py the Action contract for the
+report; the arithmetic is in
+services/monthly_report.py (13B)
 api/
 **init**.py
 actions.py GET /api/actions
@@ -1915,6 +2172,10 @@ KNOWN_DATASETS (9A/9B)
 source_schemas.py the canonical schemas of the three recurring
 source files. The only place a source column
 name is spelled (10A)
+report_spec.py the monthly report's business definitions:
+25 rules with their confidence, 12 sections,
+16 conditions with their severity, and the
+column roles. Declarations only (13A)
 services/
 **init**.py
 run_store.py RunStore, InMemoryRunStore, RUN_STORE (6B)
@@ -1947,10 +2208,15 @@ reporting_period.py which month a file covers, read from its date
 column; refuses an ambiguous one (10B)
 ingestion.py monthly commits, the coordinated three-file
 cycle, the historical bootstrap (10C-10G)
-input_resolution.py a dataset reference -> one immutable version
+input_resolution.py a dataset reference -> immutable version(s)
 -> a DataFrame, resolved before the Action
 runs. The only place a moving selector
-stops moving (11B-11D)
+stops moving (11B-11D); `history` resolves a
+span of months and records each one (13B)
+monthly_report.py the monthly report's arithmetic: the period,
+the prepared model, the company figures
+calculated once, every table and every check.
+Spells no business rule of its own (13C-13H)
 tests/
 **init**.py
 conftest.py quarantine (an empty cwd, autouse), Run Store,
@@ -1964,6 +2230,9 @@ large_table() (6H)
 monthly_sources.py synthetic sales / sample / assignment files,
 built on Table so each renders as either
 upload format (10)
+report_months.py the golden month and its hand-worked
+answers: 12 sales rows, 3 sample rows, 4
+months, and EXPECTED (13I)
 action_cases.py known input -> Action -> expected output (6H)
 test_actions.py Action contract + registry
 test_api.py /health and /api/actions
@@ -2036,7 +2305,23 @@ test_workbook.py the report renderer: every 12D item, verified
 by reopening the rendered bytes (12D)
 test_artifact_download.py the two artifact routes, the batch ZIP,
 its safety and determinism, and the Phase 12
-exit criterion end to end (12F/12G)
+exit criterion end to end (12F/12G).
+Rewritten in Phase 13: the Phase 12 commit
+does not contain it (Known Issue 106)
+test_report_spec.py the specification itself: every rule's
+confidence, the couplings the status drives,
+the column roles, 13F's categories and 13H's
+conditions (13A)
+test_monthly_report.py the engine: the period and its windows, the
+roster, the prepared model, company figures
+calculated once, and every condition with
+its declared severity (13C-13H)
+test_golden_month.py the hand-worked figures, value by value, and
+the Action end to end against real committed
+library versions (13I)
+test_library_history.py the history selector: what it resolves, what
+it refuses, and every Phase 11 guarantee it
+had to preserve (13B)
 benchmarks/ NOT collected by pytest (testpaths=tests and
 the test*\*.py glob). Run directly:
 `.venv/bin/python -m tests.benchmarks.run`
@@ -2083,7 +2368,10 @@ multipart: action_id + one field per slot ID —
 a file for an upload slot, and since Phase 11
 text naming a stored version for a
 library-backed one (`latest`, `period:YYYY-MM`
-or `version:<version id>`). (11A)
+or `version:<version id>`, and since Phase 13
+`history` or `history:YYYY-MM`, which name a
+span of months rather than one version).
+(11A, 13B)
 Uploads are read into memory and parsed from
 there (6C); a library reference is resolved to
 one immutable version and loaded as a DataFrame
@@ -2097,11 +2385,14 @@ Run is written to the library.
 The manifest carries result metadata on every
 output and a derived `audit` summary (6E), plus
 `library_inputs` naming the exact dataset
-versions the Run read (11C) and, since Phase 12,
+versions the Run read — one record per version,
+so a slot that read a span of months contributes
+one per month (11C, 13B) — and, since Phase 12,
 `artifacts` describing any finished files the
 Action produced beside its tables (12A-12C);
-`schema_version` is still 2 — every Phase 11 and
-Phase 12 addition has a default.
+`schema_version` is still 2 for the third phase
+running: every Phase 11, 12 and 13 addition has
+a default, and Phase 13 added no field at all.
 400 malformed request (no action_id)
 404 unknown Action
 413 upload over MAX_UPLOAD_BYTES
@@ -2110,9 +2401,12 @@ EMPTY_FILE for a zero-byte upload (6C),
 DUPLICATE_COLUMNS for a header row that
 names two columns the same thing (7B),
 INVALID_DATASET_SELECTOR for a reference
-that is not one of the three forms, and
+that is not one of the five forms,
 UNKNOWN_DATASET / UNKNOWN_DATASET_VERSION
-for one that names nothing stored (11E)
+for one that names nothing stored (11E),
+and INCONSISTENT_DATASET_VERSIONS for a
+`history` selector whose months do not
+describe the same columns (13B)
 500 Action raised, or DATA_LIBRARY_ERROR if
 the library's stored state could not be
 read
@@ -2192,7 +2486,7 @@ Every error body has the shape build plan section 22 specifies:
 {"error": {"code": "...", "message": "...", "details": {...}}}
 FastAPI's own /docs, /redoc and /openapi.json are present by default; the OpenAPI schema now documents ActionDefinition, ActionInput, ActionOutput and ActionListResponse.
 
-Registered Actions (2):
+Registered Actions (3):
 
 exact_duplicate_remover 1.0.0 "Exact Duplicate Remover"
 input source_file upload .csv .xlsx no required columns
@@ -2203,11 +2497,29 @@ input sales_file upload .csv .xlsx
 required columns SKU, Vintage, Supplier, Producer,
 Selection, Volume
 output product_master csv, xlsx
+
+monthly_sales_rep_report 0.1.0 "Monthly Sales Rep Report" (Phase 13)
+input sales_history library sales_history
+input sample_history library sample_history
+input account_assignments library account_assignments
+required columns the confirmed source schemas (15, 15, 2)
+outputs rep_summary, company_summary,
+account_performance, supplier_performance,
+company_supplier_performance,
+supplier_comparison, product_performance,
+placements, placement_detail, samples,
+sample_detail, data_quality — csv, xlsx each
 The Phase 2 placeholder example_passthrough was removed in Phase 4.
 
-Both are upload-backed, and the contract freeze pins that. Phase 11 made a library-backed input slot possible; no registered Action uses one, because build plan 11A explicitly says neither proof Action should have to change. The first Action that reads the Data Library is build plan Phase 13's monthly report.
+The report Action is the first that reads the Data Library and the first below
+version 1.0.0. The version is a statement about its definitions rather than
+about its code: seven of the report's business rules are provisional until the
+finished monthly report confirms them (Known Issue 109), and a test couples the
+version to that status in both directions.
 
-Neither produces an artifact either, and the contract freeze pins that too. Phase 12 made artifacts possible; build plan 12B is explicit that no Action has to produce one, and test_no_registered_action_produces_artifacts fails if a later phase quietly turns a deduplicator into a report.
+Both proof Actions are upload-backed, and the contract freeze pins that. Phase 11 made a library-backed input slot possible and build plan 11A explicitly says neither proof Action should have to change; neither did. Phase 13's monthly report is the first Action that reads the Data Library, and it reads three datasets.
+
+No registered Action produces an artifact, and the contract freeze pins that too — the report Action included. Phase 12 made artifacts possible; build plan 12B is explicit that no Action has to produce one, and build plan Phase 13's exit criterion is the calculations "before any attention is paid to workbook appearance". Rendering them is Phase 14. test_no_registered_action_produces_artifacts covers all three Actions and fails if a later phase quietly turns a deduplicator into a report.
 
 Adding an Action (the architecture being proven)
 Write backend/app/actions/<action>.py — subclass Action, declare metadata, implement run().
@@ -2215,7 +2527,9 @@ Import it in backend/app/actions/registry.py and add it to ACTION_REGISTRY.
 Add tests (and fixtures).
 Nothing else in the backend changes, and — once Phase 5 exists — no frontend file changes, because the UI is built entirely from GET /api/actions.
 
-Since Phase 11 an input slot may read stored business data instead of an upload: declare it with source=ActionInputSource.LIBRARY and the dataset_id it reads, and nothing else about the Action changes. run(inputs) is identical, and it must not import app.services.data_library — resolving a version is the runner's job, and the contract freeze fails an Action that tries (build plan 11B). The browser has no version picker yet, so such an Action is driven in-process or by naming the version in the request form until build plan 15A builds one.
+Since Phase 11 an input slot may read stored business data instead of an upload: declare it with source=ActionInputSource.LIBRARY and the dataset_id it reads, and nothing else about the Action changes. run(inputs) is identical, and it must not import app.services.data_library — resolving a version is the runner's job, and the contract freeze fails an Action that tries (build plan 11B). Since Phase 13 such a slot may read a span of months rather than one version, by naming `history` or `history:YYYY-MM`; the Action still receives one frame and still cannot tell.
+
+The browser has no version picker yet, so such an Action is driven in-process or by naming the versions in the request form until build plan 15A builds one. The workbench renders its slots read-only and disables the Run button, with one line saying where the reporting period is chosen (Phase 13).
 
 npm scripts
 dev concurrently -> dev:web + dev:api
@@ -2236,20 +2550,20 @@ devDependencies gained concurrently ^10.0.5. No other dependency was added.
 Directory status vs build plan §10
 Path Status
 src/app/ Exists (plan sketches root app/; src/ retained per 1.1)
-src/components/ Exists (backend/, workbench/ — 11 components; ArtifactDownloads.jsx added in 12G)
+src/components/ Exists (backend/, workbench/ — 12 components; ArtifactDownloads.jsx added in 12G and correctly named in 13, LibraryInputSlot.jsx added in 13)
 src/lib/ Exists (api.js, formatters.js, backend-origin.js — 6G)
 backend/app/ Exists (main.py, config.py)
 backend/app/api/ Exists (actions.py, runs.py, upload_form.py; the hyphenated duplicate was removed in Phase 7)
-backend/app/actions/ Exists (base.py, registry.py, the two proof Actions)
-backend/app/models/ Exists (schemas.py, run.py, library.py — 9A/9B, artifact.py — 12A)
-backend/app/services/ Exists (run_store, data_library, ingestion, reporting_period, input_resolution, storage, parser, runner, export, workbook, archive, preview, results)
-backend/tests/ Exists (39 test modules, fixtures/, and benchmarks/ which pytest does not collect)
+backend/app/actions/ Exists (base.py, registry.py, the two proof Actions, monthly_sales_rep_report.py — 13B)
+backend/app/models/ Exists (schemas.py, run.py, library.py — 9A/9B, source_schemas.py — 10A, artifact.py — 12A, report_spec.py — 13A)
+backend/app/services/ Exists (run_store, data_library, ingestion, reporting_period, input_resolution, monthly_report, storage, parser, runner, export, workbook, archive, preview, results)
+backend/tests/ Exists (43 test modules, fixtures/, and benchmarks/ which pytest does not collect)
 data/runs/ Removed in 6I. Nothing has been written there since 6D.
 data/library/ The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.
 scripts/ Exists (dev-backend.sh, lan-address.mjs — 6G)
 public/ Exists (.gitkeep; starter demo SVGs removed)
 .env.example Exists (no FORGEXL_DATA_DIRECTORY since 6I; gained FORGEXL_LIBRARY_DIRECTORY in Phase 9)
-docs/ Exists (build-plan.md, implementation-status.md, phase-6a-compatibility-audit.md, architecture.md — added in 6I)
+docs/ Exists (build-plan.md, implementation-status.md, phase-6a-compatibility-audit.md, architecture.md — 6I, monthly-source-schemas.md — 10A, monthly-sales-rep-report-spec.md — 13A)
 .env.local Not present — not required (frontend default fallback)
 Repository / Git
 Remote: https://github.com/cmgolizio/ForgeXL
@@ -2328,6 +2642,67 @@ Local addresses (verified running):
 Frontend http://127.0.0.1:3000
 Backend http://127.0.0.1:8000
 Tests
+Backend test suite (Phase 13)
+cd backend && .venv/bin/python -m pytest
+2150 passed in 31.67s
+Run against the committed tree before any Phase 13 edit — 1,860 passed, which is NOT the 1,903 the Phase 12 entry documents, because backend/tests/test_artifact_download.py was never committed (Known Issue 106). Restoring it brought the baseline to 1,895; Phase 13 then added 255. No failures, no skips, no xfails, and the same two StarletteDeprecationWarning / DeprecationWarning entries the suite has carried since Phase 7.
+
+255 tests added, in four new modules plus a restored one and the freeze amendments:
+
+Module Tests Covers
+tests/test_report_spec.py 85 13A — every rule's confidence, the couplings its status drives, the column roles, 13F's categories, 13H's conditions
+tests/test_monthly_report.py 77 13C-13H — the period and its windows, the roster, the prepared model, company figures once, every condition
+tests/test_golden_month.py 54 13I — the hand-worked figures value by value, and the Action end to end against real committed versions
+tests/test_library_history.py 31 13B — the history selector, and every Phase 11 guarantee it had to preserve
+tests/test_artifact_download.py 35 12F/12G — restored, not added; see Known Issue 106
+tests/test_contract_freeze.py went from 96 to 104 tests: the third Action's identity, slots, outputs, metadata, run signature and filesystem independence, plus the new error code and the two permitted application modules.
+
+Three deprecation warnings and four failures appeared during the phase, and every one changed the implementation:
+
+pl.concat(how="horizontal") is deprecated where the frames have equal heights, which these do — one row each. It became .hstack(), which is the operation that says so and checks it. Suppressing the warning would have left a call that changes meaning in the next Polars release.
+Four registry tests — test_the_application_registers_both_proof_actions, test_get_actions_exposes_both_proof_actions, test_the_two_actions_declare_different_input_slot_ids and test_the_registered_actions_did_not_have_to_change — pinned "both proof Actions" as the entire registry. Each now pins them by name and by position instead, which is a stronger assertion than the sweep it replaced: the last one in particular would have quietly stopped asserting anything the moment a library-backed Action existed, which is exactly what this phase did.
+The Action could not write `from app.services import monthly_report`: the freeze forbids an Action importing `app.services`, the package that owns the pipeline. Importing the one module by name is the sanctioned form and is what it does.
+Nine pyright errors, all fixed rather than suppressed — see below.
+Type checking (Phase 13)
+npx pyright
+0 errors, 0 warnings, 0 informations
+Nine errors appeared and every one was fixed. One was in application code: a join key list typed as `str | Sequence[str]` had to be narrowed before it could be a join key. The other eight were tests reading a value Polars types loosely, or a `RunResult.table()` that returns `DataFrame | None` and was subscripted without an assertion. No `# type: ignore` was added, and the one the Phase 12 entry left in test_golden_month's ancestor was removed by restructuring the test instead.
+
+Frontend static checks (Phase 13)
+npm run lint exit 0, no output
+npm run build exit 0, compiled successfully
+Three routes, unchanged: /, /\_not-found, /forge-api/[...path]. **The build failed at HEAD** and was repaired first — see Known Issue 107. src/ then changed for the second phase running: one new component, and one `source`-driven branch in ActionRunner.jsx.
+
+Phase 13 live verification over real HTTP
+Both servers were started with npm run dev and a full report was run through the Next.js proxy against the real config.LIBRARY_DIRECTORY, which no unit test can reach:
+
+Step Result
+four sales months committed as CSV 2 + 3 + 2 + 5 rows
+two sample months committed as XLSX parser engine fastexcel-calamine, worksheet Data
+one account snapshot committed for 2026-09 4 accounts
+POST /forge-api/api/runs 200, succeeded, 167 ms
+manifest.library_inputs seven records across three slots — four sales months, two sample months, one snapshot, each with its own version ID, period, filename and hash
+manifest.metrics 3 reps, 4 accounts, 4 history months, 5 sales rows, 2 sample rows, 2 placements, 2 warnings
+manifest.artifacts [] — Phase 13 produces tables
+rep_summary preview Beth 755.0 / +51% YoY / 75.879% share / 2 placements; Kevin 240.0 / −20%; Jennifer 0.0 / null growth
+company_summary CSV September 2026,3,4,995.0,33.0,5,3,540.0,20.0,2,2,0.8425925925925926,800.0,…
+whole-run workbook 12 worksheets, correctly named; YoY Growth still Float64; Château Margaux, Bodega Muñoz and Domaine Père intact
+no server path in the manifest asserted over the response body
+data/ during the check shows as ignored (!!), never untracked; removed afterwards
+Every figure matched the hand-worked ones in tests/fixtures/report_months.py exactly.
+
+Phase 13 browser verification (real headless Chromium)
+The page was driven with Playwright against the running application:
+
+Check Result
+Action selector Exact Duplicate Remover, Product Master Builder, Monthly Sales Rep Report
+selecting the report three "Stored data" panels — Sales History, Sample History, Account Assignments
+what it says "This input is read from data already saved in ForgeXL", plus the line naming the Monthly Reports workflow
+Run button disabled
+selecting Product Master Builder its upload slot, exactly as before
+console errors none
+Verification servers and the browser were stopped afterwards. Nothing was written into the repository at any point.
+
 Backend test suite (Phase 12)
 cd backend && .venv/bin/python -m pytest
 1903 passed in 22.26s
@@ -4528,4654 +4903,72 @@ No architectural conflicts were found. Framework, router, language, styling, bac
 Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and native browser APIs (fetch, FormData, File, DataTransfer). package.json is unchanged, and remained unchanged through 6A-6F — as did package-lock.json and backend/requirements.txt. Phase 6F added no dependency either: xlsxwriter was already a declared direct dependency (build plan §6.2), previously reached only through Polars and now imported directly.
 
 Next Phase
-Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine.
+Phase 14 — Batch Sales Rep Workbook Generation.
 
-Not started. Nothing for it has been scaffolded, stubbed or prepared: there is no report specification document, no reporting Action, no rep roster, no reporting-period resolution beyond Phase 10B's month detection, and no calculation table of any kind. No registered Action reads the Data Library and none produces an artifact.
+Not started. Nothing for it has been scaffolded, stubbed or prepared: no Action renders a workbook, no registered Action returns an artifact, there is no ZIP of anything a user can reach, and the report Action's outputs are twelve DataFrames and nothing else. `test_no_registered_action_produces_artifacts` covers all three registered Actions and would fail the moment that changed.
 
-Phase 13 is the first phase that uses all three of the post-POC foundations at once: it reads stored dataset versions through Phase 11's library-backed input slots, calculates a report, and hands the result out through Phase 12's artifacts. Read build plan 13A–13G in full before starting; 13A ("Create the Report Specification") comes first for a reason — the specification is what the calculation engine is checked against, and writing the engine first would leave nothing to check it with.
+Phase 14 is the phase where everything built so far becomes a file a person receives. It reads the tables Phase 13 produces, slices each by `Sales Rep`, renders one workbook per rep with `app.services.workbook`, and bundles them with `app.services.archive`. Both were built and tested in Phase 12 and neither needs extending to be used. Read build plan 14A–14F in full before starting.
 
-Phase 12 is complete
-Every exit criterion build plan Phase 12 lists, checked against what is actually in the repository:
+Phase 13 is complete
+Every exit criterion build plan Phase 13 lists, checked against what is actually in the repository:
 
 Criterion Evidence
-12A dataset outputs vs artifacts ArtifactMetadata beside OutputMetadata, carrying none of a table's facts; test_an_artifact_carries_no_row_or_column_counts
-12B extend ActionResult safely artifacts appended with a default of (); both proof Actions untouched and pinned as artifact-free in the contract freeze
-12C artifact metadata exactly the six declared facts, no path anywhere, bytes held in RunResult and released with the Run (weakref test)
-12D rich XLSX rendering app/services/workbook.py; every 12D item tested by reopening the rendered bytes; calculates nothing and writes no formula
-12E multiple artifacts per Run one workbook per rep, in the Action's order; artifact_ids() / artifact_filename(); collisions numbered or refused, never silently renamed
-12F batch ZIP export app/services/archive.py; flat entry names checked twice; deterministic bytes; built in memory
-12G artifact API and frontend two routes and ArtifactDownloads.jsx, entirely manifest-driven — no Action ID, artifact ID or name appears in any frontend file
-exit criterion, as one sentence a test Action produces three polished XLSX artifacts plus a ZIP bundle through generic infrastructure, verified in tests, over real HTTP and in a real browser
+13A the report specification docs/monthly-sales-rep-report-spec.md and app/models/report_spec.py: 25 rules, each with its confidence and its basis; 7 provisional, listed and reported on every Run
+13B the registered Action monthly_sales_rep_report 0.1.0, three library-backed slots, twelve outputs; the `history` selector that makes its history readable
+13C reporting-period resolution one ReportPeriod per Run, derived once from the data; five windows, every table asks it and none computes a date
+13D dynamic rep roster read from the account-assignment snapshot; three tests prove a rep added, a rep dropped, and transactions unable to change it
+13E shared prepared data model one prepared model per Run, not per rep; a test asserts all three input frames are unchanged, schema included
+13F report calculation tables twelve tables; every 13F category answered by a declared section, asserted both ways
+13G company and rep calculations company_figures() once per Run; a test asserts every rep sees the same company revenue and share for a supplier
+13H validation before generation sixteen declared conditions, eight failing the Run from validate() before any table is built, seven qualifying the report in data_quality
+13I golden-month accuracy tests 54 tests asserting hand-worked values — rep totals, company totals, account metrics, supplier metrics, percentages, placements, sample counts and representative detail rows
+exit criterion, as one sentence the Action produces correct report tables for every applicable rep and the calculations are proved by tests, with no attention paid to workbook appearance
 docs/implementation-status.md updated this entry
-What a Phase 13 session inherits
+What a Phase 14 session inherits
 A clean container is the normal starting condition. backend/.venv/ and node_modules/ will not exist. README.md documents the four commands that rebuild them; they were followed exactly this session and needed nothing else.
-The suite must report 1,903 passed, zero failures, zero skips, zero xfails.
-Phase 13's Action is the first that uses both new foundations. It declares a library-backed input slot (source=ActionInputSource.LIBRARY plus a dataset_id, Phase 11) and returns artifacts (Phase 12). Both halves already work end to end and neither needs extending to be used.
-Render reports with app.services.workbook, and never with xlsxwriter directly. The contract freeze fails an Action that imports the engine. The renderer takes Sheet and Column objects and calculates nothing — a totals row's values are supplied by the caller, because the formatting layer is forbidden from doing business arithmetic (build plan 12D). Phase 13's calculation engine is where those figures come from.
-Name files with artifact_ids() and artifact_filename(). Do not hand-roll either. A hand-rolled ID is what failed the first live Run of this phase; an ID is a URL token and a filename is a name, and the two helpers keep the difference straight.
-A Run still writes nothing, and Phase 13 must not change that. An artifact is bytes an Action produced, held in memory and handed back. test_data_library.py, test_library_inputs.py and test_artifacts.py all assert the working directory stays empty; keep those passing.
-An Action must still declare at least one tabular output (Known Issue 100). If Phase 13's report genuinely has no table worth returning, that is a one-line invariant to revisit — with the reasoning recorded, not silently.
-A test that touches the library gets an empty one automatically. The autouse data_library fixture in conftest.py redirects DATA_LIBRARY at a temporary directory. Do not construct a LocalDataLibrary(config.LIBRARY_DIRECTORY) in a test — that writes into the repository.
-The frontend should need nothing. ArtifactDownloads.jsx renders whatever manifest.artifacts contains, so a report Action's files appear with no src/ change at all. That is the property to check rather than to assume: if Phase 13 finds itself editing a frontend file, something has been hardcoded that should not be.
-Known Issues 99–105 are Phase 12's deliberate gaps. 99 (no registered Action produces an artifact) is Phase 13's to close by existing. 100–102 are scope boundaries with their reasoning recorded; 103 and 104 are environment facts worth knowing before they cost time again; 105 (nothing opens a report in real Excel) is worth doing once, on the target Mac, with a Phase 13 report.
+The suite must report 2,150 passed, zero failures, zero skips, zero xfails.
+**Read Known Issue 109 before trusting a number.** Seven of the report's business definitions are provisional. Phase 14 renders what Phase 13 calculates and must not adjust a figure to make a workbook look right — build plan 12D forbids the formatting layer from calculating anything, and a total arriving from the engine is the whole point.
+Render with app.services.workbook, never with xlsxwriter directly. The contract freeze fails an Action that imports the engine. The renderer takes Sheet and Column objects and calculates nothing: a totals row's values are supplied by the caller. `monthly_report.py` is where those figures come from, and adding a per-rep total there is a one-function change.
+Name files with artifact_ids() and artifact_filename(). Do not hand-roll either. A hand-rolled ID is what failed the first live Run of Phase 12; an ID is a URL token and a filename is a name.
+Slice by `Sales Rep`. Every per-rep table carries that column and holds every rep's rows; `REPORT_SECTIONS` says which tables are per-rep and which are the company's, so the split is data rather than a list to retype. The roster is `PreparedReport.reps`, and a rep with no activity is on it deliberately.
+An Action must still declare at least one tabular output (Known Issue 100). The report declares twelve, so nothing needs revisiting.
+A Run still writes nothing. An artifact is bytes held in memory and handed back. test_golden_month.py, test_library_history.py and test_artifacts.py all assert the working directory stays empty; keep those passing.
+A test that touches the library gets an empty one automatically. The autouse data_library fixture in conftest.py redirects DATA_LIBRARY at a temporary directory. Do not construct a LocalDataLibrary(config.LIBRARY_DIRECTORY) in a test — that writes into the repository. tests/fixtures/report_months.py builds the golden month as uploadable tables for exactly this, and test_golden_month.py's stocked_library fixture shows the pattern.
+The frontend should need nothing. ArtifactDownloads.jsx renders whatever manifest.artifacts contains, so a report Action's workbooks appear with no src/ change. That is the property to check rather than assume. What it will not give you is a way to *start* the Run — the reporting-period picker is build plan 15A, and LibraryInputSlot.jsx currently says so.
+Known Issues 106–108 are defects in the Phase 12 commit, repaired at the start of Phase 13. They are recorded because the same family has now appeared eleven times, and because two of them — a test module that is not in the tree and a build that fails — were invisible to anyone who read the phase entry instead of running the checks.
+Known Issues 109–114 are Phase 13's own. 109 is by far the most important: the report's definitions are not confirmed against the real report, and no amount of testing makes them so.
 Repository / Git
 Remote: https://github.com/cmgolizio/ForgeXL
-Current branch: claude/forgexl-phase-12-rr6hk2
-Descends from: 2699cd2 "phase 11 complete"
-origin/main is at 8bfe29f ("fixed problems prior to starting Phase 6I"). Six commits are now unmerged — 2513e0e (6I), d3a0676 (Phase 7), 60817e8 (Phase 8), 63e69fb (Phase 9), 3de2436 (Phase 10) and 2699cd2 (Phase 11) — and all six are ancestors of this branch, so nothing is skipped or duplicated. Known Issue 75 stands, one commit larger again: a session inspecting main alone would miss 6I and Phases 7 through 11. Merging is the user's to do.
+Current branch: claude/optimistic-heisenberg-iahth6
+Descends from: 0f772b5 "phase 12 complete"
+origin/main is at 0f772b5 ("phase 12 complete"), which is also the head this branch descends from. Known Issue 75 — main trailing the phase branches — is resolved for the first time since Phase 6: everything through Phase 12 is merged, and this branch is one phase ahead of it rather than six.
 
-Phase 12's diff is 20 files: seven new (backend/app/models/artifact.py, backend/app/services/workbook.py, backend/app/services/archive.py, backend/tests/test_artifacts.py, backend/tests/test_workbook.py, backend/tests/test_artifact_download.py and src/components/workbench/ArtifactDownloads.jsx) and thirteen modified, with no deletion and no rename. package.json, package-lock.json and backend/requirements.txt are untouched — Phase 12 added no dependency; zipfile and unicodedata are standard library, and xlsxwriter, openpyxl and polars were already pinned.
+Phase 13's diff is 26 files: eleven new (docs/monthly-sales-rep-report-spec.md, backend/app/models/report_spec.py, backend/app/services/monthly_report.py, backend/app/actions/monthly_sales_rep_report.py, backend/tests/fixtures/report_months.py, backend/tests/test_report_spec.py, backend/tests/test_monthly_report.py, backend/tests/test_golden_month.py, backend/tests/test_library_history.py, backend/tests/test_artifact_download.py and src/components/workbench/LibraryInputSlot.jsx), fourteen modified and one renamed (src/components/workbench/ArtifactDownload.jsx → ArtifactDownloads.jsx). package.json, package-lock.json and backend/requirements.txt are untouched — Phase 13 added no dependency.
 
-src/ changed for the first time since Phase 6G: one new component, one import and one element in ActionRunner.jsx, two URL builders in lib/api.js and one label helper in lib/formatters.js.
+src/ changed for the second phase running: one new component, and one `source`-driven branch in ActionRunner.jsx.
 
 Before writing any code, verify the repository is intact
-Run these in order. They catch different failures and none substitutes for another.
+Run these in order. They catch different failures and none substitutes for another. **Phase 13 found that two of them fail against the Phase 12 commit**, so run them and act on what they say rather than on what the last phase entry claims.
 
-git show --name-status HEAD # FIRST — does the last phase entry match its own commit?
-cd backend && .venv/bin/python -m pytest # catches most of the rest at once
+git show --name-status HEAD # FIRST — does the last phase entry match its own commit, read both ways?
+cd backend && .venv/bin/python -m pytest # does the figure match the one the entry documents?
+npm run build # does the application build at all?
 git branch -r # is the last phase on an unmerged branch?
 ls backend/app/models backend/app/services backend/app/api # not src/app/
 ls backend/app/_.py backend/app/_/_.py backend/tests/_.py | grep -- - # hyphens are not legal module names
 md5sum backend/tests/_.py backend/app/_.py backend/app/_/_.py | awk '{print $1}' | sort | uniq -d
+wc -l docs/implementation-status.md # is this document duplicated? (Known Issue 108)
 npx pyright
-npm run build
-The suite must report 1903 passed, zero xfails, and pyright 0 errors. Every other line must produce no output, and the build must succeed.
+npm run lint
+The suite must report 2150 passed, zero xfails, and pyright 0 errors. The build must succeed and this document must be about 4,900 lines, not twice that. Every other line must produce no output.
 
-And one check that belongs at the end of your phase, not the start. Phase 9 found the same file rename recorded as done by three consecutive phases and present in none of their commits (Known Issue 85). Phases 10, 11 and 12 all ran the fix that issue prescribes and it worked every time. Keep doing it:
+`npm run build` moved up the list deliberately. It was in the Phase 12 list too, and the Phase 12 commit does not build; a check that is run but not acted on is no check at all.
+
+And one check that belongs at the end of your phase, not the start. Phase 9 found the same file rename recorded as done by three consecutive phases and present in none of their commits (Known Issue 85). Phases 10, 11, 12 and 13 all ran the fix that issue prescribes; it worked for 10, 11 and 13, and Phase 12's entry shows what happens when it does not. Keep doing it:
 
 # AFTER committing, before reporting the phase complete:
 
 git show --name-status HEAD
-Confirm that every file your report lists as created, modified, renamed or deleted actually appears there — and the reverse, that every file in the commit appears in your report. Phase 10 found the inverse failure in Phase 9's entry (Known Issue 89): a package.json change that is in the commit and not in the report. Read the list both ways.
+Confirm that every file your report lists as created, modified, renamed or deleted actually appears there — and the reverse, that every file in the commit appears in your report. Phase 10 found the inverse failure in Phase 9's entry (Known Issue 89): a package.json change that is in the commit and not in the report. Phase 13 found both failures at once in Phase 12's: a file in the report and not the commit, and a file in the commit under a different name. Read the list both ways, and read the names character by character.
 
-If the environment is fresh — no backend/.venv/, no node_modules/ — rebuild it with the four commands in README.md. That path was exercised end to end in Phase 8.1 and again in Phases 9, 10, 11 and 12, and needs nothing beyond what is written there.Implementation Status
-Last Updated: 2026-09-15 Current Phase: None Last Completed Phase: Phase 12 — Rich Artifact Output Framework. Phase 12 is complete. It is the fourth phase of the post-POC expansion. Phase 13 is not started; nothing for it has been scaffolded, stubbed or prepared — there is no report specification, no reporting Action, no rep roster and no calculation engine anywhere in the backend, and no registered Action produces an artifact.
-
-Architecture document. docs/architecture.md was created in Phase 6I (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1 persistence behaviour and the extension point for future persistence. Phase 9 added §5a, the persistent Data Library, Phase 10 added §5b, the monthly ingestion layer above it, Phase 11 added §5c, library-backed Action inputs, and Phase 12 added §5d, the rich artifact output framework. This file remains the phase-by-phase record.
-
-Source schemas. docs/monthly-source-schemas.md was created in Phase 10A and is the authoritative description of the three recurring source files. The account-assignment schema in it is provisional and marked UNCONFIRMED.
-
-Build plan note. docs/build-plan.md was revised in commit 259615d ("changed build plan. Updated architecture"). Phase 6 is no longer "Results, Preview, Audit Summary, and Export UX" numbered 6.1–6.9; it is now "Filesystem-Independent Runtime, Results, Export, and Testing", split into subphases 6A–6I. The older Phase 6 scope survives inside 6E (results/preview/metrics/audit) and 6F (export). Entries written before that revision, and Known Issue 16 in particular, refer to the superseded numbering.
-
-This file is the durable cross-thread project state required by docs/build-plan.md §33. Every Phase must update it. docs/build-plan.md remains the authoritative architectural source of truth.
-
-Completed
-Phase 12 — Rich Artifact Output Framework
-Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
-
-Phase 12 gives a Run a second kind of result. Until now everything an Action produced was a table: a Polars frame, previewed, paged and exported as CSV or XLSX on request. A finished report is not a table, and build plan 12A is explicit that it must not be pretended into one — "Do not pretend a finished workbook containing layout, formatting, multiple report sections, and presentation logic is merely another DataFrame." So an Action may now also return artifacts: finished bytes, downloaded as they are, under names the Action chose.
-
-Every addition defaults to what the code already meant. ActionResult gained one field, RunManifest gained one, and both default to empty, so every Action and every manifest written before this phase means exactly what it meant then. MANIFEST_SCHEMA_VERSION stays at 2 for the second phase running, and FROZEN_ACTIONS is byte-identical: neither proof Action was touched, and the contract freeze now asserts that neither produces an artifact.
-
-The baseline was clean, for the third phase running
-The check list the Phase 11 entry prescribes was run before any Phase 12 work, and every line passed:
-
-Check Result
-git show --name-status HEAD matches the Phase 11 report in both directions
-pytest (baseline) 1,665 passed — the documented figure exactly
-git branch -r main and this branch
-hyphenated module names none
-duplicate-content modules (md5) none
-npm run build exit 0, same three routes
-npm run lint exit 0, no output
-Known Issue 85's family did not recur: the Phase 11 report's file list matches its commit read both ways — 14 files, two added and twelve modified.
-
-12A — Dataset outputs and artifacts are different things
-Two concepts, side by side and deliberately not merged:
-
-tabular output a Polars frame. Previewed, paged, exported as CSV or XLSX.
-artifact finished bytes. Downloaded as they are, under their own name.
-Modelling a report workbook as another OutputMetadata would have given it a column_schema it does not have, a preview endpoint that could not render it, and a CSV export that would have thrown its formatting away. That is asserted rather than argued: test_an_artifact_carries_no_row_or_column_counts fails if ArtifactMetadata ever grows a row count, a column list or a format list.
-
-app.models.artifact.Artifact is a frozen dataclass — plain Python, not Pydantic, for the same reason ActionResult is: it carries bytes, which are never serialised into a response body. to_metadata() is the single boundary where it becomes API-facing data.
-
-12B — Extending ActionResult safely
-One field, appended:
-
-artifacts: Sequence[Artifact] = ()
-Appended rather than inserted beside outputs, where it belongs by meaning. Inserting it would have changed what a positional ActionResult(frames, metrics) constructs, and an addition must not silently re-point an existing call. test_positional_construction_still_means_what_it_meant is the regression test.
-
-**post_init** freezes the sequence into a tuple and refuses a collision inside it — see 12E. Nothing else about the class changed, and test_a_table_only_manifest_is_unchanged_in_every_other_respect asserts that a Run producing only tables serialises to what it serialised before.
-
-12C — Artifact metadata
-ArtifactMetadata carries exactly the six facts build plan 12C names and nothing else:
-
-id · label · filename · media_type · size_bytes · artifact_type
-There is no path, because there is none to expose. An artifact lives in the Run's memory, travelling inside RunResult beside the result frames, so forgetting the Run releases both — test_forgetting_the_run_releases_the_bytes proves it with a weakref, the same way Phase 6I proved it for a 300,000-row frame. test_no_manifest_value_looks_like_a_path sweeps every serialised manifest value for a path fragment.
-
-size_bytes is measured from the payload, never declared by whatever produced it, so it cannot disagree with what downloads; test_the_reported_size_is_the_downloaded_size checks the two against each other over HTTP.
-
-ArtifactType is coarse and closed — workbook, archive, document, text, other — for the same reason ColumnKind is: a client needs to know which icon and which wording to use, not which revision of a file format it holds. The precise type travels beside it as the media type, which is what a browser reads.
-
-Artifacts are not persisted, and the Data Library did not become a report archive. No model, interface or stored record in the library gained a field, for the third phase running.
-
-12D — Rich XLSX rendering
-backend/app/services/workbook.py, a module of its own. A report is described declaratively and rendered:
-
-render_workbook([
-Sheet(name="Detail", frame=rows, title="…", subtitle="…",
-columns=(Column("Revenue", format=CellFormat.CURRENCY), …),
-total_row={"Revenue": 56550.25},
-conditional_formats=(ConditionalFormat("Revenue", ConditionalRule.NEGATIVE_RED),),
-table_style="Table Style Medium 2")
-])
-Every item build plan 12D lists is implemented and verified by reopening the rendered bytes, never by trusting the call that wrote them. The module docstring carries the table mapping each item to its test.
-
-It is not a second workbook writer, which is what the Phase 11 hand-off asked for. Every rule Phases 6F and 7 established still applies and is applied from its original home: the workbook options of 6F.2, the capacity check of 7B (check_fits_worksheet), the worksheet-naming rules of 6F.5 (worksheet_names) and the release rule of 6F.7 all come from app.services.export. There is one set of rules, not two.
-
-Two rules are this module's own, and both are load-bearing.
-
-It calculates nothing. Build plan 12D: "Do not implement business calculations in the XLSX formatting layer." A sheet is handed a frame and, if it wants one, a totals row whose values the caller has already worked out. The layer chooses fonts, widths and number formats — never a number. test_a_total_is_whatever_the_caller_supplied renders a total of 999,999 over a column summing to 413 and asserts the file says 999,999: a weighted average, a prior-year figure and a sum are all legitimate totals, and only the caller knows which it calculated.
-
-It writes no formula. The totals row holds literal values, not =SUBTOTAL(109,…). This was a real decision and it went the other way at first. xlsxwriter's table totals, and Polars' column_totals, both write a formula; a formula means the file shows one number and stores another, and Polars, openpyxl or a preview pane reading it back would show a third thing — build plan §3.3's "valid-looking data" in a new costume. test_no_worksheet_in_a_rendered_report_holds_a_formula sweeps every worksheet in the archive for <f>.
-
-Two implementation facts were established by measurement rather than assumed, because guessing either would have produced a silently wrong file:
-
-Polars takes column_widths in pixels, not character units. Passing a character width produced columns about a seventh of their intended size. Widths are reasoned about here in Excel's own unit and converted at the boundary by \_width_pixels, with the factor confirmed against a rendered workbook.
-openpyxl.column_dimensions invents a default for a column inside a stored range. A <col min="1" max="2"> entry is keyed under A only, so asking for B returns 13.0 rather than the width in the file. The width tests read the worksheet XML directly, and the reason is in the module docstring so the next reader does not "fix" them.
-12E — Multiple artifacts per Run
-One Action, many files, and the Run keeps them in the order the Action listed them. The IDs and filenames come from the data, so the framework has to make that safe — and the two are treated differently on purpose:
-
-built by on a collision
-artifact ID — an internal handle in a URL artifact_ids() numbered apart
-artifact filename — what the user receives artifact_filename() the Run fails
-A filename is what the user asked for, so renaming one behind their back would hand them a file called something they did not choose (build plan §3.3). An ID is a handle nobody reads, so two rows reducing to the same token get distinct ones — the same split worksheet_names() has made since 6F.5. Filenames are compared case-insensitively, because macOS and Windows treat two names differing only in case as one file and an archive holding both loses one of them on extraction.
-
-An ID folds accents away because it is a token; a filename keeps them exactly, because it is a name. Château Réal becomes the ID chateau-real and the file Château Réal - September 2026.xlsx.
-
-artifact_ids() was added mid-phase, and finding out that it was missing is the reason the live verification exists. The first end-to-end run through a real browser failed with ACTION_FAILED, because the demo Action had derived an ID from a rep's name by hand and produced château-réal, which ARTIFACT_ID_PATTERN correctly refuses for a URL path segment. The framework was right to refuse it; what was missing was the sanctioned way for an Action to avoid the mistake. Build plan 12E asks for IDs that are "collision-safe and deterministic", and leaving every Action to reinvent slug-safety would not have delivered that. The test Action in the suite had passed only because its names were ASCII.
-
-12F — The batch ZIP
-backend/app/services/archive.py. A Run's artifacts become one archive, built in a memory buffer that is released with the call — no temporary file, not even in /tmp.
-
-The safety rule is the phase's sharpest edge and is enforced twice. check_artifact_filename refuses a separator, a .., a leading dot, a control character, a reserved Windows device name and a trailing dot or space when the artifact is constructed, and the archive writer checks again on the way in. Checking twice is deliberate: the first check protects the Content-Disposition header, the second protects the user's filesystem when they extract the archive. test_the_writer_checks_the_filename_again constructs an artifact past the model's own guard to prove the writer does not rely on someone else having checked.
-
-The archive is deterministic. Entries are stamped with the Run's own completion time rather than with "now", recorded in order, and given explicit permissions, so re-downloading a bundle returns byte-identical output. A timestamp before 1980 — which the ZIP format cannot record — is clamped rather than left to wrap into the 2040s.
-
-12G — The artifact API and the frontend
-Two routes, the first added since Phase 6F:
-
-GET /api/runs/{run_id}/artifacts/{artifact_id}/download
-GET /api/runs/{run_id}/artifacts/download/zip
-The ZIP route is declared first in the module so the reading order matches the matching order, and test_the_zip_route_is_not_shadowed_by_the_artifact_route pins it.
-
-A single artifact arrives under the Action's own filename — that is the point of an artifact — while the bundle takes ForgeXL's own convention, forgexl-<action>-<timestamp>.zip, because nobody chose a name for it and inventing one from the first report inside would be a guess.
-
-Content-Disposition gained RFC 6266 / RFC 5987 handling, and only for names that need it: an ASCII filename — which is every generated export filename, by construction — is sent in the single quoted parameter it has always been sent in, so no existing download's header changed. A non-ASCII name adds filename\*=UTF-8''… beside it. The percent-encoder is six lines of this module rather than urllib.parse.quote, because test_local_exposure.py forbids the backend importing any part of urllib and that blanket rule is worth more than the six lines.
-
-Three new errors' worth of distinction, of which one is new code: UNKNOWN_ARTIFACT (404) for an artifact a Run never produced, kept separate from UNKNOWN_OUTPUT because build plan 12A keeps tables and files apart, and from MISSING_ARTIFACT because "never made" and "no longer held" are different answers to a client that would retry.
-
-The frontend gained one component, src/components/workbench/ArtifactDownloads.jsx, and it is entirely generic: every line comes from manifest.artifacts, nothing branches on an Action ID, an artifact ID or a filename, and build plan 12G's "Do not hardcode sales-rep names into the frontend" is satisfied by there being nothing to hardcode. It renders nothing when a Run produced no artifacts, which is every Run either registered Action can produce, and the "Download All" link appears only above one file — a bundle of one is a slower way to fetch the file on the line above it.
-
-It sits outside the output-specific section: artifacts belong to the Run, not to the selected result table, so switching tables does not change them. It is also deliberately separate from ExportButtons: an export is a result table rendered into a format on request, an artifact is a file the Action produced, and putting them under one heading would suggest they are alternatives.
-
-What the exit criterion actually proves
-A test Action can generate multiple polished XLSX artifacts plus a ZIP bundle through generic ForgeXL infrastructure.
-
-TestThePhase12ExitCriterion walks that sentence clause by clause against a \_RepReportsAction that is not registered — build plan 12B is explicit that no Action has to produce artifacts, and neither proof Action was changed. It asserts three workbooks, each with two worksheets, a title above the table, $#,##0.00;($#,##0.00) on the revenue column, a frozen header and a bold totals row; then the ZIP holding all three; then that the Run's tabular side is untouched; then that the working directory is still empty.
-
-The same thing was then done for real, over HTTP and in a real browser, with a four-rep file including an accented name — see Tests.
-
-Phase 11 — Library-Backed Action Inputs and Reproducible Runs
-Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
-
-Phase 11 lets an ordinary Action consume an exact version of a persistent dataset without becoming storage-aware. It is the smallest of the three post-POC phases so far, and deliberately so: everything it needed already existed. load_version(dataset_id, version_id) returns a DataFrame, which is what Action.run(inputs) already takes, and current_version(dataset_id, period) is the moving concept build plan 11D says must be pinned before execution. No model, interface or stored record in the Data Library gained a field, exactly as Phase 10 needed none.
-
-The baseline was clean, for the second phase running
-The check list the Phase 10 entry prescribes was run before any Phase 11 work, and every line passed:
-
-Check Result
-git show --name-status HEAD matches the Phase 10 report in both directions
-pytest (baseline) 1,603 passed — the documented figure exactly
-git branch -r main and this branch
-hyphenated module names none
-duplicate-content modules (md5) none
-npm run build exit 0, same three routes
-npm run lint exit 0, no output
-Known Issue 85's family did not recur, and the Phase 10 report's file list matches its commit read both ways — 14 files, eight added and six modified.
-
-11A — Extend input source metadata
-ActionInput gained two fields and nothing else changed shape.
-
-source: ActionInputSource = ActionInputSource.UPLOAD
-dataset_id: str | None = None
-upload is the default, so no Action written before this phase means anything different from what it meant before. Build plan 11A: "Do not require changes to Exact Duplicate Remover or Product Master Builder merely because library-backed inputs now exist." Neither Action module was touched, and test_contract_freeze.py now pins both as upload-backed, so a later phase quietly converting one fails a test.
-
-accepted_extensions gained a default of (), and a model validator makes the two kinds of slot mutually exclusive rather than merely conventional:
-
-slot must declare must not declare
-upload accepted_extensions dataset_id
-library dataset_id accepted_extensions
-A half-declared slot is refused when the Action is declared, at import time, not when a Run reaches it. A slot that named a dataset and accepted files would leave the UI and the runner each guessing which the Action meant.
-
-Which dataset a slot reads is declared by the Action; which version is chosen per Run. That split is a security property as much as a design one: no client-supplied string ever selects what gets opened.
-
-11B — Dataset reference resolution
-backend/app/services/input_resolution.py, a module of its own, because build plan 11B names the alternative ("the runner or a dedicated input-resolution service") and the runner already owns eight stages.
-
-dataset reference -> Data Library -> one immutable version
--> Polars DataFrame -> Action
-The runner calls it in a new stage, \_resolve_library_slots, which sits beside \_parse_inputs and produces the same kind of thing. Both halves then merge into one mapping of named frames:
-
-frames = \_frames_by_slot(parsed, resolved) # {slot_id: pl.DataFrame}
-From that line down, nothing in the pipeline distinguishes an uploaded input from a stored one. \_validate_datasets was changed to read the merged frames rather than the parsed uploads, so a stored version is held to exactly the same emptiness and required-column checks as an upload. Being stored earns no trust.
-
-The Action sees {slot_id: DataFrame} and cannot tell which arrow filled a slot. FORBIDDEN_ACTION_IMPORTS in test_contract_freeze.py gained app.services.data_library, app.services.ingestion, app.services.input_resolution and app.models.library, which is build plan 11B's "Actions must not open Data Library files themselves" as an assertion. Before this phase the rule had nothing to pin — there was no way for an Action to reach the library at all.
-
-The three reference forms
-A reference is text, because it crosses the wire as one form field beside the uploaded files:
-
-reference resolves to
-latest the live version with the greatest reporting month
-period:2026-09 the live version for that month
-version:<version id> that exact version, superseded or not
-DatasetSelector.parse lives in app/models/library.py beside parse_dataset_id, parse_version_id and parse_period, and reuses the last two, so a selector cannot smuggle a path fragment into a library read — version:../../etc/passwd is INVALID_DATASET_SELECTOR, not a file read. Nothing is guessed: current and newest are refused rather than matched to latest, the same way an unrecognised Action ID is refused rather than resolved to a near neighbour.
-
-latest is the greatest month, not the most recent commit, and the difference is not hypothetical. Restating March after June has been imported commits a March version last; answering "latest" with March would be wrong. latest_version sorts on (has a period, period, created_at, version_id) and takes the maximum, and test_latest_is_the_newest_month_not_the_newest_commit is the regression test.
-
-version: reaches a superseded version deliberately — that is build plan 11E's "specific old versions can be selected", and the whole reason 9D keeps them. period: and latest see only live versions, because those ask what the dataset says now.
-
-11C — Explicit version provenance
-RunManifest gained library_inputs, one LibraryInputMetadata per library-backed slot. It records the dataset, the resolved version ID, the period, the version's commit time, the source filename and hash it was built from, and the shape of what was read.
-
-requested and version_id are both recorded, and they answer different questions. Build plan 11C: "Never record only sales_history = current." Recording only the resolved ID would have been the opposite loss — a Run that was asked for "the newest month" would read as though someone had typed that UUID. So a Run says what it was asked for and what it actually read:
-
-"requested": "latest"
-"version_id": "1b7df5d8-d446-43e1-99a7-f38d4f3dcf6c"
-"period": "2026-09"
-RunAudit gained the matching library_inputs, and rows_received now counts both kinds of input — otherwise the audit of a report Run would read as though nothing went in. OutputMetadata.input_row_count and the added/removed column lists are measured across both too.
-
-AuditLibraryInput is a separate model from AuditInput rather than an extension of it. An uploaded file and a committed version are identified by different facts, and one model carrying both would leave half its fields empty whichever kind it described.
-
-MANIFEST_SCHEMA_VERSION stays at 2. Every added field has a default, so a manifest for an upload-only Run — every Run either registered Action can produce — is byte-identical to what it was, and a version 2 manifest written before this phase still validates. Phase 6E bumped it because its additions were required; these are not, and bumping anyway would have made an unnecessary claim about incompatibility.
-
-11D — Determinism
-The rule is unchanged and is now enforced in one place. resolve_version is the only function that turns a moving reference into a version, it runs before \_execute_action, and it returns a DatasetVersion whichever form it was given. There is no code path on which an Action executes against "latest".
-
-The consequence is what the phase is for, and it was verified over real HTTP against the real library directory:
-
-A Run asked for latest and resolved to September's version.
-September was then corrected — a new version superseding it, with a reason.
-Re-fetching the original Run still reported the original version ID.
-A new latest Run resolved to the replacement.
-Re-running with version:<the recorded ID> reproduced the original result exactly, from a version that is now superseded.
-That sequence is test_a_recorded_run_is_unchanged_by_a_later_commit and test_naming_the_recorded_version_reproduces_the_run, and it was also done by hand with curl — see Tests.
-
-11E — Regression tests
-backend/tests/test_library_inputs.py, 58 tests. Every item build plan 11E lists is covered, and the module's docstring carries the table mapping each item to its test.
-
-Two properties are asserted throughout rather than once:
-
-A Run still writes nothing. Reading stored history is a read. test_a_library_backed_run_writes_nothing asserts the quarantine directory is still empty afterwards, and test_a_library_backed_run_records_no_new_library_state asserts the library gained no version.
-An Action never learns the library exists. Every Action in the module receives {slot_id: DataFrame}, and the contract freeze refuses a library import inside an Action module.
-The failure surface is tested by name rather than by status alone, because "missing library data fails clearly" is about the message:
-
-what is wrong code
-no reference for a required slot MISSING_INPUT
-current, newest, a bare month INVALID_DATASET_SELECTOR
-nothing ever imported UNKNOWN_DATASET
-that month never imported UNKNOWN_DATASET_VERSION
-no version with that ID UNKNOWN_DATASET_VERSION
-stored version missing a column MISSING_COLUMNS
-A library that cannot be read is deliberately not in that list. Those failures propagate as DATA_LIBRARY_ERROR / 500, so a corrupt store is never reported to the user as though they had asked for the wrong month.
-
-What the API gained, and what it did not
-No route. A library-backed slot is a text field beside the uploaded files in the existing POST /api/runs form, named with the slot's ID. FROZEN_ROUTES is byte-identical for the second phase running.
-
-A field naming a slot the Action does not read that way is reported, never obeyed: a file sent for a library slot warns UNEXPECTED_INPUT (the existing code and message), and a reference sent for an upload slot warns UNEXPECTED_DATASET_REFERENCE (new). Two codes rather than one, because "the file was ignored" and "the reference was ignored" send the user to different places. Both are warnings; the Run fails separately on the input that is actually missing.
-
-Nothing under src/ was changed
-No registered Action reads the library, so the frontend cannot encounter a library-backed slot, and build plan Phase 11 describes no UI — 11A–11E are about the input contract. A dataset-version picker also needs endpoints to list datasets and versions, which no phase has authorised. Choosing versions in the browser is build plan 15A, with the monthly reporting workflow it belongs to. Recorded as Known Issue 96 so it is a stated decision rather than an omission.
-
-The frontend was verified unchanged all the same: npm run lint, npm run build, and a real headless-Chromium Run through the running application — see Tests.
-
-Phase 10 — Monthly Dataset Ingestion and Versioning
-Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
-
-Phase 10 turns the three recurring source files into safe, validated, versioned Data Library updates. It sits entirely on top of Phase 9: no model, no interface and no stored record gained a field, which is what the Phase 9 entry predicted it should need.
-
-The baseline was clean — the first time in four phases
-The check list the Phase 9 entry prescribes was run before any Phase 10 work, and every line passed:
-
-Check Result
-git show --name-status HEAD matches the Phase 9 report including the rename (R100)
-pytest (baseline) 1,475 passed — the documented figure exactly
-git branch -r main and this branch
-hyphenated module names none
-duplicate-content modules (md5) none
-npm run build exit 0, same three routes
-Known Issue 85's family did not recur. backend/tests/test_mixed_xlsx_round_trip.py is correctly spelled in the tree and in commit 63e69fb. The fix that worked is the one Phase 9 identified: check the commit, not git status. That check was run again at the end of this phase — see the bottom of this entry.
-
-One inaccuracy in the Phase 9 entry was found and is recorded as Known Issue 89: it states package.json is untouched, and commit 63e69fb modifies it.
-
-10A — Canonical source schemas
-backend/app/models/source_schemas.py declares the three schemas. A column name now appears in this repository exactly once — no service, route, test or fixture spells one of its own; the test fixtures read SALES_SOURCE_SCHEMA.column_names rather than retyping the header, so a fixture cannot test itself.
-
-The sales and sample schemas are confirmed. The user supplied the header row verbatim from the real exports, and the two exports are identical:
-
-Invoice Date, Invoice Type, Invoice Number, Customer, Cust Type,
-Sales Person, SKU, Vintage, Supplier, Producer, Selection, Volume,
-Quantity, Item Price, Total Price
-They are nonetheless two schema objects targeting two datasets, because build plan 10D requires sales and samples to stay distinct "even if their source schemas overlap". One shared object used for both is how that distinction quietly stops being real.
-
-The account-assignment schema is provisional and marked UNCONFIRMED. The user was explicit about this. confirmed=False is part of the declaration rather than a comment, a test asserts it, and docs/monthly-source-schemas.md says what to change to confirm it. Two choices make it as harmless as a provisional schema can be: its two column names (Customer, Sales Person) are taken verbatim from the confirmed schema rather than invented, and it declares a minimum of two columns rather than a whole file — so a real export carrying ten more still imports.
-
-There is no aliasing mechanism at all, and a test asserts the absence. Build plan 10A permits normalisation only if it is "explicitly specified, deterministic, and tested"; having none satisfies that in the strongest way. Seven spellings of Sales Person — Salesperson, sales person, SALES PERSON, Sales Person, leading and trailing space, Sales_Person — are each asserted to be reported as missing rather than matched.
-
-Two judgements are recorded as Deviations 68 and 69: a missing required column fails the import, an extra column is a warning and is kept and stored. Refusing extras would block a month over a column nothing reads; ignoring them would hide the source-schema change build plan 13H wants surfaced.
-
-10B — Reporting period detection
-backend/app/services/reporting_period.py. Build plan 10B lists six situations that must be detected; four are about one file and live here, and the two that need more than one file or the library are in ingestion.py:
-
-10B requires Where
-wrong month uploaded UNEXPECTED_REPORTING_PERIOD
-file spanning an unexpected period MULTIPLE_REPORTING_PERIODS
-empty reporting period EMPTY_REPORTING_PERIOD
-future-dated rows FUTURE_DATED_ROWS
-duplicate monthly upload ingestion.py — a question about the library
-mismatched periods between files ingestion.py — the layer that sees three files
-The month comes from Invoice Date, never the filename. A test uses a fixture named for August and dated September and asserts September wins.
-
-Ambiguity is refused rather than resolved, which is the part worth explaining. %m/%d/%Y and %d/%m/%Y are both declared, precisely so the disagreement is visible: a format is accepted only if it reads every populated value, and when two accepted formats produce different dates for any row the file is refused as AMBIGUOUS_DATE_FORMAT with both readings in the message. 03/04/2026 is 4 March or 3 April, and preferring one would move rows into the wrong month — the exact failure this layer exists to prevent. Stating a format resolves it, which is build plan 10B's "require explicit user selection rather than guessing". In practice a month of invoices almost always contains a day past the 12th, which rules out one reading on its own.
-
-Future-dated rows are an error, not a warning (Deviation 70). A reporting month is imported after it has happened, and a mistyped future date silently decides which month a row lands in. today is injected rather than read from a clock, so the suite's result does not depend on when it runs — asserted by a test that gets both answers from the same file with two different todays.
-
-A row with no date is refused, not dropped. Excluding it would mean the committed month held fewer rows than the file did with nothing saying so (build plan section 3.3).
-
-Nothing is repaired and the frame is never modified — asserted for both upload formats by comparing the frame and its schema before and after.
-
-10C / 10D — the monthly sales and sample commits
-backend/app/services/ingestion.py. Every step build plan 10C lists, in order: parse with the existing ForgeXL parser, validate the schema, validate the period, hash the source, refuse an already-imported file, validate the rows, commit the month as a new version. The commit's atomicity and immutability are Phase 9's and are untouched.
-
-Using the Run pipeline's own parser is deliberate: one implementation reads an ingested file and an uploaded one, so the extension rules, the worksheet-ambiguity refusal and the duplicate-column refusal apply identically to both and cannot drift apart.
-
-The stored frame is the uploaded frame. No column renamed, added, reordered, coerced or dropped; the month, date range, parser engine and source hash are metadata on the version. A test asserts Château Margaux and Réserve survive a round trip through Parquet with their accents.
-
-Duplicate detection matches the content hash and the reporting period, and that pairing is a design decision the tests forced (Deviation 71). A dataset-wide hash match was written first and was wrong: account ownership often does not change from one month to the next, so October's export is byte-for-byte September's, and refusing it would force the user to perturb a correct file to record a true fact. For a history dataset the bytes decide the month, so the two rules are equivalent there. Both halves are pinned by a pair of tests.
-
-Samples commit through a separate function to a separate dataset (10D). It is not a dataset_id argument on one function, because the one-line way to fold samples into sales should not exist.
-
-A committed month can be corrected by an explicit replacement naming the version it supersedes and why; the superseded version stays loadable, which is what keeps the report built from it reproducible (9D).
-
-10E — the account assignment commit
-Committed as the snapshot for a month the caller states. The month is required here and is not read from rows, because the export states ownership as it stands and carries no date — build plan 10B's answer to a question the file genuinely cannot answer is an explicit choice, not a guess.
-
-The whole file is stored, not a narrowed copy: build plan 10E requires the full source snapshot, and a column dropped at ingest could not be recovered later. A test commits a snapshot with Territory and Region columns and asserts all four columns come back.
-
-Build plan 10E's checks, and whether each refuses or warns:
-
-10E lists Result
-required customer identifier refused — SOURCE_SCHEMA_MISMATCH
-required sales rep identifier refused — SOURCE_SCHEMA_MISMATCH
-duplicate customer assignments refused — AMBIGUOUS_ACCOUNT_OWNERSHIP, naming the two reps
-blank customer names refused — MISSING_ACCOUNT_ASSIGNMENT_FIELD, with row numbers
-blank rep names refused — same code
-rows that cannot be assigned safely the three above are what that means in practice
-An account listed twice with the same rep is accepted: it says one true thing twice, and refusing it would be a rule about tidiness. An account listed twice with different reps is refused, because the one question the snapshot exists to answer then has two answers. Row numbers are 1-based spreadsheet rows — the header is row 1 — so they are the numbers a user sees in Excel.
-
-A blank rep on a transaction is only a warning: ownership for a report comes from the snapshot, not from the invoice line.
-
-Build plan 9E's scenario is tested through the ingestion front door: an account owned by Beth Comeaux in September and Kevin Wardell in November, with each month retrieved independently.
-
-10F — the coordinated monthly import
-validate_reporting_cycle and import_reporting_cycle are 10F's diagram split where 10F splits it — "validate all → show issues → commit" — because a caller shows the result before deciding to commit.
-
-Validation failure commits nothing. All three files are checked to completion first, so the misleading state 10F names in as many words — "September sales were committed successfully but the September ownership snapshot silently failed" — cannot be reached by a file being wrong. A test supplies two good files and one bad ownership snapshot and asserts all three datasets are still empty afterwards.
-
-A month already committed is refused during validation, not at commit time. The Data Library enforces this too (9D) and would refuse the write, but the cycle commits its three inputs in order — so a rule caught only at commit could store the first two and fail on the third. That is the partial state 10F exists to prevent, so the check moved a layer up.
-
-Two checks exist only at this layer, because only it sees more than one file:
-
-MISMATCHED_REPORTING_PERIODS — build plan 10B's "mismatched periods between related files".
-SAME_FILE_FOR_SEVERAL_DATASETS — one file supplied for two slots, which every per-file check would pass.
-With no month stated, the sales file decides it and the other two are checked against that; the snapshot, which has no date of its own, takes it.
-
-ReportingCycleImport distinguishes three outcomes and none is silent: ok, nothing committed, and partial. partial is reachable only by the library refusing a write after validation passed, and it is not rolled back — build plan 15C is explicit that valid committed source data survives a later failure, and a version that exists can simply be superseded.
-
-The import does not raise on refusal (Deviation 72): the returned report is the explanation 10F requires the user to receive, and an exception carries one issue where a caller needs all of them.
-
-10G — the historical bootstrap
-Accepts a file spanning several months and commits one version per month, not one version for the file. That is the whole model of the library: a version per period is what lets current_version(dataset_id, period) answer a question about September, what lets one wrong month be corrected on its own, and what lets the next monthly import add October without colliding with anything.
-
-It refuses a dataset that already holds versions — "one-time" is 10G's word. That precondition is also what stops the same bootstrap file being run twice, which a content-hash check could not do here: every partition of one bootstrap carries that file's hash by construction.
-
-It relaxes exactly one rule — several months — and no others. Tests assert a bootstrap still refuses a missing column and still refuses future-dated rows. A snapshot dataset cannot be bootstrapped at all: ownership has no history to load, and each month's snapshot is committed for the month it applies to.
-
-The exit criterion, tested as one sentence
-Build plan Phase 10's exit criterion is one sentence, and test_a_bootstrap_then_one_month_at_a_time does exactly what it says: bootstrap June–July for both history datasets, then import August and then September as complete three-file cycles carrying only that month, then assert four live sales versions with one per month, no duplication, and every month's own rows still in it. It also concatenates them, which is what Phase 11 will do.
-
-What Phase 10 deliberately did not do
-No API endpoint, and FROZEN_ROUTES is byte-identical. Build plan Phase 10 never mentions a route or the frontend; the monthly reporting workflow UI is 15A. Recorded as Deviation 73.
-No frontend change. Nothing under src/ was touched at all.
-No library-backed Action inputs. Action.run(inputs) is untouched, no Action knows the library exists, and the runner still does not import it. Phase 11.
-No report logic. No calculation, no rep roster, no workbook.
-No new dependency. package.json, package-lock.json and backend/requirements.txt are untouched.
-No change to Phase 9's model or interface. One additive ensure_dataset module-level wrapper in data_library.py, matching the convention every other operation there already had.
-Verification
-Check Result
-pytest (baseline, before work) 1,475 passed — the documented figure
-pytest (after Phase 10) 1,603 passed, 0 failures, 0 skips, 0 xfails — 128 added
-npx pyright 0 errors, 0 warnings, 0 informations
-npm run lint exit 0, silent
-npm run build exit 0, compiled successfully, same three routes
-npm run dev + real HTTP both servers up; a Product Master Run through /forge-api/\* succeeded
-repository after that Run no data/ directory created — the Run pipeline still writes nothing
-live ingestion, real library path bootstrap + a full three-file cycle, then a cross-process read back
-re-running the same cycle refused, DUPLICATE_SOURCE_FILE, nothing persisted
-.staging after six commits empty — every commit published or left nothing
-git status during the live check data/ shows as ignored (!!), never untracked
-The live check is the one thing no unit test can prove, because the suite redirects DATA_LIBRARY at a temporary directory. One was performed against the real config.LIBRARY_DIRECTORY: a three-month bootstrap, then a September cycle supplied as XLSX (so the workbook path was exercised end to end), then a brand-new Python process read back four live sales months, the sample month and the ownership snapshot — 15 columns intact, Château Margaux and Bistro Lumière with their accents, engine recorded as fastexcel-calamine, worksheet Data. The directory was removed afterwards and git status confirmed at every step that git never saw it.
-
-One correction to an earlier claim in this session: .staging being empty was stated before it had been checked, then actually checked. It is empty.
-
-Files created
-
-backend/app/models/source_schemas.py — the three canonical schemas (10A)
-backend/app/services/reporting_period.py — period detection (10B)
-backend/app/services/ingestion.py — commits, coordinated import, bootstrap (10C–10G)
-backend/tests/fixtures/monthly_sources.py — synthetic monthly source files
-backend/tests/test_source_schemas.py — 33 tests (10A)
-backend/tests/test_reporting_period.py — 34 tests (10B)
-backend/tests/test_ingestion.py — 59 tests (10C–10G)
-docs/monthly-source-schemas.md — the 10A documentation deliverable
-Files modified
-
-backend/app/errors.py — IngestionValidationError, and RunValidationError's issue-list construction extracted to a shared IssueReportingError base so the two report a list of issues from one definition. RunValidationError's code, status and behaviour are unchanged and the frozen tests prove it.
-backend/app/services/data_library.py — an ensure_dataset module-level wrapper. Nothing else; no interface, model or record changed.
-backend/tests/test_contract_freeze.py — one row added to FROZEN_ERRORS for INGESTION_VALIDATION_FAILED, plus the amendment note the module's convention requires. An addition: no frozen value moved, and FROZEN_ROUTES is byte-identical. Recorded as Deviation 75.
-README.md — the Data Library section, which said nothing writes to it
-docs/architecture.md — §5b (monthly ingestion), §5a's "what reaches it", two rules in §7, one row in §10
-docs/implementation-status.md
-Files deleted / renamed
-
-none
-Phase 9 — Persistent Data Library Foundation
-Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were rebuilt with the four commands README.md documents, which worked exactly as written.
-
-Phase 9 creates the persistent local dataset layer the recurring monthly reporting workflow needs, without touching the Action and Run architecture the proof of concept validated. That constraint shaped every decision below.
-
-One repository defect found and repaired first
-The check list the Phase 8 entry prescribes was run before any Phase 9 work. The suite was green at 1,335 passed — the documented figure exactly — npm run build succeeded, and no hyphenated module or duplicate file was found. One check failed, and it is the one Phase 8 put first for this reason:
-
-backend/tests/test_mixed_xlsv_round_trip.py was still misspelled (xlsv for xlsx). git show --name-status HEAD on commit 60817e8 ("phase 8 complete") lists four modified files and no rename at all, although the Phase 8 entry records the rename under "Files renamed". Repaired with git mv; no content was edited.
-This is the ninth instance of the family Known Issues 10, 31, 32, 37, 38, 70, 77 and 83 name, the third where a phase entry describes work that is not in the tree, and the third consecutive phase to record this same rename. 6I, 7 and 8 each claimed it; git log --diff-filter=R shows it in none of their commits. It is recorded again as Known Issue 85, with what appears to be the actual cause.
-
-9A — Data Library contract
-backend/app/services/data_library.py defines DataLibrary, an abstract interface with exactly the seven operations build plan 9A lists:
-
-create dataset create_dataset(definition)
-get dataset metadata get_dataset(dataset_id)
-list datasets list_datasets()
-commit dataset version commit_version(dataset_id, commit)
-get dataset version get_version(dataset_id, version_id)
-list dataset versions list_versions(dataset_id)
-load dataset version load_version(dataset_id, version_id)
-Everything else on the class is derived from those seven and implemented once, on the base class — ensure_dataset, has_dataset, superseded_version_ids, current_versions, versions_for_period, current_version — so no implementation can answer a derived question differently from the facts it stores.
-
-It is deliberately shaped like RunStore, which is the convention this repository already established: an ABC, one implementation, a single module-level instance (DATA_LIBRARY), and module-level functions that read it. The test suite swaps that instance per test, which is the same mechanism a different implementation would be installed by.
-
-It is not RunStore, and shares nothing with it. A test asserts the two interfaces have no method name in common, and another asserts that committing to the library records no Run. The build plan states this as a rule of its own ("Run State and Business Data Are Different") and it is the rule the whole phase is built around.
-
-The three datasets build plan Phase 9 requires are declared in backend/app/models/library.py as KNOWN_DATASETS:
-
-ID Kind Why that kind
-sales_history history Versions accumulate; a report reads every month it covers
-sample_history history A dataset of its own — never folded into sales (build plan 10D)
-account_assignments snapshot The whole truth as of one month (build plan 9E)
-No filesystem location appears in any of it. Callers name a dataset and a version by logical ID; where those live is LocalDataLibrary's business.
-
-9B — Dataset version model
-DatasetVersion (Pydantic, frozen) records every item on build plan 9B's list. The mapping is written into the class docstring so a reader can check it against the plan without leaving the file:
-
-build plan 9B field
-dataset ID dataset_id
-version ID version_id
-dataset type dataset_kind
-reporting/effective period period
-created timestamp created_at (tz-aware UTC)
-source filename source_filename
-source byte size source_byte_size
-source content hash source_sha256
-row count row_count
-column count column_count
-column schema column_schema (ColumnSchema)
-parser information parser_engine, worksheet
-minimum / maximum date min_date, max_date
-report month period — see Deviation 63
-replacement / supersession supersedes, supersession_reason
-column_schema reuses the existing ColumnSchema model and results.column_schema(), so a stored dataset is described exactly the way a Run's result is. Nothing new was invented for it.
-
-Version IDs are generated by ForgeXL (new_version_id(), a UUID4) and validated by parse_version_id() with the same rule parse_run_id applies — canonical UUID or nothing. Dataset IDs are lowercase identifiers declared in code, validated by parse_dataset_id(). Both are checked for their shape, before they are used to build a path, so neither an uploaded filename nor a client-supplied string can steer a read or a write out of the library root. test_data_library.py drives ../../etc/passwd, /etc/passwd, .., September.csv and an empty string at both and gets a structured 404 each time.
-
-Provenance is required, not optional. A commit must state the filename, byte size and SHA-256 of the file it came from; DatasetCommit.from_upload() derives the last two from the bytes so a caller cannot state a size and a hash that disagree with the file. A version whose source is unknown could not be audited, could not be recognised as an accidental re-upload (build plan 10C) and could not explain a report it fed.
-
-9C — Local persistent storage
-Parquet plus small JSON records, as build plan 9C prefers. No database was added. No DuckDB, no SQLite, no PostgreSQL, no Redis, no Supabase — and no new dependency of any kind: backend/requirements.txt and package.json are untouched. Polars already writes and reads Parquet.
-
-data/library/ config.LIBRARY_DIRECTORY; git-ignored
-sales_history/
-dataset.json
-versions/
-<version id>/
-version.json
-data.parquet
-sample_history/ …
-account_assignments/ …
-.staging/ transient; a commit in progress
-There is no separate index file. A dataset is a directory holding dataset.json; a version is a directory holding version.json. The layout is the catalogue, so there is no catalogue that can disagree with the data it describes. The cost is that list_versions reads one small JSON per version; at monthly granularity that is a few dozen files, and it is recorded as Known Issue 87 rather than optimised speculatively.
-
-Atomic writes, which build plan 9C asks for "wherever a partial write could corrupt persistent state", in two forms:
-
-A version is assembled in .staging/<uuid>/ and published with a single os.rename. os.rename refuses an existing directory and the version ID is freshly generated, so publishing can never overwrite a committed version. A reader sees either no such version or the whole of it.
-A dataset record is written to a temporary file in the same directory, flushed and fsynced, then os.replaced over the destination.
-Both staged files are fsynced before the rename, so the rename does not publish a name whose contents are still in a buffer.
-
-config.LIBRARY_DIRECTORY is the only location the backend is configured to write, overridable with FORGEXL_LIBRARY_DIRECTORY, absolute by default and derived from the repository root rather than the working directory. It is resolved once at construction, so a chdir cannot change which library a caller reaches — asserted by a test that chdirs and reads.
-
-No physical path is exposed. A test sweeps every JSON file the library writes for /home/, /Users/, /tmp, versions/ and .parquet and finds none, and another does the same over a serialised record.
-
-9D — Immutable historical versions
-Enforced three ways, not asserted once:
-
-The interface has no way to rewrite history. No delete_version, no update_version. A test asserts those names are absent from DataLibrary, so adding one would be a deliberate act with a failing test attached.
-A commit always creates a new version ID, and publishing uses a rename that fails on an existing target.
-A period that already has a live version can only be re-committed as an explicit replacement, naming the version it supersedes and giving a reason. Without that rule 9D would be satisfiable by addition rather than overwriting: two live versions of September, with nothing to say which is true. Recorded as Deviation 65, because the rule is an interpretation of 9D rather than a sentence in it.
-Build plan 9D's four requirements, each with the test that proves it:
-
-9D requires Proof
-preserve the old version the old version's bytes on disk are byte-identical before and after
-create a new version a new ID, loading the corrected rows
-mark which version supersedes it supersedes on the new version; superseded_version_ids() derives the set
-retain metadata explaining the change supersession_reason — a version that supersedes without one is refused
-The reverse pointer is derived, never written back: marking the old record would mean rewriting an immutable record, and a fact stored twice is a fact that can end up disagreeing with itself.
-
-Three integrity rules keep the chain explainable: a replacement must name a version that exists, must cover the same period, and must not name one that has already been replaced. A replacement can itself be replaced, and a test walks a three-deep chain.
-
-9E — Account ownership snapshots
-account_assignments is declared snapshot, and the kind is enforced: a snapshot version must state the period it is effective for. A snapshot with no month could not be selected for a report and could not be superseded by a later month, so it is refused rather than stored as something nothing can use.
-
-The scenario build plan 9E describes is tested directly. An account belongs to Beth Comeaux in September and Kevin Wardell in November; three monthly snapshots are committed; current_version("account_assignments", "2026-09") returns September's, and loading it gives Beth Comeaux. A later snapshot supersedes nothing — superseded_version_ids() is empty and both months stay live — which is the difference between a snapshot dataset and one mutable file.
-
-A history version, by contrast, may cover no single period, because build plan 10G's bootstrap spans several months. Only a snapshot is required to name one.
-
-9F — Persistence verification
-All seven proofs build plan 9F requires, in backend/tests/test_library_persistence.py, one section per item.
-
-The two restart proofs are done in a separate Python process, not by constructing a second object in this one. Two objects in one interpreter would share any accidental module-level cache, and the test would pass for the wrong reason. A subprocess started after the commit, importing ForgeXL from source with nothing in memory, reads the version back — which is what "survives a backend restart" actually means. The reopened-instance tests are kept alongside as the cheaper form.
-
-9F requires Result
-a dataset version survives backend restart a second process reads the rows back, values and all
-dataset metadata survives backend restart a second process reads all three datasets and the full version record; a reopen compares the record equal
-multiple versions of one dataset coexist two months, both loadable after a reopen; adding one leaves the other's bytes identical
-an older version can be loaded explicitly a superseded version still loads by ID, in-process and in a second process
-replacing a period does not silently destroy the previous one both version directories present; a re-commit without superseding is refused, not absorbed
-account snapshots remain independently retrievable three months, each retrieved on its own; a second process reads the rep who owned the account then
-invalid/corrupt commits leave no partially valid state seven tests — see below
-The last row is the one worth expanding, because "no partially valid state" has more than one failure mode:
-
-A refused commit writes nothing at all. Every check runs before the first byte; after three different refusals the versions/ directory does not exist.
-A commit that fails part-way leaves no version. The failure is injected between the two files a version consists of — the worst moment, with the Parquet payload written and its record not — and nothing of it appears where a version is looked for. Staging is left clean.
-A corrupt record is reported, not ignored. Malformed JSON, a missing required field, and a record claiming a newer format version each raise DATA_LIBRARY_ERROR. Returning an empty result would read as "this month was never imported", which is worse than the fault.
-A record must agree with where it is stored. Copying one version's record into another's directory is detected and reported, rather than serving one month's figures under another month's ID.
-A directory that is not a version is not read as one. A directory with no record, and one whose name is not a version ID, are both skipped without failing the listing.
-Concurrency, and the control that proves the guard works
-LocalDataLibrary holds a write lock, for the reason InMemoryRunStore already documents: Uvicorn runs synchronous endpoints in a thread pool, so two commits really can arrive at once, and every write here is a check-then-write against state on disk. Without it, two commits could both read "September is free" and both publish.
-
-The test starts four threads on a barrier and asserts exactly one succeeds. It was then run against a deliberately unlocked build — the lock replaced with nullcontext() — and it failed, which is the only way to know the test is testing something. The lock was restored and it passes again. The lock covers this process only; two backends sharing one library directory are not protected and are not a supported configuration (Known Issue 88).
-
-What Phase 9 deliberately did not do
-Build plan Phase 9 ends with "No Monthly Sales Rep Report business logic is required yet", and the assignment was explicit about not preparing later phases. Nothing was built beyond the storage layer:
-
-No API endpoint. Nothing under backend/app/api/ changed, and main.py mounts no new router. The library is not reachable over HTTP.
-No frontend change. Nothing under src/ was touched at all.
-No ingestion. No schema for a sales, sample or assignment file; no period detection; no duplicate-upload detection; no coordinated monthly import; no bootstrap path. All of that is Phase 10.
-No library-backed Action inputs. Action.run(inputs) is untouched, no Action knows the library exists, and the runner does not import it. Phase 11.
-No import-time side effect. ensure_known_datasets() is called deliberately, never on import, so a library that has never been written to stays absent. Confirmed by a test and by the live check below: after a full Run through the real application, no data/ directory exists.
-The only module outside app/services/data_library.py and app/models/library.py that changed is app/errors.py (four new error classes) and app/config.py (one new setting).
-
-Verification
-The full check list, run against the repaired baseline and again at the end.
-
-Check Result
-pytest (baseline, before work) 1,335 passed — the documented figure
-pytest (after Phase 9) 1,475 passed, 0 failures, 0 skips, 0 xfails — 140 added
-npx pyright 0 errors, 0 warnings, 0 informations
-npm run lint exit 0, silent
-npm run build exit 0, compiled successfully, same three routes
-npm run dev + real HTTP both servers up; a Product Master Run through /forge-api/\* succeeded
-repository after a full Run no data/ directory created — the Run path still writes nothing
-default library location, for real a commit into data/library/ and a cross-process read back; then removed
-git status during that check data/ never appeared — the ignore rule holds
-The live check is worth stating precisely, because it is the one thing no unit test can prove: the suite redirects DATA_LIBRARY at a temporary directory, so only a real run against config.LIBRARY_DIRECTORY shows that the default is right. One was performed — three datasets created, one September version committed, then read back by a brand-new Python process — and the directory was removed afterwards. git status confirmed at every step that git never saw it.
-
-Files created
-
-backend/app/models/library.py — dataset and version model, identity rules, the three declared datasets
-backend/app/services/data_library.py — DataLibrary, LocalDataLibrary, DATA_LIBRARY, the module-level functions
-backend/tests/test_library_models.py — 61 tests (9B)
-backend/tests/test_data_library.py — 52 tests (9A, 9C, 9D, 9E)
-backend/tests/test_library_persistence.py — 27 tests (9F)
-Files modified
-
-backend/app/config.py — LIBRARY_DIRECTORY added; the "there is no data directory" comment corrected rather than left to become false
-backend/app/errors.py — UNKNOWN_DATASET, UNKNOWN_DATASET_VERSION, INVALID_DATASET_COMMIT, DATA_LIBRARY_ERROR
-backend/tests/conftest.py — an autouse data_library fixture, so no test can reach the repository's real library even by accident
-.gitignore — the data/ rule's comment, which claimed there was nothing to protect
-.env.example — FORGEXL_LIBRARY_DIRECTORY, replacing the "there is no data-directory setting" block
-README.md — a "Where the Data Library is stored" section beside the existing "Where Runs are stored"
-docs/architecture.md — §5a (the Data Library), two entries in §2 and §7, and §6 updated to record that the seam it described was used and cost nothing
-docs/implementation-status.md
-Files renamed
-
-backend/tests/test_mixed_xlsv_round_trip.py → backend/tests/test_mixed_xlsx_round_trip.py (the repair above — the third phase to attempt it; this time verify it against git show --name-status)
-Files deleted
-
-none
-package.json, package-lock.json and backend/requirements.txt are untouched — Phase 9 added no dependency — and nothing under src/ was modified.
-
-Phase 8 — Final POC Validation and Handoff
-The proof of concept is complete. Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist, which made 8.1 a genuine clean-setup test rather than a re-enactment of one.
-
-Phase 8 is a validation phase, so almost all of it is evidence rather than code. Three files changed: README.md (8.2, a rewrite), one stale docstring, and one filename that a previous phase recorded as renamed and had not renamed.
-
-One repository defect found and repaired first
-The check list the Phase 7 entry prescribes was run before any Phase 8 work. The suite was green at 1,335 passed — the documented figure, exactly — and npm run build succeeded. One check failed:
-
-backend/tests/test_mixed_xlsv_round_trip.py was still misspelled (xlsv for xlsx). Phase 6I recorded this rename as done and it was not; Phase 7 found that, recorded the repair under its own "Files renamed", and the rename is not in commit d3a0676 — git log --diff-filter=R shows no rename in it at all. So the same file has now been recorded as renamed twice by two different phases and renamed by neither. Repaired with git mv; no content was edited.
-This is the eighth instance of the family Known Issues 10, 31, 32, 37, 38, 70 and 77 name, and the second where a phase entry describes work that is not in the tree. Phase 7's own advice — read the last phase's "Files renamed" list against git log --diff-filter=R, because a green suite cannot see a misspelled filename that pytest collects by glob either way — is exactly what caught it. That check is now first in the list at the end of this document.
-
-8.1 — Clean setup test
-Performed for real, from an empty container, following only what the repository documents. Two commands' worth of setup, in this order:
-
-npm ci # 160 packages, 0 vulnerabilities
-python3 -m venv backend/.venv
-backend/.venv/bin/python -m pip install --upgrade pip # 24.0 -> 26.2.1
-backend/.venv/bin/python -m pip install -r backend/requirements.txt
-Both succeeded first time. Every resolved backend version matched the list recorded under Current Architecture exactly. No undocumented step was needed: no directory to create, no database, no migration, no .env.local, no credential, no playwright install, no manual patching.
-
-The honest qualification, and the reason 8.2 matters: those commands were not in README.md. They were reconstructed from a comment block in backend/requirements.txt and the error message scripts/dev-backend.sh prints when the virtual environment is missing. A developer could find them; a new reader opening the README could not. That is the "hidden manual setup step known only to the developer" 8.1 is asking about, and 8.2 removes it — the README now carries these four commands verbatim.
-
-8.2 — README
-README.md was the Create Next App default through Phase 7 (Known Issues 4 and 76). Rewritten from scratch, covering everything build plan 8.2 lists:
-
-8.2 asks for Where
-project purpose opening section
-prerequisites version table — Node ≥ 20.9 (Next 16's own engines), Python ≥ 3.10 (the floor every backend dependency declares), verified versions named
-initial setup the four commands above, verbatim
-starting application npm run dev, plus npm run dev:lan for the second-laptop workflow
-local URLs 3000, 8000, /docs
-running backend tests cd backend && .venv/bin/python -m pytest, and the benchmark harness separately
-frontend lint/build npm run lint, npm run build, npm start
-where Runs are stored a section of its own — in process memory, nothing is written to disk, and a restart clears run history
-supported formats upload/download/rejected table, the one-worksheet rule, the 250 MB limit
-current Actions both, with input slot IDs, required columns and output IDs
-It does not duplicate docs/build-plan.md; it links to the three documents under docs/ instead. Every command in it was executed this session, and every factual claim was checked against the running application rather than against this file:
-
-README claim How it was checked
-the four setup commands run, from empty, in this order
-npm run dev starts both run; both answered
-npm start serves the production build run; page 200, proxy reached FastAPI
-http://127.0.0.1:8000/docs 200
-macro formats refused .xls upload → UNSUPPORTED_EXTENSION, message quoted
-a restart clears run history performed — see 8.3 below
-max upload 250 MB / FORGEXL_MAX_UPLOAD_BYTES config.py
-"nothing is written to disk" git status --short --ignored after every verification in this phase: only the edits this phase had made so far, and no data/ directory at any point
-8.3 — Startup workflow
-Build plan 8.3's target is cd <project> → npm run dev → open http://127.0.0.1:3000. That is exactly what happens; nothing needs documenting as unreliable.
-
-Check Result
-npm run dev starts Next.js and FastAPI from one command yes, concurrently, logs interleaved and prefixed
-both ready 1 second after the command, on this container
-GET /health direct {"status":"ok"}
-GET /forge-api/health through the proxy {"status":"ok"}
-http://127.0.0.1:3000 200
-binding uvicorn logged http://127.0.0.1:8000; Next logged 127.0.0.1:3000
-The production path was checked too, because the README documents it: npm start after npm run build, with the backend started by scripts/dev-backend.sh, serves the page and proxies to FastAPI identically.
-
-Backend restart (build plan Phase 6 rules 14–15), re-verified in Phase 8 because the README now makes a promise about it:
-
-After killing and restarting uvicorn Result
-GET /api/runs/<id> for a Run created before the restart 404 UNKNOWN_RUN, structured, no path, no traceback
-its CSV download the same clean 404 UNKNOWN_RUN
-a new Run 200 — the application is entirely healthy
-One incidental confirmation worth recording: while the frontend was up and the backend was not, /forge-api/health returned the Route Handler's own readable sentence — "The ForgeXL backend could not be reached." — rather than a stack trace or an empty body.
-
-8.4 — Complete acceptance test
-Driven through the real UI in real headless Chromium against the real servers, not over HTTP and not by reasoning. Three synthetic fixtures, built for this phase, with hand-computed expected outputs. 37 UI checks and 14 workbook checks, 51/51 passed.
-
-Exact Duplicate Remover — a 10-row CSV carrying four exact duplicates, an accented value beside its unaccented twin, a blank cell and a comma inside a quoted cell:
-
-Step Result
-select Action description and slot rendered from metadata
-upload fixture name and size shown
-Run "Run Successful"
-metrics Input Rows 10, Output Rows 6, Columns 4, metric "Duplicates removed" 4
-preview headers in source order; the six first occurrences in source order; café and cafe both survive as separate rows; the blank renders as —, not ""; "Showing 1–6 of 6"
-CSV download forgexl-exact-duplicate-remover-deduplicated-data-<stamp>.csv, contents byte-exact against the hand-written expectation, quoted comma preserved
-XLSX download correct filename convention
-the downloaded workbook, reopened with openpyxl worksheet Deduplicated Data; headers correct; 6 data rows; every value identical, blank still blank; no vbaProject in the archive
-Product Master Builder — an 8-row XLSX with the six required columns plus a seventh the Action must drop, three duplicate product combinations, a blank Vintage, and accented producer/selection text:
-
-Step Result
-select Action "Required columns: SKU, Vintage, Supplier, Producer, Selection, Volume", from metadata
-Run "Run Successful"
-metrics Input Rows 8, Output Rows 5, Columns 6, metric "Duplicate product rows removed" 3
-required output fields exactly the six, in the required order; ExtraNote dropped
-duplicates removed the three exact six-field repeats, including the pair whose Vintage is blank in both
-accents Château Lafite, Bordeaux Sélection, Weingut Müller, Bodega Ñ, Selección — every one intact through XLSX → parse → Action → preview → CSV → XLSX
-near-misses kept same SKU different Vintage, and same SKU different Volume, both survive as separate rows
-both downloads CSV byte-exact; the workbook reopened — worksheet Product Master, 5 rows, every value identical, no macro project
-Validation — the same Action, given a CSV missing Volume:
-
-Check Result
-the Run is refused "Validation Failed"
-the message names the missing column yes, Volume
-[object Object] absent
-Python traceback absent
-"Run Successful" absent
-results section absent
-preview table absent
-export links absent
-The last four are the point of 8.4's "verify no successful output is falsely presented": a failed Run offers nothing that could be mistaken for a result.
-
-Across the whole test: no uncaught page errors, and every request the browser made went to its own origin — port 8000 appeared nowhere.
-
-Preview pagination was measured separately against a 250-row result, because the acceptance fixtures are deliberately small:
-
-Request Result
-no parameters offset 0, limit 100, 100 rows, total_rows 250
-?offset=100 rows 101–200, first row correct
-?offset=200&limit=100 the last 50 rows
-?limit=500 250 rows — the whole result, at the maximum
-?limit=501 400 INVALID_REQUEST — refused, not clamped
-?offset=-1 400 INVALID_REQUEST
-8.5 — Extensibility proof
-Build plan 8.5 asks a code-review question — if we add another Action tomorrow, what files must change? — and says the architecture has failed if the answer includes a frontend file. It was answered twice: by reading the code, and by adding a real third Action.
-
-The code review. Swept the whole of src/ for anything Action-specific:
-
-Searched for Found
-either Action ID, either output ID, either input slot ID nothing
-any required column name (SKU, Vintage, Supplier, Producer, Selection, Volume) nothing
-any branch on an Action ID one line — actions.find((a) => a.id === selectedActionId), which is looking up the selected item in a list the backend sent, not branching on which Action it is
-In the backend, the two Action IDs appear only in their own modules and in the registry's import lines, and no output ID appears outside app/actions/ at all. There is no if action_id == ... anywhere.
-
-The live probe. A third Action, tmp_extensibility_probe ("Territory Coverage Probe", version 9.9.9), was written and registered — deliberately harder than the two real ones: three input slots (current_sales, required, .csv/.xlsx, requiring columns Rep and Account; historical_sales, required, .csv only; assignments, optional) and two output tables. Two files changed, both backend: the new module and the registry. Not one file under src/ was touched.
-
-20/20 checks passed:
-
-the new Action appears in the selector pass
-three declared slots render three upload areas pass
-each slot labelled from its metadata pass
-required slots marked Required, the optional one Optional pass
-per-slot accepted extensions come from metadata pass
-per-slot required columns come from metadata pass
-version 9.9.9 shown from metadata pass
-Run disabled with no files pass
-Run still disabled with 1 of 2 required slots filled pass
-.xlsx refused for the .csv-only slot, named from metadata pass
-("Historical Sales must be .csv.")
-Run enabled with both REQUIRED slots filled pass
-(the optional slot is correctly not waited on)
-the Action runs end to end pass
-two declared outputs render an output selector pass
-the output selector is built from the declared outputs pass
-the first result table previews correctly pass
-the Action's own metric renders, unmodified frontend pass
-a multi-table Run offers the whole-Run workbook pass
-the whole-Run workbook downloads pass
-switching output previews the second table correctly pass
-no uncaught page errors pass
-This goes further than the Phase 5 probe, which had three slots but one output: Phase 8's probe also proves the multi-output path — the output selector, per-table preview switching and the whole-Run workbook — is equally Action-agnostic.
-
-The probe module was deleted and git checkout backend/app/actions/registry.py restored the registry. GET /api/actions returns exactly the two real Actions again, and git status shows the registry byte-identical to its committed state.
-
-The answer to 8.5's question, then, verified rather than asserted:
-
-new Action module backend/app/actions/<action>.py
-registry entry backend/app/actions/registry.py (2 lines)
-tests backend/tests/test\_<action>.py
-fixtures, if it needs them backend/tests/fixtures/
-
-ActionSelector.jsx unchanged
-FileUploadSlot.jsx unchanged
-RunButton.jsx unchanged
-ActionRunner.jsx unchanged
-page.jsx unchanged
-every other file under src/ unchanged
-Build plan §37 — Definition of Done, item by item
-Each line checked against the repository, not against this document.
-
-Requirement Evidence
-Next.js frontend runs locally 8.3; npm run dev and npm start both verified
-FastAPI backend runs locally 8.3
-both bind to loopback uvicorn and Next both logged 127.0.0.1; test_local_exposure.py asserts it
-one command starts the development environment npm run dev, both ready in 1 s
-frontend discovers Actions dynamically 8.5; the selector is built from GET /api/actions and holds no Action name
-Action registry exists app/actions/registry.py; no if/elif chain
-two Actions exist both, and a third registered and removed during 8.5
-CSV input works 8.4 A
-XLSX input works 8.4 B
-invalid data is rejected explicitly 8.4 C, plus 264 Phase 7 refusal tests
-source uploads are preserved superseded by Phase 6 rule 1 — the upload is never written at all, so the user's file cannot be modified. See Deviation 60
-Run manifests exist as API objects, not as files — MANIFEST_SCHEMA_VERSION 2, returned by POST /api/runs and GET /api/runs/{id}. Superseded in form by Phase 6 rules 1–3
-internal outputs use Parquet superseded by Phase 6D/6I — no file is written, so there is nothing for Parquet to be. Deviations 31 and 53
-browser preview works 8.4, in Chromium
-preview is paginated 8.4, six paging cases including both refusals
-CSV export works 8.4, byte-exact both Actions
-XLSX export works 8.4, both workbooks reopened and verified
-automated backend tests pass 1,335 passed, 0 failures, 0 skips, 0 xfails
-frontend lint passes npm run lint, exit 0, silent
-frontend production build passes npm run build, exit 0
-controlled accuracy fixtures pass Phase 4 fixtures, the 6H catalogue and 8.4's three, all with hand-defined expected output
-large synthetic data benchmark performed 7G–7I, re-run this phase on the clean install
-performance results documented tables under Tests
-implementation-status.md current this entry
-README has working setup instructions 8.2; every command executed
-extensibility test passes 8.5, 20/20
-final POC evaluation documented below
-Three lines are superseded rather than met. All three describe the on-disk model Phase 6 deliberately replaced, and the Phase 6 architectural rules state that they override earlier conflicting build-plan instructions. None is an unmet requirement; each is recorded as a deviation so the substitution is visible rather than quiet.
-
-Build plan §35 — Final POC evaluation
-Scored against evidence in this repository, not impressions. The counterweight column is the reason each score is not 10.
-
-Category Score Basis Counterweight
-A Ease of use 7 select → upload → run → review → export, with drag-and-drop, no jargon, no filesystem knowledge needed starting it still requires a terminal every time, which build plan §3.5 explicitly wants to avoid
-B Speed 9 100,000-row CSV: whole Run 33 ms in process, 94 ms over HTTP. XLSX: 919 ms. Both inside §3.4's desired < 5 s, not merely its < 15 s acceptance XLSX export of a 100,000-row result is ~4 s and is the slowest thing ForgeXL does (Known Issue 80)
-C Accuracy 9 1,335 tests; expected outputs hand-defined; exact column matching; Phase 7 found three real defects by attacking it, and two were repaired rather than documented away one documented limit: a mixed numeric column loses integer precision past 2^53 (Known Issue 78)
-D Error clarity 8 structured {code, message, details} everywhere; distinct codes tell EMPTY_FILE, EMPTY_DATASET and PARSE_ERROR apart; missing columns are named; no traceback and no [object Object] reaches the browser a refused download renders as a raw JSON body, because a download is a link navigation and not a fetch (Known Issue 79)
-E Extensibility 10 8.5: a three-slot, two-output Action appeared complete in the UI with zero frontend change, and the sweep found nothing Action-specific in src/ to change none found
-F Maintainability 7 clear layer ownership; no plugin loader, no dynamic import, no speculative abstraction; heavily commented in the why, not the what no frontend test suite at all (Deviation 22); ActionRunner holds every piece of workflow state (Known Issue 18); this status document is 6,000+ lines
-G Local data privacy 10 loopback binding, exact CORS allowlist, telemetry disabled in-repo, no HTTP client imported by the running backend, and nothing written to disk — 35 assertions, not one manual check none; the LAN mode is opt-in, single-script and exposes only Next.js
-H Export quality 9 both formats reopened independently and verified value by value; sensible worksheet names; ForgeXL filename convention; over-limit data is refused, never truncated numbers carry Excel's General format rather than a chosen one (Deviation 41)
-I UI quality 7 restrained and legible, dark mode, drag-and-drop, paginated preview, an audit summary that explains the Run no run history and no way back to a previous Run; a very wide result relies on horizontal scrolling alone (Known Issue 53)
-J Architectural potential 9 the DataFrame-first Action contract is independent of storage; the RunStore seam is proven daily by the test suite swapping it; Phases 9–15 are planned against it without changing the Action contract run state grows without bound in memory and nothing evicts it (Known Issues 28, 40)
-Average 8.5. Stated as the build plan asks — as a convenient summary only. The average conceals nothing here: the two categories §35 warns about protecting, accuracy (9) and architecture (10 and 9), are the strongest scores, and the three 7s are all comfort or process rather than correctness.
-
-Build plan §36 — Go / Revise / Stop
-Recommendation: GO. Every condition §36 lists for GO is met:
-
-GO condition Status
-workflow is pleasant yes, once running — 8.4 completed both Actions end to end with no rough edge in the flow itself
-results are accurate yes — controlled fixtures, exact expected output, byte-exact exports
-performance is acceptable yes, by two to three orders of magnitude against §3.4's target
-new Actions are easy to create yes — 8.5, one module and two registry lines
-architecture remains understandable yes — twelve modules, each owning one thing, documented in docs/architecture.md
-no fundamental blockers emerged none found, across Phase 7's deliberate attack and Phase 8's validation
-The decision is the user's to make, and it should be made with two things still outstanding, both of which need hardware this session does not have and neither of which is a code change:
-
-The two-machine acceptance (Known Issue 64). A Mac file picker, Finder drag-and-drop and Microsoft Excel opening a ForgeXL export are the three things a Linux container cannot prove. Everything either side of them is proven; npm run dev:lan exists and prints the address to use.
-The Mac performance run (Known Issue 82). The harness is committed and is one command. The margins are large enough that the conclusion is very unlikely to move, but every number in this document is a container number.
-Neither changes the recommendation. Both should be done before the GO is acted on, because §3.4 asks for Mac numbers and §36's "workflow is pleasant" is a judgement only the user can make on their own machine.
-
-What GO would mean next, per the build plan: Phase 9, Persistent Data Library Foundation. It is explicitly gated on this decision and must not begin until the user makes it.
-
-Files created
-
-none in the repository. The acceptance and extensibility harnesses, their fixtures, the downloaded files and the Playwright installation all live in the session scratchpad, outside the repository, and were removed with it.
-Files modified
-
-README.md — rewritten (8.2)
-docs/architecture.md — status line only. It read "current as of Phase 6I" although Phase 7 had edited the document; a handoff should not leave its architecture document labelled with the wrong phase. No architectural content was changed, because Phase 8 changed no architecture
-backend/app/actions/base.py — one stale docstring paragraph: it said the runner creates the Run directory, preserves the upload, writes Parquet and writes the manifest, none of which has been true since Phase 6D. Rewritten to describe what the runner actually owns, with the superseded list kept as a parenthetical so the history is not lost
-docs/implementation-status.md
-Files renamed
-
-backend/tests/test_mixed_xlsv_round_trip.py → backend/tests/test_mixed_xlsx_round_trip.py (the repair above)
-Files deleted
-
-none
-package.json, package-lock.json and backend/requirements.txt are untouched — Phase 8 added no dependency, and the temporary Playwright install went into the scratchpad. Nothing under src/ was modified, which is worth stating plainly: 8.5's whole claim is that a new Action needs no frontend change, and this phase registered one and removed it without touching a frontend file.
-
-Phase 7 — Reliability, Accuracy, Security, and Performance Hardening
-Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly.
-
-Build plan Phase 7's instruction is "attempt to break the POC — do not merely demonstrate the happy path", so the work was done in that order: probe first, fix what the probes broke, then pin each finding with a test. Three real accuracy defects were found and two were repaired; the third is a limitation of floating-point representation and is documented rather than redesigned.
-
-Three repository defects found and repaired first
-The check list the Phase 6I entry prescribes was run before any Phase 7 work. The suite is the first check for the reason that entry gives, and it earned its place again — the committed suite was not green:
-
-backend/app/api/upload-form.py was still present, alongside upload_form.py, byte-identical to it. The Phase 6I entry records a git mv; what is in the commit is an add of the correct name with the hyphenated one left behind. Harmless only by luck — nothing imports the hyphenated name because nothing can — but it is an unimportable module sitting in the application package. Deleted.
-backend/tests/test_mixed_xlsv_round_trip.py was still misspelled (xlsv for xlsx). The same Phase 6I entry records this rename as done too. Renamed with git mv; no content was edited.
-test_export.py::test_generating_an_export_writes_nothing still declared the runs_dir fixture, which 6I deleted from conftest.py. The suite reported 1,018 passed, 1 error rather than the documented 1,019 passed. Repaired by the substitution Known Issue 74 documents as the pattern: runs_dir becomes quarantine. The suite then reported the documented 1,019 passed exactly.
-This is the same family as Known Issues 10, 31, 32, 37, 38 and 70 — committed state that does not match its own record — and it is that family's seventh instance. Two of the three were claimed as done in the previous phase entry, which is a new variant worth naming: the check list catches a repository that cannot run, but nothing was checking a phase entry against the tree it describes. The check list at the end of this document has been extended.
-
-7A — Regression tests
-The full suite, frontend lint and a frontend production build, run first against the repaired baseline and again at the end. No warning was suppressed to make output clean. The two upstream deprecation warnings remain unsuppressed (Known Issue 7); the httpx / httpx2 dependency decision this phase inherited is recorded under Issues below.
-
-7B — Data edge cases → one accuracy defect found and repaired
-Every case build plan 7B lists was driven through the real pipeline. Most behaved correctly and are now pinned by tests/test_data_edge_cases.py (36 tests, both upload formats wherever a workbook can express the case).
-
-Defect: a duplicated column name was silently renamed. A file whose header row names two columns the same thing was accepted, and every parser resolved the clash by renaming the later column and carrying on:
-
-Engine SKU, Vintage, SKU became
-Polars CSV SKU, Vintage, SKU_duplicated_0
-fastexcel SKU, Vintage, SKU_1
-openpyxl a Polars DuplicateError, reported as a generic parse failure
-Through the Product Master Builder the consequence was concrete and silent: the Run succeeded, the Action selected the first SKU, and the second column's values were dropped from the result with no warning anywhere in the manifest. Build plan section 3.3 forbids this in three separate clauses — never silently rename required columns, never silently choose a semantically different field, never silently drop data.
-
-Repaired by checking the header row as the file spells it, before any engine has renamed anything, and refusing with a new structured DUPLICATE_COLUMNS / 422. Refusal rather than a warning, for the reason build plan section 17 gives for the multi-worksheet case: the application cannot know which of the two columns was meant, and guessing produces a wrong answer that looks right. Names are compared exactly, so SKU and sku are two names and neither is a duplicate; blank header cells are exempt, because two unnamed columns are not one name used twice.
-
-Everything else 7B lists behaves correctly and is now asserted:
-
-Case Behaviour
-empty CSV (zero bytes) EMPTY_FILE / 422
-CSV holding only a newline PARSE_ERROR / 422
-headers only EMPTY_DATASET / 422 — a different fact, told apart
-one-row dataset round-trips exactly
-duplicate rows exact repeats removed, near-misses kept
-all-null column survives as a column of nulls, not dropped
-Unicode, accents, apostrophes preserved; accented and unaccented names stay two rows
-commas inside quoted CSV cells preserved as one value
-multiline CSV text preserved; verified again by exporting and re-uploading
-dates read as the text they are; date-shaped nonsense is not repaired
-negative numbers, zero, negative zero preserved
-blank values stay null, never an empty string
-large text cells 40,000 characters survive CSV upload, preview and export
-Documented limitation, not repaired: floating-point precision. A numeric column holding both a decimal and an integer larger than 2^53 is inferred as Float64, and 2^53 + 1 reads back as 2^53. The conditions are narrow and are pinned by three tests: an integer-only column is exact at any size (Polars widens past 64 bits when the file asks), a column holding any text stays text and loses nothing, and only the mixed case is affected. This is IEEE-754 — the same representation Excel itself uses, so the same file shows the same number there — and repairing it means changing how numeric columns are inferred, which is an architecture decision outside this phase (build plan section 14). Recorded as Known Issue 78.
-
-7C — Incorrect schemas → correct, now pinned
-Both near-misses the build plan names, and twelve more, are refused by name. tests/test_incorrect_schemas.py (22 tests).
-
-Uploaded Result
-Sku MISSING_COLUMNS, missing_columns: ["SKU"]
-Supplier Name MISSING_COLUMNS, missing_columns: ["Supplier"]
-supplier, SKU , SKU, VINTAGE, Vol, Volume (ml), Selections, Producer/Winery each refused, naming the column it failed to match
-the exact six accepted
-the exact six, reordered accepted; the output order is still the fixed one
-the six plus two extra columns accepted, extras dropped, no warning
-Several of these are plainly the same concept as the column they miss, which is the point: recognising Supplier Name would mean ForgeXL had decided what a column represents. A refused Run is also recorded in the store with its real columns and its error, so the failure can be examined afterwards (build plan 3.9).
-
-7D — Filename security → correct, now pinned end to end
-All five names the build plan lists, plus eight more shapes, driven through POST /api/runs. ForgeXL's answer is stronger than sanitising: since Phase 6C an upload is never written at all, so there is no path for a name to traverse. Each hostile name produces a normal Run, the application's own source.csv, the client's name kept verbatim as metadata, and nothing written — asserted against the quarantine directory and its parent, since a traversal that worked would land outside the quarantine.
-
-Also asserted: an error message reduces a path-shaped name to its basename; a download's Content-Disposition is built from the Run and never from the upload, so ../../"evil";name.csv cannot reach that header; every extension build plan section 16 rejects is rejected; and a .csv extension does not make arbitrary bytes a CSV.
-
-7E — Invalid IDs → controlled 4xx everywhere
-Malformed Run IDs, output IDs, Action IDs and paging parameters, across every route. tests/test_hostile_input.py (150 tests) covers 7D and 7E together.
-
-Input Result
-12 malformed Run IDs, on all five Run routes 404 UNKNOWN_RUN, structured
-Run IDs containing a separator (../../etc/passwd, <script>…) the URL matches no route — a framework 4xx, still controlled, still carrying no path
-7 unknown output IDs × 3 routes 404 UNKNOWN_OUTPUT, listing the available IDs
-10 unknown Action IDs, including shell metacharacters 404 UNKNOWN_ACTION
-blank or absent action_id 400 INVALID_REQUEST
-a JSON body where a form is expected 400 INVALID_REQUEST
-offset=-1, limit=0, limit=501 400, refused rather than clamped
-limit=abc 422, the framework refusing a non-integer
-offset past the end 200 with an empty page — a legitimate question
-No refusal returns 5xx, and none carries a server path or a traceback — asserted against this machine's real path prefixes rather than a guess at what a path looks like. The one 500 ForgeXL raises deliberately (an Action that crashes) was checked for what it does not say: its cause carries /home/someone/private/data.csv on purpose, and none of it reaches the response.
-
-7F — Workbook cases → correct, now pinned
-tests/test_workbook_cases.py (21 tests).
-
-Case Behaviour
-normal single-sheet XLSX runs; engine and worksheet recorded
-empty XLSX PARSE_ERROR, "contains no data"
-header-only XLSX EMPTY_DATASET — told apart from the above
-two data sheets AMBIGUOUS_WORKBOOK, naming both, with the build plan's own message
-one data sheet beside blank ones unambiguous, runs
-a data sheet plus a one-cell notes tab refused (Known Issue 12, now pinned)
-workbook without required columns parses, then MISSING_COLUMNS
-workbook containing formulas the stored value, never evaluated
-Macros. The rule holds for a stronger reason than a disabled setting: ForgeXL never opens a file that can carry one. .xlsm, .xlsb, .xls and .ods are refused by extension before any engine sees the bytes, so there is no macro setting anywhere to get wrong. The formula tests cache deliberately wrong arithmetic — =A2+B2 cached as 99 — so a reader that evaluated the formula would return 5 and fail the test. It returns 99. Text beginning with =, including the DDE form, is read as text and written back as text, verified by reopening the exported workbook with openpyxl in formula mode. The workbook ForgeXL writes declares no macro content and carries no vbaProject.bin.
-
-The XLSX export → two more defects found and repaired
-Not on 7F's list by name, but found by 7B's "large text cells" and 7F's workbook probing, and both are section 3.3 violations:
-
-A text value longer than 32,767 characters was silently truncated. xlsxwriter's answer to an over-long cell is to shorten it and return a code Polars does not check, so the workbook opened cleanly and the value was quietly shorter than the one uploaded. Measured, not theorised: 32,768 characters in, 32,767 out.
-A result larger than Excel's grid returned a bare 500 Internal Server Error as plain text with no error object. src/lib/api.js reads a 5xx carrying no structured error as the backend being unreachable, so the user was told to check that ForgeXL was running — while it was running and had just answered.
-Repaired by one guard, export.check_fits_worksheet, run before any worksheet is written: rows against 1,048,575, columns against 16,384, and the longest value of each string column against 32,767. It refuses with a new structured EXPORT_TOO_LARGE / 422 naming the limit, the number, and the column. 422 rather than 500 because nothing failed unexpectedly — the request was understood and the data is intact; it simply cannot be expressed in that format. The same result still downloads as CSV, which has none of those limits, and the message says so. Characters are counted rather than bytes, because that is what Excel counts. Every table is checked before any is written, so a multi-sheet workbook is never half-built.
-
-7G / 7H / 7I — Performance, measured
-A benchmark harness was added at backend/tests/benchmarks/, deliberately outside the automated suite: pytest.ini sets testpaths = tests and pytest collects only test\_\*.py, so nothing there runs during python -m pytest. A benchmark asserts nothing and takes minutes.
-
-cd backend && .venv/bin/python -m tests.benchmarks.run
-Every figure is the median of five runs with the minimum and maximum printed beside it, because build plan 7G forbids claiming performance from one anecdotal timing. Fixtures are generated by large_table() — arithmetic on the row index, no customer or company data, nothing read from disk.
-
-All numbers below are from this Linux container, not from the target Mac (Known Issue 3). Build plan section 3.4 asks for "ordinary modern Mac hardware"; that run is still owed and is the user's to make.
-
-7G — CSV, in process, by stage (median ms):
-
-Stage 10,000 50,000 100,000
-upload into memory 0.7 3.0 1.7
-parse 2.4 5.5 9.4
-validate <0.1 <0.1 <0.1
-Action execution 1.6 3.1 4.5
-export CSV (full size) 2.8 4.5 8.2
-export XLSX (full size) 339 1,668 3,418
-whole Run (execute_run) 4.3 10.1 16.3
-Payload at 100,000 rows: 5.62 MiB, 7 columns.
-
-7H — XLSX, in process, by stage (median ms). Recorded separately, and deliberately not compared with CSV as though the two were the same format:
-
-Stage 10,000 50,000 100,000
-upload into memory 0.1 0.5 1.1
-parse 75.7 316.5 767.9
-validate <0.1 <0.1 <0.1
-Action execution 1.4 2.6 3.5
-export CSV (full size) 3.3 8.5 10.7
-export XLSX (full size) 320 1,697 3,300
-whole Run (execute_run) 63.9 393.3 799.7
-100,000 rows was measured rather than skipped: 7H says "if reasonable", and at 0.8 s it plainly is. Payload at 100,000 rows: 2.70 MiB.
-
-Against build plan section 3.4 (100,000-row CSV, desired < 5 s, acceptance < 15 s): the whole Run is 0.016 s for CSV and 0.800 s for XLSX. Both are inside the desired target with two to three orders of magnitude of headroom. The honest caveat is the hardware, not the margin.
-
-Over real HTTP, through real uvicorn and a real next start with the real /forge-api proxy — because TestClient is not a socket (Known Issue 69):
-
-Request Round trip Backend duration_ms
-100,000-row CSV upload + Run (5.89 MB) 93.6 ms 22
-100,000-row XLSX upload + Run (2.83 MB) 820.5 ms 796
-CSV download of a 100,000-row result 12.3 ms — (1,577,788 bytes)
-XLSX download of a 100,000-row result 1,496.5 ms — (1,626,965 bytes)
-The downloaded workbook was reopened independently: 100,000 rows × 2 columns, first and last rows correct.
-
-7I — Preview. Against a genuine 100,000-row result (the two proof Actions both collapse the generated fixture to 250 distinct rows, so a separate all-distinct fixture was used — timing a preview against 250 rows would have proved nothing):
-
-Page In process Over the proxy Bytes returned
-rows 1–100 0.3 ms 47.9 ms 1,648
-rows 10,001–10,100 0.2 ms 47.9 ms 2,272
-rows 99,901–100,000 0.2 ms 48.0 ms 2,272
-rows 1–500 (the maximum) 0.5 ms 48.0 ms 8,048
-A page costs the same wherever it is taken from, which is the property 7I asks about: the deep offset is not slower than the first page. The ~48 ms over the proxy is the HTTP hop, flat across all four. And the backend does not send the dataset: a 100-row page is 2,272 bytes against ~2.18 MB for the whole result, a factor of about a thousand, with total_rows reported so the client can page.
-
-7J — Memory and architecture review → one inefficiency found and fixed
-Each pattern build plan 7J names was searched for and, where it existed, measured:
-
-Pattern Finding
-reading the upload into memory multiple times No. One read_upload; the runner releases the payloads as soon as they are frames.
-converting a whole dataframe to Python dicts No. preview.py calls iter_rows() on frame.slice(offset, limit) — at most 500 rows.
-converting a whole result to JSON No. Measured: a page is ~1,000× smaller than the result.
-writing unnecessary temporary copies None. No tempfile, open(, mkdir or shutil anywhere in backend/app.
-processing the same file repeatedly Yes, in the XLSX parser. Fixed.
-proxying through Next.js Transport only — see below.
-The XLSX parser was reading the worksheet four times. calamine parses a whole sheet on every load_sheet regardless of how few rows are asked for, so at 100,000 rows each pass cost ~250 ms:
-
-Pass Why Cost
-ambiguity probe (header_row=None) build plan section 17 247 ms
-duplicate-header read added earlier this phase 251 ms
-main load the data 294 ms
-nullable text re-read the Known Issue 65 repair 259 ms
-The duplicate-header read was this phase's own regression, and it was removed rather than accepted: total_height and width still report the whole sheet when a sheet is loaded with n_rows=1, so the ambiguity probe now loads one row and answers both questions — is this sheet populated, and what does its header row actually say. XLSX parse at 100,000 rows: 1,074 ms → 673 ms, which is also below where it stood before Phase 7 began. The three remaining passes are each required for a stated correctness rule, and the third only runs when a column contains nulls.
-
-On 7J's "proxying through Next.js". 7J lists this as a pattern to look for, and Phase 6G requires a same-origin proxy — a direct conflict between an earlier and a later build-plan section. The Phase 6 architectural rules state that they override earlier conflicting instructions, and section 5's actual concern is satisfied either way: the Route Handler streams the request body through without reading it, so the file is transferred once and parsed once, in Python. Recorded as a reading of the conflict, not a change to it; already Deviation 43.
-
-Memory, one 100,000-row CSV Run: 5.62 MiB payload, peak Python allocation 11.95 MiB, and the result released on delete_run() — confirmed by a weakref, since peak RSS does not fall (the allocator keeps its arena).
-
-7K — Local exposure → verified, and one decision made
-tests/test_local_exposure.py (35 tests). Each property is asserted rather than checked once by hand, because none has a visible symptom when it breaks: an application bound to 0.0.0.0 works exactly as well from the machine that broke it.
-
-Binding. config.HOST is 127.0.0.1; no backend module contains 0.0.0.0 at all; scripts/dev-backend.sh passes no host, so config.HOST is the only thing that decides. Exactly one npm script binds 0.0.0.0 — dev:web:lan, which build plan 6G.6 requires — and it exposes Next.js only, running the same dev:api as every other script.
-CORS. Exactly the two local origins, never \*, no allow*origin_regex, allow_credentials=False. Verified behaviourally too: an unlisted origin gets no Access-Control-Allow-Origin header, and a listed one gets its own name back rather than a wildcard.
-No remote calls. Sixteen analytics, cloud and AI hosts swept for across every source file: none. Every absolute URL in the source is enumerated and each is loopback, a documentation link in a comment, or a placeholder in prose — scripts/lan-address.mjs is asserted to make no request of any kind. No HTTP client is imported by the running backend at all (httpx is a test dependency), no NEXT_PUBLIC* variable exists, and every browser request is same-origin.
-Next.js telemetry — the decision build plan 7K owes (Known Issue 1). npx next telemetry status reported Enabled. It carries no uploaded data, so it does not breach section 8's rule about data, but it is an outbound call from a deliberately local-only project. Disabled in the repository, by exporting NEXT_TELEMETRY_DISABLED=1 in the four npm scripts that run Next.js. The alternative, next telemetry disable, writes to a machine-global config file outside this repository: it would fix one developer's machine and leave the next checkout sending telemetry again. A test asserts every script that runs next dev, next build or next start carries the variable. No dependency was added — VAR=1 command is POSIX shell, and the build plan's target is a Mac.
-
-Browser verification (real headless Chromium)
-The two new refusals are user-facing, so they were driven through the real UI against the real servers rather than only over HTTP:
-
-Check Result
-duplicate column names "Validation Failed" and the full sentence naming SKU; no [object Object]
-incorrect schema "Validation Failed", missing columns listed
-a 40,000-character cell Run succeeds and renders
-its XLSX download 422 EXPORT_TOO_LARGE, readable message naming the column and both limits
-its CSV download 200, 40,012 bytes, the 40,000-character value intact
-a normal run, real click-download forgexl-exact-duplicate-remover-deduplicated-data-<stamp>.csv, exact expected contents
-page errors / off-origin requests none; every request went to the page's own origin
-Files created
-
-backend/tests/test_data_edge_cases.py (7B)
-backend/tests/test_incorrect_schemas.py (7C)
-backend/tests/test_hostile_input.py (7D, 7E)
-backend/tests/test_workbook_cases.py (7F)
-backend/tests/test_local_exposure.py (7K)
-backend/tests/benchmarks/**init**.py
-backend/tests/benchmarks/run.py (7G, 7H, 7I)
-Files modified
-
-backend/app/errors.py — two new error classes
-backend/app/services/parser.py — duplicate-header refusal; the probe reads one row and serves both purposes (7J)
-backend/app/services/export.py — check_fits_worksheet and the three format limits
-backend/tests/fixtures/spreadsheets.py — five 7B fixtures; two of them kept out of CATALOGUE
-backend/tests/test_parser.py — duplicate-column coverage
-backend/tests/test_export.py — capacity coverage
-backend/tests/test_export_download.py — the capacity refusal over HTTP
-backend/tests/test_contract_freeze.py — two error codes added
-package.json — NEXT_TELEMETRY_DISABLED=1 in four scripts
-docs/implementation-status.md
-Files deleted
-
-backend/app/api/upload-form.py (the hyphenated duplicate; repair)
-Files renamed
-
-backend/tests/test_mixed_xlsv_round_trip.py → backend/tests/test_mixed_xlsx_round_trip.py (repair)
-package-lock.json and backend/requirements.txt are untouched — Phase 7 added no dependency. Nothing under src/ was modified: both repairs are backend, and the frontend already rendered the new structured errors correctly, which the browser verification confirms rather than assumes.
-
-A note on the two new fixtures kept out of CATALOGUE. Every entry in that tuple is a dataset ForgeXL reads and returns unchanged, and the sweep tests in test_spreadsheet_fixtures.py assert exactly that of every one. The duplicate- column fixture is refused by design and the 40,000-character fixture exceeds an XLSX limit, so adding either would have meant loosening those sweeps — removing the property that makes them evidence. They live in REFUSED_TABLES and CSV_ONLY_TABLES instead, each documented with why.
-
-Phase 6I — Cleanup, Regression Review, and Architecture Documentation
-Phase 6 is complete. Both authoritative documents were read in full and the repository was inspected before anything was edited. The session began in a fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly. No undocumented step was needed and no dependency was added or changed.
-
-Two repository defects found and repaired first
-The five integrity checks the Phase 6H entry prescribes were run before any 6I work. Two failed, both traceable to the pre-6I repair commit 8bfe29f, and both were filename mistakes rather than content mistakes:
-
-backend/app/api/upload-form.py was named with a hyphen. runs.py and test_upload_form.py both import app.api.upload_form, and a hyphen is not a legal Python module name, so the whole backend failed at import: ModuleNotFoundError: No module named 'app.api.upload_form' — 0 of 1,039 tests ran, and python -m app.main could not start either. Repaired with git mv to upload_form.py; no content was edited. The suite then reported the documented 1,039 passed baseline exactly.
-backend/tests/test_mixed_xlsv_round_trip.py was misspelled (xlsv for xlsx). Harmless — pytest collects it by glob and nothing imports it — but the Pre-6I entry records the file as test_mixed_xlsx_round_trip.py, so the file was renamed to match its own documentation.
-This is the same family as Known Issues 10, 31, 32, 37 and 38 — committed state that cannot import or cannot run — and it is that family's sixth recorded instance. It is the first time the cause has been a character in a filename rather than a misplaced or stale file, which is why the four structural checks in place at the time all passed and only running the suite revealed it. The check list at the end of this document has been reordered accordingly.
-
-.vscode/settings.json is entirely commented out and has been since commit 679fff4. It is a user-authored editor preference file, it breaks nothing, and 6I.9 forbids unrelated cleanup, so it was left alone.
-
-6I.1 — obsolete runtime filesystem code removed. Exactly what Known Issues 21 and 39 named, and nothing else:
-
-Removed From
-RunPaths (with working, exports, working_artifact, export_artifact), \_safe_id, runs_directory, run_paths, create_run, delete_run_directory, \_WORKING_DIRNAME, \_EXPORTS_DIRNAME, and the shutil / UnknownRunError / new_run_id / parse_run_id imports they alone needed services/storage.py
-DATA_DIRECTORY, RUNS_DIRECTORY, \_data_directory_override config.py
-the FORGEXL_DATA_DIRECTORY block .env.example
-data/runs/.gitkeep and the data/ tree repository
-the runs_dir and run_paths fixtures tests/conftest.py
-21 tests covering the removed code tests/test_storage.py
-storage.py went from 273 to 177 lines and now builds no path at all. What it keeps is the rule that justified it existing: extension_of, stored_filename_for, display_filename and read_upload — a client filename is metadata, never a path. PROJECT_ROOT stays in config.py because main.py points uvicorn --reload at the backend source tree with it.
-
-The 21 removed test_storage.py tests were all coverage of deleted code, with one exception worth stating: its parse_run_id rejection battery was a duplicate of the one in test_run_model.py, asserting the identical parametrised list against the same function through a re-export. Removing the copy loses no coverage; the originals still run.
-
-The runs_dir fixture was replaced, not just deleted. Over a hundred tests declared runs_dir: Path without ever reading it, purely to buy the config.RUNS_DIRECTORY redirect that kept the suite away from the real data/runs. There is no such setting to redirect any more — which is the point — but silently dropping the parameter from all of them would have removed that protection. conftest.quarantine replaces it: an empty temporary directory the test runs inside, autouse, so every test in the suite now gets the isolation only some used to. The ~20 tests that made a real assertion (assert list(runs_dir.rglob("\*")) == []) assert against it by name instead. The other two places a stray write could land were already covered and are not duplicated: the OS temporary directory by the tempfile spies in test_export.py and test_upload_form.py, and an absolute path written into the source by test_contract_freeze.py.
-
-Three tests pointed config.DATA*DIRECTORY at a nonexistent path to prove nothing was written there. With the setting gone they watch the working directory instead — a stronger probe, since the backend now has nowhere configured at all. One new test, test_the_backend_has_no_data_directory* setting_left, pins the removal itself so it cannot be quietly undone.
-
-test_contract_freeze.py needed one change, and it is not a contract change. The Next Phase note said 6I had no reason to touch it. One test in it monkeypatched config.DATA_DIRECTORY, so the removal forced the same probe substitution as above. No frozen value moved: not a route, an error code, a metric key, a schema field or a limit. FROZEN_ROUTES is byte-identical. The module docstring records the amendment as the previous two are recorded.
-
-6I.2 — the Phase 6A audit re-run. Every search that document's §1 prescribes was re-run against backend/app and src. Results:
-
-Search Result
-directory/artifact concepts (data/, runs/, inputs/, working/, exports/, manifest.json, tmp/) Only docstrings recording history, URL route paths, and frontend URL paths. No filesystem use.
-path/IO concepts (open(, mkdir, unlink, rmtree, shutil, tempfile, FileResponse, is*file, is_dir, write*_, read\__) None in backend/app. The only Path use left is string manipulation — PurePosixPath(...).name in extension_of and display_filename — plus PROJECT_ROOT.
-persistent-infrastructure imports (sqlite3, sqlalchemy, psycopg, redis, pymongo, supabase, boto3, duckdb, alembic) None.
-any file or path use inside actions/ None. The only hits are accepted_extensions=(".csv", ".xlsx") — metadata, not I/O.
-No Action requires a server-local input or output path. The audit comes back empty, which is what 6A wrote that document for.
-
-6I.3 — frontend networking. No browser request names a backend address. The two grep hits are prose: an illustrative arrow in the Route Handler's docstring, and the phrase "NEXT*PUBLIC*" inside a comment explaining why there is no such variable. src/lib/api.js addresses /forge-api only, and src/lib/backend-origin.js — the one module holding the host and port — is import "server-only" and is imported by the Route Handler alone. This was also confirmed behaviourally: in the browser verification below, every request Chromium issued went to the page's own origin.
-
-6I.4 — cleanup behaviour verified. Against a real 300,000-row / 20.4 MB CSV through the real pipeline: the Action succeeded, the store held a 300,000 × 6 result frame (20.3 MB by Polars' own estimate, RSS 116 → 296 MB), a weakref confirmed the store was the only thing keeping it alive, and delete_run() made it unreachable after one gc.collect(). get_run then raised UnknownRunError / UNKNOWN_RUN / HTTP 404 and the store held zero runs. Peak RSS does not fall — the allocator keeps the arena — which is why the weakref and not a memory figure is the evidence.
-
-6I.5 — restart behaviour verified, against real uvicorn and a real next start, through the real /forge-api proxy. A Run was created, previewed and downloaded (CSV and XLSX, correct Content-Disposition filenames, accents intact). FastAPI was then killed and restarted with the frontend left running. Every route naming the pre-restart Run — retrieval, preview, per-output CSV, per-output XLSX and the whole-Run workbook — returned a clean structured UNKNOWN_RUN / HTTP 404. /health answered immediately, and a fresh Run on the restarted backend succeeded normally. Nothing was written to the repository at any point during the exercise.
-
-The same was then driven through a real headless Chromium against the real UI: a file selected through the real file input, "Run Successful" and three preview rows rendered, then FastAPI restarted underneath the open results page. The stale page's download attempt returned the structured 404; the page showed no [object Object], no traceback, and kept rendering its result, which is correct — that result lives in the browser, not on the server. Lost V1 run history is treated as history that is gone, not as corruption.
-
-6I.6/6I.7/6I.8 — docs/architecture.md created. It documents the final request path, what each layer owns, the processing boundary, the Run lifecycle, the safety rules the architecture enforces, and how to add an Action. §5 states the V1 persistence behaviour in the words build plan 6I.7 requires. §6 records PersistentRunStore / ObjectStorage / database-backed history as the extension point, names the seam (app.services.run_store.RUN_STORE), lists what such an implementation would not have to change, and says explicitly that none of it is implemented and none should be built yet.
-
-6I.9 — full regression suite run. 1,019 passed, no failures, no skips, no xfails. See Tests.
-
-Files created
-
-docs/architecture.md
-Files modified
-
-backend/app/config.py
-backend/app/services/storage.py
-backend/tests/conftest.py
-backend/tests/test_audit.py
-backend/tests/test_contract_freeze.py
-backend/tests/test_exact_duplicate_remover.py
-backend/tests/test_export.py
-backend/tests/test_export_download.py
-backend/tests/test_parser.py
-backend/tests/test_preview.py
-backend/tests/test_product_master_builder.py
-backend/tests/test_run_model.py
-backend/tests/test_run_store.py
-backend/tests/test_runner.py
-backend/tests/test_runs_api.py
-backend/tests/test_storage.py
-.env.example
-.gitignore
-docs/implementation-status.md
-Files renamed
-
-backend/app/api/upload-form.py → backend/app/api/upload_form.py (repair)
-backend/tests/test_mixed_xlsv_round_trip.py → backend/tests/test_mixed_xlsx_round_trip.py (repair)
-Files deleted
-
-data/runs/.gitkeep, and the data/ tree with it
-package.json, package-lock.json and backend/requirements.txt are untouched — 6I added no dependency. Nothing under src/ was modified: the frontend needed no change, because it never referenced any of the removed code.
-
-Pre-6I Blocker Repairs — 2026-09-05
-Scope: the user explicitly deferred Phase 6I and authorised fixing the verified blockers, then committing and pushing a separate branch. Phase 6H remains the last completed phase. Phase 6I and Phase 7 are not started. The repository was verified as cmgolizio/ForgeXL, based on main commit b833db01475d72ab1f6fbdf6e03b04d82c439ee6. Both authoritative documents were read completely before the repair work; the existing application and test contracts were inspected. Historical entries below describe their own phases.
-
-Repairs
-
-Memory-only HTTP upload intake. The baseline wrote a 1,100,006-byte upload through tempfile.TemporaryFile once; disabling that filesystem call made the request fail with HTTP 500. api/upload_form.py now bounds each file while parsing the incoming multipart stream, before Starlette queues bytes for writing. Its per-request spool threshold equals the configured limit, so no accepted upload can roll onto disk. Oversized files retain FILE_TOO_LARGE / HTTP 413. An intake rejection occurs before a Run exists; the runner's own size check and failed-Run recording remain for direct service callers. Buffers close on success, rejection, truncation and disconnect. Duplicate fields are rejected rather than silently overwritten; malformed or incomplete forms return structured INVALID_REQUEST / 400.
-Responsive backend during a Run. The endpoint awaits the existing synchronous runner in Starlette's thread pool, allowing health and preview requests to proceed while an Action runs. There is no background job API, queue, or change to the response contract.
-XLSX preservation (Known Issue 65). Strict full-column inference plus a targeted null-position check detects the pinned reader's silent loss. The existing openpyxl fallback preserves mixed columns as text and records a visible warning. Numeric-only columns remain numeric. Both real Actions, preview, CSV and XLSX export preserve the repaired values.
-Deterministic spreadsheet fixtures. An actual regression run failed the byte-equality test across a clock tick because XLSX core metadata used the current time. Fixture workbooks now carry a fixed creation timestamp. A clock-change regression verifies that workbook bytes remain identical.
-Files created
-
-backend/app/api/upload_form.py
-backend/tests/test_upload_form.py
-backend/tests/test_mixed_xlsx_round_trip.py
-Files modified
-
-backend/app/api/runs.py
-backend/app/services/parser.py
-backend/app/services/runner.py
-backend/tests/fixtures/spreadsheets.py
-backend/tests/test_parser.py
-backend/tests/test_spreadsheet_fixtures.py
-docs/implementation-status.md
-Files deleted: none. No dependency manifests, frontend files, build-plan sections, or deferred filesystem cleanup were changed.
-
-Verification
-
-Check Result
-Baseline cd backend && .venv/bin/python -m pytest 1,011 passed, 1 xfailed, 2 upstream warnings
-Final backend suite 1,039 passed, no failures/skips/xfails; 2 existing upstream warnings
-npx --yes pyright 0 errors, 0 warnings, 0 informations
-npm run lint Exit 0; no ESLint findings
-NEXT_TELEMETRY_DISABLED=1 npm run build Exit 0; /, /\_not-found, dynamic /forge-api/[...path] built
-git diff --check Exit 0
-Real Next production server -> uvicorn, with tempfile.TemporaryFile replaced by a failure 12,297,013-byte CSV accepted; 3,000 input rows -> 1 expected unique row; preview and CSV/XLSX downloads passed
-Live proxy size rejection, temporary verification limit 16 MiB 16 MiB + 1 byte returned structured 413 / FILE_TOO_LARGE; repository default stays 250 MiB
-Live proxy malformed/truncated requests Structured 400 / INVALID_REQUEST; backend remained healthy
-Live mixed-XLSX request and reopened export All six values preserved, openpyxl recorded, mixed-type warning present
-Chromium 149 via Playwright, real page and file input Mixed XLSX upload -> visible warning and n/a preview -> clicked XLSX download -> independently reopened with all six values intact
-Chromium large upload 12,297,013-byte file selected and run; 3,000 -> 1 rows; clicked CSV download matched exact expected bytes
-Browser errors/network and visual inspection No page errors; all API requests used the page's /forge-api origin; warning and preview were readable
-The two warnings originate in Starlette's test client: its deprecated httpx integration and its use of the deprecated AnyIO BlockingPortal alias. Neither was hidden or suppressed. Fresh local dependencies were installed for this verification; no repository dependency was changed. The npm runner's unknown http-proxy environment-setting warning was avoided by unsetting only that unsupported npm setting for lint/type-check invocations. Browser verification used temporary tooling outside the repository: the browser CLI could not start, so the existing Playwright runtime drove Chromium instead. Verification servers and the browser were stopped afterwards.
-
-Limits and phase boundaries: a second physical Mac, Finder/native picker behaviour and Microsoft Excel acceptance remain unverified (Known Issue 64). The nullable-column text check and mixed-workbook fallback cost additional XLSX parsing work; no Phase 7 performance claim or benchmark is made. Aggregate Run Store retention remains Phase 7 work. The multipart adapter uses Starlette's parser callbacks/state and must retain its regressions across future dependency upgrades. These repairs introduce no architectural deviation from the build plan. They implement its existing accuracy and in-memory requirements under the user's explicit instruction to resolve blockers now.
-
-Phase 0 — Repository Audit and Build Contract
-Read docs/build-plan.md in full (3,821 lines).
-docs/implementation-status.md did not exist; created by that session.
-Inspected repository state before making any change (pwd, ls -A, find . -maxdepth 2 -type f, find . -maxdepth 3 -type d, git status, git branch --show-current, git log, git ls-files, git check-ignore).
-Inspected package.json, package-lock.json, jsconfig.json, next.config.mjs, postcss.config.mjs, eslint.config.mjs, .gitignore, README.md, AGENTS.md, CLAUDE.md, and every file under src/.
-Verified installed tool versions (Node.js, npm, Python 3, Git).
-Reviewed .gitignore and added the ignore rules required by §0.5.
-No application code was written. Phase 1 was not started.
-Audit conclusions
-
-A Next.js App Router project already exists and matches the build plan's required stack: JavaScript (no TypeScript), Tailwind CSS, ESLint. It must not be recreated (Phase 1.1).
-The project uses a src/ directory (src/app/). Build plan §10 sketches a root-level app/, but Phase 1.1 states: "Do not add a src/ folder unless the repository already uses one. Prefer the simplest existing convention." The repository already uses one, so src/ is retained. See Deviations From Build Plan.
-The frontend was still the unmodified Create Next App starter. Cleaning it up is Phase 1.2 and was deliberately not done in Phase 0.
-No backend existed. No backend/, data/, components/, lib/, or scripts/ directory existed yet.
-node_modules/ was not installed; no npm install had been run.
-No architectural conflict with docs/build-plan.md was found. One minor configuration conflict was found and corrected (.env.example was being ignored by .gitignore).
-Phase 1 — Application Foundation and Local Runtime
-All ten sub-steps were implemented and verified.
-
-1.1 Frontend foundation. The existing Next.js 16.3.2 App Router project was kept, not recreated. Confirmed App Router, plain JavaScript, Tailwind v4, ESLint. npm install was run (367 packages, 0 vulnerabilities). No TypeScript was introduced; the repository still contains zero .ts/.tsx files.
-
-1.2 Starter noise removed. src/app/page.js was replaced with a minimal page rendering "Local Data Workbench" and "Local data-processing proof of concept." src/app/layout.js metadata was changed from "Create Next App" to the project title/description. The five unreferenced Create Next App demo assets in public/ were deleted (verified unreferenced by grep first); public/.gitkeep keeps the directory in place. src/app/globals.css now uses the configured Geist font stack instead of the starter's hardcoded Arial, Helvetica, sans-serif, which contradicted the font variables that layout.js sets up. No Action UI was built.
-
-1.3 Backend virtual environment. backend/.venv created with the local Python 3.11.15. pip upgraded 24.0 → 26.2.1. Installed: fastapi, uvicorn, python-multipart, polars, fastexcel, openpyxl, xlsxwriter, pytest, httpx. Resolved versions pinned in backend/requirements.txt.
-
-1.4 Backend application. backend/app/main.py defines a minimal FastAPI app with GET /health returning {"status": "ok"}. No Action, Run, upload, or registry code was written — that is Phase 2/3.
-
-1.5 CORS. Exact origins only: http://127.0.0.1:3000 and http://localhost:3000. No wildcard. Methods limited to GET and POST; credentials disabled.
-
-1.6 Backend configuration. backend/app/config.py centralizes PROJECT_ROOT, DATA_DIRECTORY, RUNS_DIRECTORY, HOST, PORT, MAX_UPLOAD_BYTES (250 MB) and ALLOWED_FRONTEND_ORIGINS. No constant is duplicated elsewhere: main.py and scripts/dev-backend.sh both take host and port from this module.
-
-1.7 Environment files. .env.example created, documenting NEXT*PUBLIC_API_BASE_URL=http://127.0.0.1:8000 for the frontend and the optional FORGEXL** backend overrides. (Superseded by Phase 6G: NEXT*PUBLIC_API_BASE_URL is gone. The only frontend variables are the server-side FORGEXL_BACKEND*\*ones the route handler reads, none of themNEXT*PUBLIC\*.) .env.localwas not left in the repository: the frontend falls back tohttp://127.0.0.1:8000 when the variable is unset, so no local env file is required. A temporary .env.local was created during verification to prove the override path works, then removed.
-
-1.8 Combined development startup. npm run dev starts both services together through concurrently (added as a devDependency):
-
-dev concurrently --names web,api ... "npm:dev:web" "npm:dev:api"
-dev:web next dev --hostname 127.0.0.1 --port 3000
-dev:api bash scripts/dev-backend.sh
-scripts/dev-backend.sh refuses to start with a clear message if backend/.venv is missing, then runs python -m app.main from backend/, which calls uvicorn.run(...) using the host/port from config.py. npm start was also pinned to 127.0.0.1 so no npm script binds to 0.0.0.0.
-
-1.9 Health display. src/components/BackendStatus.js is a client component that fetches ${NEXT_PUBLIC_API_BASE_URL}/health directly from the browser (not proxied through Next.js) and renders "Backend Connected" or "Backend Unavailable", with a neutral "Checking backend…" state while the request is in flight. The request is aborted on unmount.
-
-Superseded by Phase 6G. The browser no longer addresses FastAPI at all. BackendStatus.jsx calls fetchHealth(), which requests the same-origin path /forge-api/health; NEXT_PUBLIC_API_BASE_URL no longer exists anywhere in the repository. The rendered states are unchanged.
-
-1.10 Verification. See Tests below. Lint, production build, backend import, /health, CORS behaviour, loopback binding and both frontend health states were each verified by execution, not by inspection.
-
-Phase 2 — Backend Data Engine and Action Contract
-All eight sub-steps were implemented and verified.
-
-2.1 Module structure. Created backend/app/actions/, models/, services/, api/, each with an **init**.py carrying a docstring that says what belongs there. services/ is intentionally empty of implementation — Phase 3 fills it.
-
-2.2 Schemas. backend/app/models/schemas.py defines every structure the build plan lists, as Pydantic v2 models:
-
-Build plan concept Model
-Action input ActionInput
-Action output definition ActionOutput
-Action definition ActionDefinition (+ ActionListResponse)
-validation issue ValidationIssue (+ ValidationSummary)
-input metadata InputMetadata
-output metadata OutputMetadata
-Run manifest RunManifest (+ ActionReference, RunStatus, RunError)
-preview response PreviewResponse
-ActionInput, ActionOutput and ActionDefinition are frozen=True: they are declared once as module-level constants and must not be mutated. The manifest and preview models are not frozen because a Run rebuilds them as it progresses. MANIFEST_SCHEMA_VERSION = 1 is stamped automatically.
-
-Action execution was deliberately kept out of Pydantic, as build plan 2.2 permits: dataframes are never serialised directly, so ActionResult is a plain frozen dataclass.
-
-2.3 Action contract. backend/app/actions/base.py defines Action, an abc.ABC whose subclasses declare id, version, name, description, inputs and outputs as class attributes and implement run(). It also provides definition() (builds the ActionDefinition the API returns) and an overridable validate() hook matching the definition / validate(...) / run(...) sketch in build plan §24. ActionResult carries the output dataframes keyed by output ID plus the Action's metrics.
-
-No plugin loader exists and nothing is ever executed from disk: Actions are imported Python, as build plan 2.3 requires.
-
-2.4 Registry. backend/app/actions/registry.py provides ActionRegistry with register(), list_actions() and get_action(), a single application instance ACTION_REGISTRY, and module-level list_actions() / get_action() that read it. get_action() returns None for an unknown ID and never falls back to a default or a near match. register() raises DuplicateActionIdError (a ValueError) rather than overwriting, and raises ValueError on a blank ID.
-
-ActionRegistry is a class rather than a bare module dict specifically so tests can build isolated registries instead of mutating and resetting global state. There is no if action_id == ... chain anywhere.
-
-2.5 Placeholder Action. backend/app/actions/example_passthrough.py registers example_passthrough — the smallest Action that genuinely exercises the contract, returning its input unchanged. It exists so GET /api/actions could be verified against real data (2.7) rather than an empty list. It is version 0.1.0 and its display name says "(Placeholder)". Phase 4 must delete this module and register exact_duplicate_remover and product_master_builder in its place. No transformation logic belonging to either real Action was written.
-
-2.6 Actions API. backend/app/api/actions.py exposes GET /api/actions on an APIRouter(prefix="/api"), returning ActionListResponse. main.py mounts it. main.py otherwise changed only its module docstring and gained one import.
-
-2.7 Developer-level verification. No frontend code was written or modified. The endpoint was verified over real HTTP with curl, through the generated OpenAPI schema, and by a real headless-Chromium fetch() issued from http://127.0.0.1:3000. See Tests below.
-
-2.8 Tests. 48 tests across three files, all passing. See Tests.
-
-Phase 3 — Upload, Parsing, Run Execution, Storage, and Export Pipeline
-Superseded in part by Phases 6C, 6D and 6F — read this entry as history. Every statement below about writing to disk describes an architecture ForgeXL no longer has. A Run creates no directory; an upload is read into memory and parsed from there (6C); result frames are held by the Run (6D); CSV and XLSX bytes are generated per request from those frames and released with the response (6F); and no manifest is written at all, because run state lives in the Run Store (6B). The inputs/, working/ and exports/ trees, the Parquet working file of build plan §28 and write_manifest() are all gone. What survives from this entry is the rules: a Run ID must parse as a UUID, a client filename is metadata and never a name the application uses, and the upload limit is enforced while receiving. The reversals are recorded in the 6C/6D/6F entries and under Deviations From Build Plan.
-
-All sixteen sub-steps were implemented and verified.
-
-Repository repair performed first
-Phase 3 could not begin until a defect in the committed Phase 2 state was fixed. Commit 90dd7e8 ("phase 2 complete") wrote the entire backend Python package into src/app/ — the Next.js App Router directory — instead of backend/app/, and named schemas.py as schema.py. Consequences:
-
-backend/app/ contained only **init**.py, config.py and the Phase 1 main.py; actions/, api/, models/ and services/ were absent.
-The whole backend suite failed at collection with ModuleNotFoundError: No module named 'app.models' — 0 of 48 tests ran.
-Every intra-package import (from app.models.schemas import ...) was unresolvable, which is the source of the "Import ... could not be resolved" warnings reported at the start of this session.
-This was a misplacement, not a design decision: the moved modules import from app import config, which resolves only under backend/, and docs/implementation-status.md already documented backend/app/... as their location. The files were restored with git mv (history preserved), and src/app/main.py — a strict superset of the Phase 1 backend/app/main.py, adding only the router import and include_router — replaced it. Verified immediately afterwards: 48 Phase 2 tests passed and npx pyright reported 0 errors, resolving the reported import warnings. No file content was edited during the repair; only locations changed.
-
-3.1 Storage service. backend/app/services/storage.py owns Run UUIDs, the inputs/ working/ exports/ tree, upload preservation, atomic manifest writes and artifact lookup by logical ID. RunPaths is the only thing that builds a path; the API never supplies one. Slot and output IDs must match SAFE_ID_PATTERN before they contribute to a path, and parse_run_id() accepts only the canonical string form of a UUID — a traversal-shaped or truncated ID raises UnknownRunError before the filesystem is touched. runs_directory() reads config.RUNS_DIRECTORY at call time rather than at import, so tests redirect it at one place and never touch the real data/runs.
-
-3.2 Safe filenames. Every upload is stored as source<ext> inside its own slot directory. The client's filename is recorded as original_filename metadata and is used for nothing else. extension_of() strips any directory component before reading the suffix, so ../../evil.csv yields .csv.
-
-3.3 Upload limit. store_upload() copies in 1 MiB chunks and checks the running total against MAX_UPLOAD_BYTES, raising UploadTooLargeError (413). A partial file from a rejected upload is deleted before the error propagates. Starlette's max_part_size was investigated and does not apply to file parts (only to non-file fields), so the limit is enforced here; Starlette spools file parts to disk, so an oversized upload never becomes a memory error.
-
-3.4-3.6 Parser service. backend/app/services/parser.py exposes parse_tabular_file(path, extension) returning a ParsedFile (dataframe, parser_engine, worksheet, and row/column/columns metadata).
-
-CSV via Polars. try_parse_dates is deliberately left off, so date-shaped text stays text and no value is silently retyped (§3.3).
-XLSX via fastexcel/calamine, read through ExcelReader.load_sheet(...) rather than pl.read_excel, because the latter defaults to drop_empty_rows=True / drop_empty_cols=True and would silently drop data (§3.3 forbids that).
-Worksheet ambiguity (§17): a sheet counts as a data sheet if it holds any cells. Exactly one -> used and recorded. Zero -> "contains no data". Two or more -> AmbiguousWorkbookError naming the sheets, with the message §17 specifies. A header-only sheet counts as a valid dataset with zero rows.
-openpyxl is the compatibility fallback and the engine that actually succeeded is what the manifest records (§6.2). A structural refusal — no data sheet, or several — is never retried with the fallback, since the fallback would reach the same conclusion.
-Both engines read stored values. Neither evaluates formulas nor runs macros.
-3.7 Generic validation. The runner checks, per slot: required slot present, extension accepted, file parsed, dataset non-empty, required columns present. Column comparison is exact and case-sensitive — Sales Person is reported against Salesperson, and Sku against SKU, rather than guessed. All slot problems in one request are collected and reported together.
-
-3.8 Runner service. backend/app/services/runner.py owns the whole generic workflow. It is framework-independent: it takes PendingUpload objects (a filename plus a readable stream), so the API and the tests drive the identical pipeline. Actions reproduce none of it.
-
-3.9 Failed Runs. Once a Run directory exists, every outcome writes a manifest. A failure records status = failed, the structured error, the full validation error list, and the inputs that were uploaded. The directory and the preserved upload are retained. Verified on disk for MISSING_INPUT, UNSUPPORTED_EXTENSION, MISSING_COLUMNS, FILE_TOO_LARGE and AMBIGUOUS_WORKBOOK.
-
-3.10 Export service. backend/app/services/export.py writes each output as working/<id>.parquet, exports/<id>.csv and exports/<id>.xlsx. Polars writes all three directly; the dataframe is never converted to Python objects on the way out.
-
-3.11 Manifest writing. Written at running and again at succeeded or failed. write_manifest() writes a temporary file in the same directory, fsyncs it and os.replaces it over the destination, so an interrupted process cannot leave half-written JSON. The temp file is removed in a finally.
-
-3.12-3.16 Runs API. backend/app/api/runs.py adds POST /api/runs, GET /api/runs/{run_id}, the preview endpoint and the two download endpoints. POST reads the multipart form through async with request.form(), so uploaded streams stay open until the runner has copied them. Files are submitted under their Action slot IDs, never as one anonymous list. Downloads use FileResponse with a filename derived from the output ID, not from the upload.
-
-Error boundary. backend/app/errors.py defines the structured error taxonomy and main.py registers one WorkbenchError handler that renders {"error": {code, message, details}} with the matching status. Tracebacks are logged locally and never returned. Status codes follow §22: 400 malformed request, 404 unknown Action/Run/Output, 413 too large, 422 validation failure, 500 unexpected.
-
-No frontend file was created or modified in Phase 3. The npm run build route list is unchanged (/ and /\_not-found).
-
-Phase 4 — Proof Actions and Accuracy Tests
-Recorded retroactively during the Phase 5 session. Phase 4 was implemented and committed (584fea3, "added a couple premade 'example' actions and test files for them") but the session that did the work did not update this file, so the entry below records what the Phase 5 session verified by execution, not a narrative of how it was built. See Known Issues item 15.
-
-Verified present and passing at the start of Phase 5:
-
-backend/app/actions/exact_duplicate_remover.py implements build plan section 26: one source_file slot, no required columns, unique(keep="first", maintain_order=True) across every column, metrics input_rows / output_rows / duplicates_removed. No trimming, casing or normalisation.
-backend/app/actions/product_master_builder.py implements section 27: one sales_file slot requiring exactly SKU, Vintage, Supplier, Producer, Selection, Volume; selects those six in that fixed order, removes duplicate combinations, metrics input_rows / output_rows / duplicate_product_rows_removed.
-backend/app/actions/example_passthrough.py is gone, and ACTION_REGISTRY now holds exactly the two real Actions. Known Issue 8 is resolved.
-backend/tests/fixtures/ exists, alongside test_exact_duplicate_remover.py, test_product_master_builder.py and test_action_round_trip.py.
-cd backend && .venv/bin/python -m pytest → 311 passed, 1 warning (Phase 3 left 231; Phase 4 added 80).
-GET /api/actions returns both definitions with their input slots, required columns and outputs (4E).
-No frontend file had been modified: at the start of Phase 5 the only frontend files were the Phase 1 set, and npm run build still listed only / and /\_not-found.
-Phase 5 — Dynamic Frontend Action Runner
-All ten sub-steps were implemented and verified. This is the first Phase to write frontend application code since Phase 1.
-
-5.1 API utility. src/lib/api.js is the only module in the frontend that knows a backend URL or an endpoint path. It exports API_BASE_URL (from NEXT_PUBLIC_API_BASE_URL, falling back to http://127.0.0.1:8000, with trailing slashes trimmed), fetchActions(), createRun(), fetchHealth() and the ApiError class. Every request goes from the browser straight to FastAPI; nothing is proxied through a Next.js Route Handler (build plan section 5).
-
-Superseded by Phase 6G. API_BASE_URL is now API_BASE_PATH, the same-origin string "/forge-api", and every request goes through the Route Handler at that path. Build plan §5's rule was "copy the uploaded file once", and it still holds: the handler streams the request body through without reading or parsing it, so nothing in Node ever holds a copy of the upload. What changed is that build plan 6G.3 explicitly asks for this hop — it is what keeps FastAPI's address out of the browser.
-
-src/components/backend/BackendStatus.jsx was refactored to call fetchHealth() instead of holding its own copy of the base URL — it was the one place a backend URL was still duplicated. Its rendered behaviour is unchanged.
-
-src/lib/formatters.js holds the three pure display helpers the upload slot needs: formatFileSize, fileExtension (mirrors the backend's extension_of, so ../../evil.csv yields .csv) and joinWithOr (phrases a list the same way the backend's own validation messages do).
-
-5.2 Loading Actions. ActionRunner requests GET /api/actions on mount with an AbortController, and renders three distinct outcomes: "Loading Actions…", an "Actions Unavailable" panel carrying the reason, or the populated interface.
-
-5.3 Action selector. ActionSelector.jsx renders a native <select> populated exclusively from the API response. Selecting an option stores the ID; the full Action metadata object is resolved from the loaded list and drives everything below it.
-
-5.4 Action description. ActionDescription.jsx shows name, description and Version 1.0.0. The Action ID is deliberately not displayed — it is an internal identifier, not something a user needs (build plan 5.4).
-
-5.5 Dynamic input slots. ActionRunner maps over selectedAction.inputs and renders one FileUploadSlot per entry. The slot component receives the input ID, label, description, required flag, accepted_extensions and required_columns and renders from those alone. There is no branch on any Action ID anywhere in the frontend — verified by grep and by the extensibility test below.
-
-5.6 Drag-and-drop. FileUploadSlot.jsx uses only native browser APIs: a visually-hidden <input type="file"> paired with a <label> that carries the onDragOver / onDrop handlers, so clicking to browse, keyboard focus and dropping all work with no upload dependency. The chosen file's name, extension and formatted size are shown, with a Remove button; choosing another file replaces the current one. The file input's value is cleared after each change so the same file can be re-chosen after a removal.
-
-5.7 Client-side preliminary validation. Before submission the UI confirms an Action is selected, that every required slot holds a file, and that each file's extension is one that slot accepts. A rejected file is not stored and produces a per-slot message. This is convenience only — the backend re-checks all of it and stays authoritative (verified: the backend still returns 422 UNSUPPORTED_EXTENSION when the same file is posted directly).
-
-5.8 Run submission. createRun() builds FormData, appends action_id, then appends each file under the Action's own input slot ID. Keys are never renamed in the frontend. Confirmed on disk: Runs submitted through the browser produced inputs/source_file/source.csv and inputs/sales_file/source.xlsx, and the manifests recorded slot_id source_file / sales_file.
-
-5.9 Running state. While a Run executes: the Action selector, every file input and the Remove buttons are disabled, and the Run button is disabled and reads "Processing…". A useRef guard blocks a second submission slipping through between the click and the re-render. No progress percentage is displayed — the real progress is unknown, so the indicator says "Processing…" rather than inventing a number (build plan 5.9).
-
-5.10 Error display. ApiError normalises the backend's error contract (section 22) into a list of issues: a single failure becomes one issue; a Run that failed several checks at once (VALIDATION_FAILED with details.issues) becomes one issue per check. RunStatus.jsx renders each issue's message, and lists details.missing_columns by name when present. Nothing is ever stringified blindly — IssueColumns renders only entries that are genuinely strings, so a differently-shaped details payload cannot become [object Object]. Tracebacks never arrive (the backend does not send them) and are never rendered.
-
-Frontend state model (build plan section 30). ActionRunner derives one of the seven named states — loading_actions, idle, ready, running, success, validation_error, server_error — and publishes it as data-workbench-state on its root element. A failed Run is classified as validation_error for the statuses the backend uses for a problem with the uploaded data (422, 413) and server_error otherwise, so a backend fault is never blamed on the user's file.
-
-Run result presentation is deliberately minimal. On success the UI confirms "Run Successful" and names the Action. Metrics, validation summary, the paginated preview, Run ID display, the export buttons and "Start New Run" are Phase 6 (build plan 6.1-6.9) and were not built.
-
-Phase 6A — Compatibility Audit and Contract Freeze
-All six items of build plan "Phase 6A" were carried out. Phase 6A is defensive: it changed no runtime behaviour. Not one line of backend/app/** or src/** was modified. Two files were added — an audit document and a test module — and nothing else in the repository changed.
-
-1. Repository audit. Every search the phase prescribes was run across the whole repository (excluding node*modules/, backend/.venv/, .git/): data/, runs/, uploads/, inputs/, working/, exports/, manifest.json, tmp/, temp/, and file_path / filepath / input_path / output_path / run_path / export_path / Path( / open( / .write*_ / mkdir / unlink / os._ / is_file / FileResponse / pathlib, plus the frontend networking search for localhost:8000 / 127.0.0.1:8000. Every hit was classified rather than assumed wrong, using five classes: MIGRATE, RESHAPE, KEEP, TEST-COUPLED, UNTOUCHED.
-
-2. Filesystem dependencies by category. All fifteen categories the build plan lists were examined. The result, in short: the filesystem is confined to four service modules (storage.py, export.py, preview.py, and the plumbing inside runner.py), the Path-typed edges of parser.py, and the download half of api/runs.py. api/actions.py, actions/\*, models/schemas.py, errors.py and main.py have no request-path filesystem dependency at all. No frontend file touches a server filesystem concept — the frontend's Phase 6 work is the same-origin network change of 6G, not a filesystem change.
-
-3. Public contracts identified and frozen. Action IDs, versions, names, registration order, input-slot IDs, accepted extensions, required columns, output IDs/labels/formats, metric key names, the Action/registry contract, the seven HTTP routes, the field names of all thirteen Pydantic models, the full error-code → HTTP-status table, RunStatus values, MANIFEST_SCHEMA_VERSION, the preview limits, the Run ID convention and the frontend's FormData contract. Recorded in docs/phase-6a-compatibility-audit.md §4 and pinned by tests.
-
-4. Path-coupled Actions: there are none. Both registered Actions were inspected and classified DataFrame-compatible:
-
-Action Classification
-exact_duplicate_remover DataFrame-compatible
-product_master_builder DataFrame-compatible
-Both declare run(self, inputs: Mapping[str, pl.DataFrame]) -> ActionResult, and neither module imports os, io, pathlib, an Excel engine or any app.services.\* module, nor calls open(). Build plan 6D.2 ("refactor filesystem-coupled Actions") therefore has no work to do on the Actions themselves — 6D is entirely about the runner, parser and export plumbing around them.
-
-5. Tests protecting existing behaviour. Added backend/tests/test_contract_freeze.py — 84 tests, all passing. It is deliberately filesystem-independent (it never uses the runs_dir / run_paths fixtures, which disappear with the on-disk model), so it must keep passing unchanged through 6B–6I and is the regression signal for the whole migration. It covers the five areas the build plan names — Action registration, Action input validation, Action execution, deterministic output, error handling — plus the public HTTP/schema surface and the DataFrame-first classification of item 4. The 311 pre-existing tests were preserved unchanged; none was weakened, skipped or deleted.
-
-6. No migration performed. No abstraction was introduced, no in-memory upload path was scaffolded, no Run Store was created. Phase 6B was not begun.
-
-Feasibility verified rather than assumed. Because a failure here would be an architectural conflict to report rather than an implementation detail, the in-memory capabilities 6C/6F depend on were checked by execution against the pinned dependency versions:
-
-Capability Result
-pl.read_csv(bytes) / pl.read_csv(BytesIO) works
-fastexcel.read_excel(bytes) works
-fastexcel.read_excel(BytesIO) fails — InvalidParametersError: source must be a string or bytes
-openpyxl.load_workbook(BytesIO, read_only=True, data_only=True) works
-pl.DataFrame.write_csv(BytesIO) works
-pl.DataFrame.write_excel(workbook=BytesIO) works
-Consequence for Phase 6C: the parser must hold the upload as bytes and pass bytes to fastexcel, wrapping in io.BytesIO only for the openpyxl fallback. No architectural conflict exists and no dependency change is required.
-
-Deliverable. docs/phase-6a-compatibility-audit.md — the full inventory, the contract freeze, the Action classification, and §7's explicit two-column migration list: which components need modification (with the subphase that touches each) and which completed Phase 0/1–5 components must remain untouched.
-
-Phase 6B — Introduce Runtime and Storage Abstractions
-All seven items of build plan "Phase 6B" were implemented and verified. Phase 6B separates what a Run is from where its state is kept. Run state now lives in a Run Store; data/runs/<run-id>/manifest.json is no longer written or read. Uploads, Parquet and exports are still on disk — those are 6C, 6D and 6F. No frontend file was touched.
-
-6B.1 Logical Run model. backend/app/models/run.py defines Run, a frozen dataclass carrying the run ID, the ActionReference (Action ID, version and name), status, created_at, updated_at, started_at, completed_at, duration_ms, input metadata, the validation summary, output (result) metadata, Action metrics and the error. No field holds a filesystem path, and a test asserts that structurally rather than by inspection.
-
-It is a dataclass rather than a Pydantic model for the reason Phase 2 gave for ActionResult: this is runtime state, not API-facing data, and from 6D/6E it will carry Polars frames that Pydantic cannot validate. Pydantic keeps its place at the boundary — Run.to_manifest() renders the unchanged RunManifest, so the API shape frozen in Phase 6A is now derived from runtime state instead of being it. updated_at is deliberately not in the manifest: it is runtime bookkeeping, and adding a field would change a frozen contract for no caller's benefit.
-
-A Run is never edited in place. A stage derives the next state with with_changes(...) — which stamps updated_at unless given one — and hands that to the store, so a stored Run cannot be modified behind the store's back.
-
-6B.7 Run IDs preserved. new_run_id() and parse_run_id() moved from services/storage.py to models/run.py unchanged: the convention is still str(uuid.uuid4()), still validated as the canonical string form of a UUID, still raising UnknownRunError for a malformed, truncated or traversal-shaped ID. They moved because run identity belongs to the Run, not to the filesystem module that 6C-6I dismantles. storage.py imports both from there and still uses them, so storage.new_run_id / storage.parse_run_id resolve exactly as before and no existing call site changed.
-
-6B.2 Run Store abstraction. backend/app/services/run_store.py defines RunStore, an abc.ABC with exactly the five methods the build plan names: create_run(run), get_run(run_id), update_run(run), delete_run(run_id) and list_runs(). Anything wider would leak the storage medium into the callers the abstraction exists to protect, so a test asserts that those five — and only those five — are abstract.
-
-Semantics: get_run and update_run raise UnknownRunError (404, unchanged contract) for an unknown or malformed ID; create_run raises DuplicateRunIdError (a ValueError, mirroring DuplicateActionIdError) rather than overwriting; delete_run returns a bool and treats an unknown or malformed ID as "already gone" rather than an error; list_runs returns runs oldest first.
-
-6B.3 InMemoryRunStore. One dictionary in the backend process, guarded by a threading.Lock because Uvicorn runs synchronous endpoints in a thread pool, so two Runs really can touch the store at once. The lock protects the check-then-write pairs; the Runs themselves are frozen values.
-
-6B.4 No persistent infrastructure. Nothing was added — no PostgreSQL, SQLite, Redis, Supabase, S3, DuckDB, ORM or migration tool. package.json and backend/requirements.txt are byte-identical to their committed state. A test parses the module's own imports and fails if any of eleven database, cache or object-store packages appears.
-
-6B.5 Business logic depends on the interface. ACTION_REGISTRY set the convention and the store follows it: a single application instance, RUN_STORE, plus module-level create_run / get_run / update_run / delete_run / list_runs that read it at call time. The runner and the API call those functions; neither ever touches a dictionary. A test proves replaceability by implementing a second RunStore, assigning it, and asserting the five calls land on it — which is exactly what a future PersistentRunStore would do.
-
-6B.6 Run deletion. Two levels, because a Run's state is not all in one place yet. run_store.delete_run(run_id) forgets the record. runner.delete_run(run_id) is the lifecycle-level call: it forgets the record and removes the Run's directory through the new storage.delete_run_directory(), so deleting a Run really releases the state it holds rather than orphaning the user's uploaded file on disk. The directory half disappears with the last of the Run's on-disk files in 6C/6F. delete_run_directory refuses anything that is not a direct child of the runs directory, so a traversal-shaped ID deletes nothing; four tests cover that.
-
-The runner orchestrates through the store. services/runner.py keeps its stage ordering, its validation logic and its failure contract exactly as Phase 3 wrote them. What changed is the plumbing: it records the Run when it starts, then hands the store a new state after inputs are recorded and again at success or failure. storage.write_manifest() is gone from all three places. RunOutcome now carries the Run, with .manifest as a property rendering it, so every existing caller and test that reads outcome.manifest is unaffected. execute_run also gained one small robustness improvement: storage.create_run() (the directory tree) moved inside the failure boundary, so a directory that cannot be created now fails the Run cleanly instead of escaping as an unstructured 500.
-
-The API serves run state from the store. api/runs.py replaced its three storage.read_manifest(run_id) calls with run_store.get_run(run_id). GET /api/runs/{run_id}, the preview endpoint and both downloads behave identically — same responses, same status codes, same 404 for malformed, unknown and traversal-shaped IDs. No route was added: build plan 6B does not ask for one, and the frozen route inventory would have caught it.
-
-What this changes for a user. Run state is process memory in V1, so restarting the backend clears run history — build plan Phase 6 rules 14 and 15 explicitly allow this, and it was verified by execution (below). Nothing in the current UI regressed: the frontend never calls GET /api/runs/{id}, and a full browser run still works.
-
-Known Issue 20 (InputMetadata.stored_filename) is not yet due. 6B does not change upload handling: every upload is still written to inputs/<slot-id>/source<ext>, so the field still records a real generated filename and the manifest shape is still correct. The decision belongs to 6C, where the upload stops reaching disk. Deciding it early would have meant changing a frozen schema for a reason that does not exist yet.
-
-Phase 6C — In-Memory Upload and Spreadsheet Parsing
-All nine items of build plan "Phase 6C" were implemented and verified. Uploaded spreadsheets no longer reach the filesystem at any point: the bytes go from the multipart request into a memory buffer, from there into a Polars DataFrame, and the buffer is released as soon as the frame exists. No frontend file was touched.
-
-Two repository defects were repaired first. Neither was caused by this phase; both had to be fixed before Phase 6C could begin, and both are recorded under Known Issues (31 and 32).
-
-Phase 6B's backend code had been committed into src/app/ — the Next.js App Router directory — instead of backend/app/, exactly as Phase 2 had been (Known Issue 10). backend/app/ therefore had no models/run.py and no services/run_store.py, and api/runs.py, services/runner.py and services/storage.py were still their Phase 3/6A versions. The whole suite failed at collection — 0 of 457 tests ran (ImportError: cannot import name 'run_store' from 'app.services'). Repaired with git mv (history preserved, no file content edited); the suite then reported 457 passed.
-backend/tests/test_runner.py had been overwritten with a byte-identical copy of tests/test_run_store.py, destroying the entire runner pipeline test module. The 457 count was inflated by 34 duplicated Run Store tests, so real unique coverage was 423, with Phase 3's runner tests gone. The Phase 6A version (28 tests) was recovered from commit f481552 and carried forward through 6B (read the Run Store, not manifest.json) and 6C.
-6C.1 Named input slots preserved. The multipart contract is unchanged: action_id plus one file field per slot ID. PendingUpload still keys on the slot ID and \_read_and_check_slots still walks action.inputs, so an upload stays bound to its logical slot from the request to the Action. A test drives a two-slot Action with a CSV in first and an XLSX in second and asserts each frame arrived where it belongs.
-
-6C.2/6C.3 Uploads read into memory. storage.store_upload() is replaced by storage.read_upload(), and StoredUpload by LoadedUpload, which carries payload: bytes instead of path: Path and derives size_bytes by counting the bytes received rather than trusting a header. Nothing is written and nothing is reopened. The consequences were followed through rather than left half-done: RunPaths.inputs and RunPaths.input_directory() are gone, the inputs/ directory is no longer created, and \_INPUTS_DIRNAME is gone with them. Verified over real HTTP across twelve Runs: 0 inputs/ directories, 0 source.\* files, 0 manifest.json files written.
-
-Because a slot ID no longer contributes to any path, the \_safe_id check that guarded input_directory disappeared with it. That is a reduction in attack surface, not a loss of one: the test that asserted the guard now asserts the stronger fact — a hostile slot ID (../escape, a/b) is carried as a dictionary key and writes nothing anywhere.
-
-6C.4 Basic upload properties validated. Per slot: required slot present, extension accepted, file not empty, and size within MAX_UPLOAD_BYTES. The required number of inputs is what the per-slot required check already enforces. All slot problems are still collected and reported together — a test posts an unsupported extension in one slot and an empty file in the other and asserts both come back in one response.
-
-The limit is enforced during the read, not after it. read_upload measures each chunk before keeping it, so the buffer never grows past the limit and an oversized upload cannot become a memory error. This is the point where build plan 3.3's guarantee could quietly have been lost by moving to memory, so it is pinned by a test that feeds a 64 MB stream against a 2 MB limit and asserts the stream was read at most one chunk past the limit. Verified over HTTP: a 168-byte file against a 64-byte limit returns 413 FILE_TOO_LARGE.
-
-6C.5 The MIME type is not trusted. It never was and still is not read: PendingUpload carries only a filename and a stream. The extension chooses the reader; parsing decides the outcome. Verified over HTTP both ways — a valid CSV declared application/octet-stream succeeds, and workbook bytes named .csv and declared text/csv are refused with PARSE_ERROR.
-
-6C.6 CSV parsed from memory. pl.read_csv(payload) reads the bytes directly. try_parse_dates is still off, so date-shaped text is still text.
-
-6C.7 XLSX parsed from memory. fastexcel.read_excel(payload) takes the bytes unwrapped; openpyxl.load_workbook(io.BytesIO(payload), ...) takes a buffer. This asymmetry is not arbitrary — Phase 6A proved by execution that fastexcel accepts bytes but rejects BytesIO, and this session re-verified it against the pinned versions before writing any code. No workbook is written out to be reopened, which a test pins by running the fallback engine with the process CWD redirected to an empty directory and asserting the directory stays empty.
-
-The worksheet-selection logic, the engine-fallback recording and the section 17 refusal wording are unchanged. The refusal message is now asserted verbatim by its own test, because it is public contract.
-
-6C.8 Input metadata preserved. Every field build plan 6C.8 lists is still recorded: original filename, input slot, extension, byte size, worksheet, row count, column count, column names and parser engine. InputMetadata is byte-for-byte the same shape — see the stored_filename decision below.
-
-6C.9 Understandable errors. All eight categories the build plan names are distinguishable, verified over real HTTP:
-
-Build plan 6C.9 case Code Verified message
-Missing required input MISSING_INPUT "Sales File is required."
-Unsupported format UNSUPPORTED_EXTENSION "Sales File must be .csv or .xlsx. sales.json is not…"
-Empty file EMPTY_FILE (new) "empty.csv is empty."
-Unreadable CSV PARSE_ERROR "The uploaded CSV file could not be read…"
-Unreadable XLSX PARSE_ERROR "The uploaded Excel workbook could not be read…"
-Malformed workbook PARSE_ERROR both engines named in details
-Expected worksheet missing AMBIGUOUS_WORKBOOK the section 17 wording, verbatim
-File exceeds upload limit FILE_TOO_LARGE "sales.csv is larger than the 64 bytes upload limit."
-EmptyUploadError / EMPTY_FILE (422) is the one addition to the error taxonomy. Before it, a zero-byte upload, an unreadable file and a header-only file all reported PARSE_ERROR or EMPTY_DATASET in ways that told the user little; the three are now distinct, and a test asserts that zero bytes and a header-only file produce different codes. Adding a class does not disturb the Phase 6A freeze, which pins the codes and statuses of the errors it lists rather than asserting the set is closed. No traceback reaches the browser — grepped for in every error body.
-
-The stored_filename decision (Known Issues 20 and 29), resolved: kept and redefined. The field records the generated name an input is known by, derived from its extension alone. Nothing is written under it any more, but it is still the evidence for the rule build plan section 16 actually states — that the client's filename never became a name the application used. Dropping it was the alternative, and it would have changed a manifest shape frozen in Phase 6A, forced MANIFEST_SCHEMA_VERSION to 2, and required editing test_contract_freeze.py — the one module whose value depends on passing unchanged through the whole migration — for a field no caller reads. Build plan Phase 6 rule 5 ("schemas must be preserved wherever possible") decides it. MANIFEST_SCHEMA_VERSION stays 1, and the docstrings in models/schemas.py and services/storage.py now say precisely what the field means.
-
-storage.create_run() still creates the run directory. working/ and exports/ are still needed until 6D/6F generate those in memory, so the call stays exactly where Phase 6B put it — inside the failure boundary. A Run that fails validation therefore leaves two empty directories behind. That is interim state which disappears with 6F, and moving the call is not something 6C asks for. Recorded as Known Issue 33.
-
-test_contract_freeze.py passed unchanged, again. 84 tests, file not modified — the Phase 6A freeze has now survived both 6B and 6C untouched, which is the whole reason it exists.
-
-Phase 6D — Convert Action Execution to DataFrame-First Processing
-All eight items of build plan "Phase 6D" were implemented and verified. The Action Engine now consumes and produces DataFrames end to end: a Run reads its uploads into memory (6C), parses them into named frames, executes the Action, and keeps the result frames in the Run. A Run touches the filesystem at no point — verified by execution over real HTTP across nine Runs, after which the data directory held zero files and zero directories. No frontend file was touched.
-
-Two repository defects were repaired first. Neither was caused by this phase, and the committed state could not run without the repair. Both are recorded under Known Issues (37 and 38).
-
-backend/tests/test_runner.py had again been overwritten — this time with a byte-identical copy of tests/test_runs_api.py (verified: identical md5 in commit 70c41b1). This is Known Issue 32 recurring, for the second time and with a different donor file. The Phase 6C session's rebuilt runner module is not in the repository.
-backend/tests/test_storage.py was never updated by the Phase 6C commit. It is byte-identical to its Phase 6B version, so it still asserts storage.store_upload() and RunPaths.input_directory() — both removed by Phase 6C. The committed suite failed: 25 failed, 460 passed.
-Both modules were rewritten against the Phase 6C runtime and the suite was brought to green (485 passed, pyright clean) before any 6D code was written, so this phase started from a working, verified 6C baseline rather than from a broken tree.
-
-The pre-refactor baseline was captured by execution, not assumed. Before a line of 6D code was written, both real Actions were run through the Phase 6C pipeline against their committed fixtures, as CSV and as XLSX, and the manifests, result frames and generated CSV/XLSX were saved. Build plan 6D's "its output must match the pre-refactor deterministic output" is therefore checked against a recorded artifact. See Tests.
-
-6D.1 The processing boundary. services/runner.py implements exactly the lifecycle the build plan draws:
-
-named uploaded inputs -> parser -> named DataFrame(s)
--> Action Registry -> Action -> result DataFrame(s)
-storage.create_run() is no longer called, so no run directory is created; RunOutcome no longer carries paths, because a Run has no location. The runner still imports storage — for read_upload, extension_of and display_filename, none of which build a path.
-
-6D.2 Filesystem-coupled Actions: still none. Phase 6A classified both registered Actions DataFrame-compatible and 6C confirmed it; 6D confirmed it a third time by execution. Neither exact_duplicate_remover.py nor product_master_builder.py was modified, and test_contract_freeze.py pins that both declare run(self, inputs) and import no filesystem module.
-
-6D.3 Transformation logic stayed inside the Actions. Nothing moved into React, the upload handler, a FastAPI route, the parser or the export utility. The freeze test's structural checks on the Action modules passed unchanged, and no Action file appears in this phase's diff.
-
-6D.4 Registry behaviour preserved. Action IDs, versions, discovery, schemas, configuration and validation are untouched. GET /api/actions returns exactly what it returned before.
-
-6D.5 One or more result tables. models/run.py gains RunResult — the tables an Action produced, keyed by output ID in the Action's declaration order, with primary (the first declared output), secondary (everything else, usually empty) and table(output_id). A single-output Action needs no ceremony: RunResult.of({"result": frame}) and result.primary. tables is wrapped in a MappingProxyType, so a caller cannot add or drop a result table behind the Run's back — the same rule the frozen Run already followed.
-
-The runner builds it by walking action.outputs, so the Action decides which table is primary, by declaring it first. An Action that declares an output and does not produce it still fails the Run.
-
-6D.6 Run lifecycle status. The build plan says "use existing equivalent status names if already established". RunStatus — running, succeeded, failed — is established, is public API, and is pinned by test_contract_freeze.py. It was kept unchanged. The build plan's example list maps onto it: created/validating/ready are all states inside a synchronous Run that no caller can observe (there is no job queue — build plan 3.12), running is the recorded initial state, and completed is succeeded. Adding statuses no client could ever see would have changed a frozen contract for no caller's benefit.
-
-6D.7 Intermediate processing is ephemeral. The Run keeps DataFrames, Python objects and metadata — no intermediary spreadsheet is written anywhere:
-
-Was, until 6D Is now
-working/<id>.parquet written per output the Action's own frame, held by the Run
-exports/<id>.csv written per output CSV bytes rendered from that frame when a download asks
-exports/<id>.xlsx written per output XLSX bytes built in a memory buffer, same as above
-preview read the Parquet file back preview slices the retained frame
-download served the file with FileResponse download returns a Response carrying the generated bytes
-services/export.py is now byte-producing only (to_csv_bytes, to_xlsx_bytes, to_bytes, worksheet_name); its four path-writing functions are gone, and a test asserts they are gone rather than merely unused. services/preview.py takes a DataFrame instead of a RunPaths + output ID.
-
-Removing Parquet was 6D's call, not 6E's, and here is why. Phase 6C's notes predicted 6E would remove it. Build plan 6D's completion criteria requires a Run to execute "with no required inputs/, working/, exports/ directory" — working/ is exactly where Parquet lived, so it could not survive this phase. Build plan section 28 (internal Parquet) is therefore superseded here rather than in 6E; Known Issue 24 already recorded the reversal as deliberate, and the Phase 6 architectural rules state that they override conflicting earlier instructions.
-
-The same reasoning, and its limit, for preview and download. Once nothing is written, a preview that reads Parquet and a download that serves a file both break. Keeping them working meant re-pointing them at the retained frames. That is the mechanism 6E.2 and 6F.1/6F.2 describe, and it was implemented only as far as removing the filesystem requirement demanded — the response contracts are byte-identical to their pre-6D form. What 6E and 6F still own is listed under Next Phase and was deliberately not built.
-
-6D.8 Failed Runs are cleaned up correctly. A failed Run is recorded failed, keeps its error and its full validation list, keeps the record of what was uploaded — and carries no result at all: \_finalize_failed sets outputs=() and result=None explicitly. That is defensive rather than load-bearing today (a Run cannot currently fail after its result is recorded), which a control test proved, so the guarantee is pinned by a test that drives the finalizer with a Run that does carry a result. Deleting a Run releases its frames: runner.delete_run() is now just run_store.delete_run(), because everything a Run holds travels with the Run. A weakref test asserts the result frame is genuinely unreachable after deletion, rather than assuming it.
-
-Known Issues resolved by this phase. 24 (Parquet superseded — now actioned), 26 (a restart orphans run directories — none are created), 27 (two functions called create_run — only run_store.create_run is called now), 33 (a failed Run leaves two empty directories — no directory is created at all).
-
-test_contract_freeze.py passed unchanged, again. 84 tests, file not modified — the Phase 6A freeze has now survived 6B, 6C and 6D untouched, which is the whole reason it exists.
-
-Phase 6E — Results, Preview, Metrics, and Audit Data
-All seven items of build plan "Phase 6E" were implemented and verified. A Run now describes what it produced and explains what it did, and the browser shows all of it: metrics, the paginated preview, validation warnings and the audit summary. No filesystem behaviour changed — nothing is written, and the run still needs no directory. Export buttons were deliberately not built; that is Phase 6F (see below).
-
-The repository was verified intact before any code was written. The three checks the previous session's Next Phase prescribed were run in order: the backend modules are under backend/app/ and not src/app/; md5sum across backend/tests/\*.py printed no duplicate; and the suite reported 519 passed. The class of defect recorded as Known Issues 10, 31, 32, 37 and 38 did not recur this time. npx eslint . and npm run build were also clean before any change, so this phase started from a verified baseline.
-
-6E.1 Result metadata. backend/app/services/results.py is the new, single place that describes a result frame. It is a service rather than code inside the runner because the runner, the preview and (later) the export all need the same description of a table, and describing a result twice is how two descriptions come to disagree.
-
-OutputMetadata gains four fields, all measured, never inferred:
-
-Field What it is
-column_schema Each column's name, Polars dtype and a coarse ColumnKind
-input_row_count Rows the Run actually received, across every input
-columns_added Result columns that appeared in no input
-columns_removed Input columns that are not in this result
-The two column lists are set differences over real column names in first-appearance order, so they are deterministic and mean the same thing for a one-input Action and a three-input one. A reordered column is reported as neither added nor removed, which a test pins.
-
-"Affected row count" is the Action's to state, not the runner's to guess. Build plan 6E.1 lists it and 6E.5 qualifies it with "where supported by the Action". A generic input_rows - output_rows labelled "rows affected" would be a guess about semantics — an Action that rewrites 500 values in place affects 500 rows and changes the row count by zero — and build plan section 3.3 forbids guessing. So ActionResult gained an optional rows_affected: int | None, defaulting to None; both real Actions set it to the count of duplicate rows they dropped, which is exactly what they affected. An Action that states nothing reports null, and the audit shows null rather than substituting a different fact. Neither Action's metrics, ID, version, inputs, outputs or transformation changed — test_contract_freeze.py's frozen metric-key sets still pass untouched.
-
-6E.2/6E.3 Preview from the result frame. Already true since 6D: the preview slices the retained DataFrame and no temporary spreadsheet is generated to read back. The 100-row default and 500-row maximum are unchanged, and the browser requests exactly one page — verified in a real browser by recording the network requests a "Next" click produced (one ?offset=100&limit=100, nothing else).
-
-6E.4 Schema information. ColumnSchema carries three things: name, the Polars dtype verbatim (Int64, String, …) and kind — a small closed enum (number, text, boolean, temporal, other). The dtype is evidence of what the data is; the kind is what a table actually branches on. Boolean is classified before numeric deliberately, so a true/false column is never right-aligned as though it were a count, and an unrecognised type falls back to other rather than to a guess. Both OutputMetadata and PreviewResponse carry it, and the preview's schema describes the whole table rather than the page, so column types cannot change as the user pages forward.
-
-6E.5 The audit summary. RunAudit (with AuditInput and AuditResult) assembles what build plan 6E.5 lists: the Action executed, the inputs used, rows received, rows returned, rows affected, the result tables available, validation warnings and errors, the Action's metrics, the execution status and the duration.
-
-It is derived, not recorded: Run.to_audit() builds it from the Run's own fields and Run.to_manifest() carries it, so the audit can never drift out of step with the manifest it sits in — a test asserts field-by-field that the two agree. A Run explains itself in whatever state it is in: a running Run reports zero rows received and no results, and a failed Run reports its status, what it received, null for what it returned, and the errors that stopped it (build plan 3.9's evidence rule, now visible to a reader). rows_returned is the primary table's row count, not a total across tables — a total would belong to no table — and every table is listed in results.
-
-6E.6 Audit data stays out of the user's data. Nothing in this phase writes a value into a result frame, and that is asserted rather than assumed: three tests check the result table's columns after a Run, compare the retained frame byte-for-byte against what the Action returned, and confirm that describing a result does not alter it.
-
-6E.7 The existing frontend was extended, not rebuilt. Every Phase 5 component still exists and none was replaced. ActionSelector, ActionDescription, FileUploadSlot and RunButton were not touched at all. Four components were added and two files extended:
-
-src/components/workbench/ResultsSummary.jsx new — counts, column changes,
-the Action's own metrics
-src/components/workbench/DataPreview.jsx new — the paginated table
-src/components/workbench/AuditSummary.jsx new — the audit record
-src/components/workbench/OutputSelector.jsx new — only when >1 result
-src/components/workbench/RunStatus.jsx + validation warnings, and a
-success line that now names
-the row counts
-src/components/workbench/ActionRunner.jsx + result-table state and the
-four components above
-src/lib/api.js + fetchPreview()
-src/lib/formatters.js + formatCount, formatDuration,
-formatMetricLabel, formatCell,
-isBlankCell
-There is still no branch on any Action ID anywhere in the frontend. The output selector is built from the manifest's own outputs, the metric rows from the Action's own metric keys (humanised for display, never renamed, reordered or dropped), and the preview's alignment from the column kinds the backend reported. Verified by running a two-output Action against the real UI with no frontend change of any kind — see Tests.
-
-Preview values are shown exactly as they arrived. No number is regrouped with thousands separators, no string is trimmed and no blank is filled in — the preview is the user's data (build plan section 3.3). Grouping separators appear only on counts the application itself produced (15,842 rows). The single display convention is that a null renders as a muted em dash, because an empty cell and a cell holding an empty string are different facts and would otherwise look identical.
-
-MANIFEST_SCHEMA_VERSION is now 2, and this is the one deliberate contract change. OutputMetadata gained four required fields and RunManifest gained a required audit, so a version 1 manifest does not validate against the new model — that is an incompatibility in the parse direction and the constant says so. Nothing already frozen changed name, order or meaning; every addition sits beside what was there. PreviewResponse.rows is still positional and columns is still a plain list of names.
-
-test_contract_freeze.py was amended, for the first time since Phase 6A. It passed unchanged through 6B, 6C and 6D, which is what made it useful. Phase 6E is the phase build plan Phase 6 always intended to change the manifest, and the freeze did exactly its job: it turned that change into a decision that had to be written down. The amendment is confined to three schema field lists, the version constant and one PreviewResponse construction; each amended entry carries a comment saying what changed and why. Every other assertion in the module — the Action inventory, the route table, the error/status table, the frozen metric keys, the preview limits, the determinism checks, the DataFrame-first classification — is untouched and still passing.
-
-What Phase 6E deliberately did not build. Build plan 6E's completion criteria require a completed Run to display status, metrics, preview, validation warnings and the audit summary. Export buttons are not among them, and Phase 6F owns export — including 6F.6, which changes the download filename convention from <output-id>.<format> to forgexl-<action>-<timestamp>.<format>. Building the buttons now would have been scaffolding for a later phase against a filename convention that is about to change. The download endpoints themselves work (6D re-pointed them at the retained frames) and are unchanged by this phase. Recorded as Known Issue 47.
-
-Phase 6F — In-Memory CSV and XLSX Export
-All eight items of build plan "Phase 6F" were implemented and verified, and a user can now export a result from the browser for the first time. No filesystem behaviour changed in the direction of writing — the opposite: this phase removed the last place ForgeXL still touched a disk during an export.
-
-Repository state found at the start. The committed branch was at phase 6D complete; Phase 6E was complete but on an unmerged branch (claude/forgexl-phase-6e-fe009v, commit 1caab84). This session's branch was re-based onto that commit — a fast-forward, since 6D is its ancestor — so 6F is built on the real 6E code rather than duplicating or skipping it. The three integrity checks the previous session prescribed were then run in order: the backend modules are under backend/app/ and not src/app/; md5sum across backend/tests/\*.py printed no duplicate; and the suite reported 568 passed, which is the number the 6E commit records. npx pyright, npx eslint and npm run build were also clean before any change.
-
-6F.1 CSV from the result frame. Already the mechanism since 6D; this phase pinned it as a contract. export.to_csv_bytes writes the frame straight into a buffer and closes the buffer before returning, so only the bytes handed to the caller survive the call.
-
-6F.2 XLSX genuinely in memory — the one real defect this phase found. DataFrame.write_excel opens its own xlsxwriter.Workbook, and xlsxwriter spools the workbook's parts through the OS temporary directory unless the in_memory option is set. Polars does not set it. Measured before the fix by spying on tempfile: one small export created 12 temporary files under /tmp. Build plan 6F.2 asks for "an in-memory binary buffer", and Phase 6 rule 3 says an export must not have to be written to disk before download, so export.py now opens the workbook itself with in_memory: True. Measured after: 0 temporary files. Two tests hold the line — one asserts the option, one spies on tempfile.mkstemp / NamedTemporaryFile across a single-sheet and a multi-sheet export.
-
-Opening the workbook here means Polars' own workbook defaults had to be reproduced rather than inherited. All four are set explicitly in export.WORKBOOK_OPTIONS, and one of them is a data-safety rule, not just a default: strings_to_formulas: False means a cell whose text begins with = is written as text, never as a formula (build plan section 16). A test round-trips =SUM(A1:A9) through a workbook and back.
-
-6F.3 Sensible cell values — the second defect. Polars applies #,##0.000;[Red]-#,##0.000 to every numeric column by default. The stored value stays exact, but what Excel shows is what a reader trusts, and it showed 0.000123 as 0.000 and 3000 as 3,000 in red-negative styling the user's data never had. That is the same class of silent presentation change the preview is forbidden to make (build plan section 3.3, and 6F.3's "sensible cell values"), so numeric columns are now written with Excel's General format. The numeric column list is derived from the frame's own schema via dtype.is_numeric(), so a Polars numeric type this application has never seen is covered too. Date formats are deliberately kept — an Excel date with no format renders as its serial number, which would be strictly less faithful. Three tests: no #,##0 in the workbook's styles, values round-tripping exactly, and yyyy-mm-dd still present for a date column.
-
-6F.4 Several result tables in one workbook. export.to_workbook_bytes takes (label, frame) pairs and writes one worksheet each into a single workbook; to_xlsx_bytes is now its one-table case, so there is one code path, not two. A new route exposes it:
-
-GET /api/runs/{run_id}/download/xlsx
-Every result table of the Run, in the Action's declaration order, so the primary result is the first sheet. The per-output endpoints are unchanged and remain the way to fetch one table alone or to fetch anything as CSV — there is deliberately no whole-Run CSV, because a CSV file holds one table by definition. A Run with no result — a failed Run, or one whose result has been released — returns MISSING_ARTIFACT, not a workbook with no sheets.
-
-6F.5 Worksheet names. export.worksheet_names satisfies the three requirements together:
-
-Requirement Rule
-Understandable the Action's label, kept as written wherever Excel allows it
-Valid : \ / ? \* [ ] become spaces; runs of space collapse; a leading or trailing apostrophe is dropped; cut to Excel's 31 characters; the reserved name "History" is never handed over; an empty result falls back to Sheet
-Collision-safe duplicates numbered 2, 3, …, compared case-insensitively because Excel compares that way, with the base truncated so the numbered name still fits 31 characters
-The name now comes from the output's label rather than its ID — "Product Master" instead of product_master. That is a deliberate behaviour change, recorded under Deviations: 6F.5 asks for an understandable name, this is the phase that owns worksheet naming, and the label is exactly the human-readable name the Action declares and the UI already shows.
-
-6F.6 Download information. export.download_filename produces:
-
-forgexl-<action>-<output>-<YYYYMMDD-HHMMSS>.<ext> per-output download
-forgexl-<action>-<YYYYMMDD-HHMMSS>.xlsx whole-Run workbook
-Every part comes from the Run's own record — the Action it executed, the output requested, and the Run's completed_at. Two consequences are deliberate: the same output downloaded twice arrives under the same name rather than a new one, and two outputs of one Run never collide in a downloads folder. The timestamp is rendered in UTC, so a machine that changes timezone does not rename a Run it already recorded. Each slug is reduced to a-z0-9-, which means the name is safe to place in a Content-Disposition header verbatim and can never carry a directory component out of an Action or output ID — pinned by a parametrised test over ../../escape, a b/c, !!! and a 200-character ID.
-
-6F.7 Nothing is retained. Each request builds its bytes, sends them, and closes its buffer; the module holds no cache and a Run stores no rendered export. Three tests: the module's mutable module-level state is unchanged across CSV, XLSX and workbook generation; a Run compares equal to itself before and after three downloads; and repeated downloads return identical bytes.
-
-6F.8 No server paths. A parametrised test walks the manifest, the preview and all three downloads and asserts that no header or body contains /Users/, /home/, /tmp, data/runs or \Users\; a further test does the same for a 404 error body. This was already true — there is no path left to leak — and is now asserted rather than assumed.
-
-Frontend (Known Issue 47, closed). ExportButtons.jsx renders one link per format the backend says the selected output is available in, so an Action offering a format this file has never heard of still gets a working button; a whole-Run workbook link appears only when the Run produced more than one table. The links are plain <a href>, not fetches — following one is an ordinary navigation, so the file goes straight from the backend to the downloads folder and the page never holds a second copy of the result. No download attribute is used: the backend's Content-Disposition names the file, which is also what 6F.6 is for. formatExportLabel was added to lib/formatters.js and both download URL builders to lib/api.js, so no endpoint path or backend URL appears outside lib/api.js — the rule Phase 6G depends on. Every other component is untouched; ActionRunner gained six lines.
-
-There is still no branch on any Action ID anywhere in the frontend. Verified by driving a temporary two-output Action through the real UI with no frontend change: the output selector, the preview, both export buttons and the "Download All Results (Excel)" link all appeared and worked, and the downloaded workbook held two correctly named worksheets. The temporary Action was removed and registry.py restored to its committed state before this report; git diff on backend/app/actions/ is empty.
-
-What Phase 6F deliberately did not do. It did not touch services/storage.py's dead runtime code, config.DATA_DIRECTORY / RUNS_DIRECTORY, or the runs_dir test fixture — build plan 6I.1 owns those (Known Issues 21 and 39). It did not begin 6G: lib/api.js still holds http://127.0.0.1:8000 and the browser still calls FastAPI directly, exactly as build plan section 5 requires until 6G changes it.
-
-Phase 6G — Same-Origin Next.js Proxy and LAN Testing
-All ten items of build plan "Phase 6G" were implemented and verified. The browser no longer knows that FastAPI exists: every backend request is addressed to /forge-api/... on the host that served the page, and the development machine alone reaches 127.0.0.1:8000.
-
-Repository state found at the start. The committed branch carried c9abf4c "Phases 6E, 6F, and 6G complete" and c4a0e7e "quick fix", which had already moved the browser onto /forge-api (6G.1/6G.2) and added a rewrites() proxy to next.config.mjs (6G.3). Two defects had come with them, and both are fixed here: the rewrite could not carry an upload (below), and c4a0e7e deleted outputDownloadUrl() and runWorkbookUrl() from lib/api.js while ExportButtons.jsx still imported them. npm run build did not build — ActionRunner.jsx also imports @/components/workbench/ExportButtons while the file on disk was ExportButton.jsx, so module resolution failed. The file was renamed to the name every importer and this document already used; nothing in it changed but one comment.
-
-6G.3/6G.4 — the rewrite could not carry an upload, and a Route Handler can
-The defect, measured rather than reasoned about. With the rewrites() proxy in place, a valid 12.38 MB CSV (12,380,066 bytes, 149,682 rows) uploaded to POST /forge-api/api/runs:
-
-next dev Request body exceeded 10MB for /forge-api/api/runs. Only the
-first 10MB will be available unless configured.
-next dev Failed to proxy http://127.0.0.1:8000/api/runs Error: socket
-hang up { code: 'ECONNRESET' }
-FastAPI starlette.requests.ClientDisconnect
-browser 500 "Internal Server Error" after 30.06 s
-The cause is in Next.js itself, not in the configuration. server/lib/router-utils/resolve-routes.js attaches getCloneableBody(req, config.experimental.proxyClientMaxBodySize) to every request, and an external rewrite forwards cloneBodyStream(). That clone stops at the limit — 10 MiB by default — and, as the Next.js documentation states, "the request will not fail or return an error to the client": the first 10 MiB is forwarded and the rest is dropped. FastAPI then waits for the remainder of a multipart body that ends mid-part.
-
-That directly contradicts two things ForgeXL already promises: config.MAX_UPLOAD_BYTES is 250 MB, and an upload over it is answered with the structured 413 FILE_TOO_LARGE of build plan 3.3. A rewrite cannot express either, and raising proxyClientMaxBodySize would not have fixed it — the clone is buffered in the Node process, so a 250 MB upload would be held in memory a second time before FastAPI ever saw a byte.
-
-The fix. rewrites() is gone from next.config.mjs. In its place:
-
-src/app/forge-api/[...path]/route.js Node Route Handler, GET and POST
-src/lib/backend-origin.js server-only; the backend's address
-A Route Handler is handed the request's own stream (NextRequest.body, which Next builds from the raw IncomingMessage, not from the cloneable body), so the handler passes it to fetch with duplex: "half" and never reads, awaits or parses it. Calling request.formData() there would have buffered the upload and given ForgeXL a second implementation that understands multipart bodies; it does not. The path is rebuilt from the captured segments, each re-encoded so a segment can never contribute a / or ? of its own, and request.nextUrl.search is copied verbatim so the preview's ?offset=&limit= survives. Connection-scoped headers are dropped in both directions — the RFC 9110 hop-by-hop set plus host, expect and content-length (the body is re-framed as a chunked upstream request, so the browser's framing header would contradict it). Coming back, the upstream status and body stream are forwarded along with Content-Type and Content-Disposition, which is what keeps a download a download.
-
-Measured after the change, same file, same machine: 200, 12,380,066 bytes received, 149,682 rows, 0.25 s, no warning in next dev, no ClientDisconnect in FastAPI. A 260.3 MiB upload through the same handler still returns the structured 413 FILE_TOO_LARGE naming the 250 MB limit, in 4.6 s — the contract the rewrite could not express.
-
-6G.5 stays true. FastAPI is untouched and still binds 127.0.0.1. With next dev --hostname 0.0.0.0 running, http://<non-loopback>:8000/health is refused while http://<non-loopback>:3000/forge-api/health answers.
-
-The backend address is server-only. src/lib/backend-origin.js opens with import "server-only", so importing it from a Client Component is a build error; it is imported by the route handler and by nothing else. It reads the same FORGEXL*BACKEND_ORIGIN / FORGEXL_BACKEND_HOST / FORGEXL_BACKEND_PORT variables backend/app/config.py reads, none of them NEXT_PUBLIC*. Verified against the production bundle: .next/static/ contains no 127.0.0.1 and no :8000, and the only ForgeXL address in it is the same-origin /forge-api.
-
-A disconnected backend reads as one sentence. The handler answers 502 with a plain-text body and no error object, which is exactly the case lib/api.js already turns into NETWORK_ERROR. In a real browser, with the backend stopped: the indicator reads "Backend Unavailable" and the panel reads "The ForgeXL backend did not respond. Check that it is running on the machine serving this page." A request the browser itself cancelled is answered 499 rather than being logged as a backend failure.
-
-The lib/api.js regression from c4a0e7e (6G item 2)
-outputDownloadUrl() and runWorkbookUrl() are restored, built on API_BASE_PATH rather than the deleted API_BASE_URL, so every download is a same-origin path and no backend URL appears anywhere in the browser. The ExportButtons.jsx links are unchanged: plain <a href> navigations with no download attribute, named by the Content-Disposition the handler forwards.
-
-6G.6/6G.7/6G.8/6G.9 — LAN acceptance
-There was no second laptop. This session ran in a single ephemeral Linux container, so build plan 6G.7's "select an actual XLSX file located on the second laptop" could not be performed as written. What was done, and what it does and does not prove, is recorded honestly below; the two-Mac acceptance the build plan asks for is the user's to run and is listed under Known Issues.
-
-A real headless Chromium (Playwright, no test-only hooks in the application) drove the actual UI against http://<non-loopback-address>:3001, a next start production server bound to 0.0.0.0, with FastAPI on loopback:
-
-Build plan Check Result
-6G.6 page served over a non-loopback address 200; indicator "Backend Connected"
-6G.7 real file control, 12.38 MB CSV "Exact Duplicate Remover read 149,682 rows and returned 149,682."
-6G.7 preview, then the next page "Showing 1–100 of 149,682" → "Showing 101–200 of 149,682"
-6G.7 browser download, CSV forgexl-…-deduplicated-data-<stamp>.csv, 12,380,066 bytes
-6G.7 browser download, XLSX forgexl-…-deduplicated-data-<stamp>.xlsx, 6,323,765 bytes
-6G.7 downloaded workbook reopened worksheet Deduplicated Data, 149,683 rows including the header
-6G.8 drag-and-drop of a real CSV onto the slot "Product Master Builder read 500 rows and returned 500."
-6G.9 missing file 422 MISSING_INPUT — "Source File is required."
-6G.9 unsupported file 422 UNSUPPORTED_EXTENSION
-6G.9 malformed workbook 422 PARSE_ERROR, both engines named
-6G.9 missing required columns "Validation Failed", the four missing columns listed
-6G.9 disconnected backend "Backend Unavailable" + the readable NETWORK_ERROR sentence
-6G.9 oversized upload (260.3 MiB) 413 FILE_TOO_LARGE — "larger than the 250 MB upload limit."
-6G.5 FastAPI from a non-loopback address connection refused
-The downloaded CSV is byte-identical to the uploaded file (SHA-256 match), which is the whole 250 MB-class round trip through browser → Next.js → FastAPI → Polars → export → browser in one measurement.
-
-The browser acceptance was run against next start rather than next dev because in this container the only non-loopback address is 192.0.2.2 (TEST-NET-1, which is what the sandbox assigns — a real LAN never uses it), and headless Chromium's next dev HMR websocket to that address is answered 403 even with the host added to allowedDevOrigins, which leaves the page unhydrated. That is a next dev behaviour on this address and is unrelated to anything this phase changed — allowedDevOrigins is untouched, HMR does not exist in production, and the same browser hydrates normally against 127.0.0.1:3000 on the same dev server. Recorded as Known Issue 63.
-
-6G.10 — no public deployment
-Nothing moved toward one. No hosting configuration, no tunnel, no public binding: next dev/next start bind 127.0.0.1 by default and 0.0.0.0 only under the explicit dev:lan script, and FastAPI never leaves loopback.
-
-scripts/lan-address.mjs — two defects (6G.6)
-The helper read process.env.PORT, while dev:web:lan always launches Next on port 3000. A PORT=4000 that happened to exist in the shell changed nothing about where Next.js listens and every URL the helper printed — the one thing it exists to get right. It now takes the port as an argument, and package.json passes the same literal it passes to next dev:
-
-dev:web:lan node scripts/lan-address.mjs 3000 && next dev --hostname 0.0.0.0 --port 3000
-process.env.PORT is no longer read at all; an absent or invalid argument falls back to 3000, which is that script's own port.
-
-Second, networkInterfaces() was uncaught. Because the helper is chained ahead of next dev with &&, a throw there would have stopped the development server from starting over an unprintable address. It is now wrapped, and the two outcomes are reported differently — "could not be read" (with instructions for finding the address by hand) versus "no private IPv4 address found". Both exit 0. All three paths were executed: a working interface list, a throwing networkInterfaces(), and this container's own result (its only non-loopback address, 192.0.2.2, is correctly not listed — it is not RFC 1918).
-
-The parser's silent worksheet probe (a review finding, not a failure)
-\_fastexcel_sheet_has_data caught every exception from reader.load_sheet(name, header_row=None) and reported the sheet as empty. A worksheet that genuinely holds nothing reports height and width of zero — it does not fail to load — so a load failure was never evidence about the sheet's contents, and calling it "empty" had two silent consequences:
-
-a workbook whose only data sheet failed to probe was refused as "contains no data", a false statement about the user's file, and one that never reached the openpyxl fallback because it is a structural refusal;
-a workbook with one other readable sheet had that sheet selected as the unambiguous data sheet — exactly the silent worksheet selection build plan section 17 forbids.
-Nothing is caught there now. The exception propagates into the engine fallback already in \_parse_xlsx, which re-reads the workbook with openpyxl and, if that fails too, raises PARSE_ERROR naming both engines. Three tests (test_parser.py, +3 → 39) pin it, and all three fail against the previous implementation: a single-sheet workbook whose probe fails is now read by openpyxl instead of being called empty; a two-sheet workbook is refused as ambiguous instead of having the readable sheet chosen for the user; and a probe failure the fallback cannot rescue is reported as a parse error carrying the probe's own message. No existing test changed — blank worksheets report 0 × 0 rather than raising, so the "one data sheet beside blank sheets" case is unaffected.
-
-What Phase 6G deliberately did not do
-It did not touch services/storage.py's dead runtime code, config.DATA_DIRECTORY / RUNS_DIRECTORY or the runs_dir fixture — build plan 6I.1 owns those (Known Issues 21 and 39). It did not change CORS: config.ALLOWED_FRONTEND_ORIGINS still governs a direct browser call to :8000, which build plan §19 still requires even though the browser no longer makes one. It did not touch test_contract_freeze.py — 6G changes the browser-side prefix, not the server's routes — and it did not begin 6H.
-
-Phase 6H — Synthetic Spreadsheet Fixtures and End-to-End Regression Tests
-All eight items of build plan "Phase 6H" were implemented and verified. The backend suite went from 641 to 1,011 passed + 1 xfailed, and every one of the 371 new tests runs from pytest alone — no file picker, no manually saved workbook, no second laptop and no deployment, which is 6H's completion criterion stated verbatim.
-
-Repository state found at the start. A fresh ephemeral container: backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly. The five integrity checks the Phase 6G entry left as a checklist were run before any edit and all five passed — git branch -r (no completed phase stranded on an unmerged branch this time), backend modules under backend/app/ and not src/app/, no two test modules byte-identical, 641 passed, and npm run build succeeding. This is the first session in this project to start from a repository that needed no repair.
-
-6H.1/6H.2 — the fixture system
-backend/tests/fixtures/spreadsheets.py builds every dataset the suite processes from Python literals, in memory. Two shapes carry all of it:
-
-Table a header plus rows; renders as CSV _or_ as a one-worksheet
-workbook, which is what lets one fixture prove both upload paths
-Workbook named worksheets in order — the cases that are _about_ workbook
-structure and cannot be expressed as a single table
-Determinism is asserted, not assumed. Nothing in the module reads a clock, a random source, an environment variable or the filesystem, and test_spreadsheet_fixtures.py asserts byte equality across repeated renders of every fixture in both formats. large_table(n) is generated by arithmetic on the row index for the same reason.
-
-Two writer settings are deliberate and are not xlsxwriter's defaults: strings_to_formulas=False and in_memory=True. The first is the important one — see the defect below.
-
-The catalogue covers every scenario build plan 6H.2 lists that is meaningful for what ForgeXL supports, and a test names the mapping so that dropping one is a decision rather than an omission:
-
-Build plan scenario Fixture
-simple table SIMPLE_TABLE
-blank rows BLANK_ROWS
-blank cells BLANK_CELLS
-duplicate rows DUPLICATE_ROWS
-duplicate keys DUPLICATE_KEYS
-mixed numeric/text values MIXED_VALUES
-dates DATES
-malformed dates MALFORMED_DATES
-Unicode characters UNICODE_TEXT (CJK, Greek, Cyrillic)
-accented characters ACCENTED_TEXT
-unusual column names UNUSUAL_COLUMN_NAMES
-multiple worksheets MULTIPLE_WORKSHEETS
-missing required columns MISSING_REQUIRED_COLUMNS
-extra columns EXTRA_COLUMNS
-empty workbook EMPTY_WORKBOOK
-larger dataset large_table(n), generated
-Plus HEADER_ONLY, SINGLE_ROW and ONE_DATA_SHEET_AMONG_BLANKS, which the failure and ambiguity cases need.
-
-The large-fixture decision the Phase 6G entry flagged as open — generated per run, or cached as an artifact — was settled as generated. A stored multi-megabyte blob is a second artifact that can drift from the code that reads it, and generating one costs little: at LARGE_ROW_COUNT = 25_000 the CSV rendering is 1.47 MB in ~0.05 s and the workbook 0.71 MB in ~1.0 s. The whole suite still runs in 7.8 s. Phase 7G owns the 100,000-row performance fixtures; this is a correctness fixture that happens to be large.
-
-The generator repeats with a period of PRODUCT_POOL = 250 and every column derives from index % PRODUCT_POOL, so both Actions' expected output is closed form — min(n, 250) distinct rows, in generation order. No test has to deduplicate anything in order to know the answer.
-
-6H.3 — known Action outcomes
-backend/tests/fixtures/action_cases.py binds a fixture to an Action configuration and to the output that combination must produce — build plan 6H.3's triple, made concrete. The expected output is computed from the input's own literals by Table.deduplicated() and Table.with_columns(), using plain Python set and list work: never Polars and never the Action. A test comparing the two compares two independent implementations rather than one against itself.
-
-Thirteen cases result (twelve for the Exact Duplicate Remover, one for the Product Master Builder — the only catalogue fixture carrying its six required columns), plus the two generated large cases.
-
-The Phase 4 fixtures (duplicate_rows.py, product_rows.py) are untouched and remain the hand-written accuracy fixtures where every expected row is typed out literally. These are the complement: broader scenario coverage with the expectation derived, so adding a scenario does not mean hand-copying a table.
-
-6H.4 — the complete backend execution path
-backend/tests/test_end_to_end.py (178 tests) walks build plan 6H.4's pipeline in full, over the real HTTP API, for every case in both upload formats:
-
-create fixture in memory → submit upload → execute Action
-→ retrieve preview → request export → read export → assert
-The preview is paged rather than fetched in one call, so the 500-row cap is exercised rather than avoided; the large case pages through 250 rows and is asserted value by value. Exports are read back with ForgeXL's own parser, so an export the application could produce but not ingest fails the test.
-
-6H.5 — named input slots
-backend/tests/test_input_slots.py (19 tests). No real Action declares two inputs, so two local Actions do — the approach test_export_download.py already takes for multi-output behaviour. They carry no transformation: each returns the frames it was given, so the assertions are about routing.
-
-The two slots require non-overlapping columns (Region and SKU), which is what makes swapping the files detectable: swapped, both slots report their own MISSING_COLUMNS naming the column that slot actually wanted. Omission is covered in both directions — a required slot omitted (MISSING_INPUT naming it), both omitted (both reported in one response), an empty file field counting as omitted, an optional slot omitted (the Run succeeds), and a file sent under an undeclared slot (an UNEXPECTED_INPUT warning that does not fail the Run).
-
-Two tests pin a staging rule that was not previously written down: dataset checks (EMPTY_DATASET, MISSING_COLUMNS) only run once every slot has produced a readable file, so an unreadable slot short-circuits them rather than adding a derived complaint about a file nobody could read.
-
-6H.6 — XLSX round-trip compatibility
-Every case downloads its workbook, reopens it from the response bytes, and checks the four things build plan 6H.6 lists: the workbook is readable, the expected worksheet exists (named by the output's label), the headers are correct, and the values are correct — all of them, not a representative sample. Accented text, Unicode scripts and blank rows each get a dedicated upload → Action → export → reopen assertion across both formats.
-
-6H.7 — the failure battery
-backend/tests/test_failure_regressions.py (52 tests) works through build plan 6H.7's list over real HTTP. ForgeXL has no user-supplied Action configuration, so "invalid configuration" is read as the request-shaped equivalents and that reading is stated in the module docstring: a missing or blank action_id, an output ID the Action does not declare, a format an output is not offered in, and paging parameters outside the documented range.
-
-6H.7 item Covered by
-invalid upload wrong extension, no extension, zero bytes, empty CSV, CSV-named-.xlsx, workbook-named-.csv, corrupt workbook, several data sheets, empty workbook, no rows, over the limit
-missing required columns both formats, the five missing names listed, Sku reported rather than matched to SKU
-invalid configuration no/blank action_id, unknown output ID, limit of 0/-1/501/10000, negative offset, an undeclared download format
-Action failure a structured 500, no message/traceback leak, an Action that omits a declared output, the failed Run keeping its record
-unknown Action ID 404, no fallback to a near match, and no Run recorded
-unknown run ID 404 from all five Run endpoints, and five malformed IDs answered 404 rather than crashing
-export before completion a failed Run's output, workbook and preview; a Run whose result was released (MISSING_ARTIFACT, and the Run itself still 200); a deleted Run gone from every endpoint
-A final test asserts a successful download still works, so the battery cannot pass by everything failing.
-
-6H.8 — the test data is synthetic
-test_the_repository_contains_no_spreadsheet_files walks the repository and fails on any .csv, .xlsx, .xls, .xlsm or .parquet outside the ignored directories. Control-tested: planting data/planted.csv failed the test naming that path, and removing it passed. No company spreadsheet is required by any automated test; real files remain available for manual validation.
-
-A real defect the fixtures found: Excel uploads silently destroy mixed columns
-The MIXED_VALUES fixture — a column holding 10, n/a, 2.5, blank, -3, 0, which is what a spreadsheet produces the moment someone types "n/a" into a numeric column — is not processed faithfully on the XLSX path.
-
-uploaded as CSV ["10", "n/a", "2.5", None, "-3", "0"] nothing lost
-uploaded as XLSX [10.0, None, 2.5, None, -3.0, 0.0] "n/a" destroyed
-fastexcel/calamine types the column as f64 and turns every non-numeric cell into a null. The value is present in the user's file and absent from ForgeXL's result, with no error and no warning — which contradicts build plan section 3.3 ("never silently substitute missing data", "never silently convert invalid data into valid-looking data").
-
-Three things were established before recording it:
-
-The workbook really does store text. openpyxl reads the same bytes and returns "n/a" intact, so this is the reader, not the fixture. A test asserts exactly that, so the finding cannot later be mistaken for a fixture bug.
-The compatibility fallback does not have the defect. openpyxl returns the full column. The two engines disagree about the same file.
-No fastexcel option avoids it. dtype_coercion="strict" and schema_sample_rows=None were both measured and both still coerce. dtypes="string" would preserve everything but would make every numeric column text.
-No parser change was made, and this is deliberate. The available fixes are a per-workbook second read to detect the loss (roughly doubling XLSX parse cost, which Phase 7H owns), forcing all columns to string (a behaviour change across every XLSX upload), or a per-workbook engine switch — and choosing between refuse, warn and fall back is a product decision, not an implementation detail. Build plan 6H asks for fixtures and regression tests, not a parser redesign.
-
-What was done instead is the honest option: the test states the correct behaviour and carries @pytest.mark.xfail(strict=True) with the reason above. Today it xfails and the suite stays green; the day the parser is fixed it XPASSes and — because the marker is strict — fails the suite until the marker is removed. Control-tested: pointing \_parse_xlsx at the openpyxl implementation turned it into a failure, exactly as intended. It is recorded as Known Issue 65 and is the one open correctness question this phase produced.
-
-A fixture-builder defect fixed: tests/helpers.xlsx_bytes wrote formulas
-xlsxwriter writes any string beginning with = as a formula unless told otherwise, and helpers.xlsx_bytes had never told it otherwise. A fixture containing the literal text =SUM(A1) became a formula and read back as its computed value — 0.
-
-That is only a fixture bug, but it is the kind that makes a test meaningless: a builder that silently converts data cannot be used to prove the application never does (build plan section 16). strings_to_formulas: False is now set — the same setting app.services.export already applies to real exports, for the same reason. The one test that wants a genuine formula (test_parser.py::test_a_workbook_containing_a_formula_reads_its_stored_value) calls write_formula explicitly and is unaffected; the whole suite was green before and after the change. An end-to-end test now carries =Not A Formula as a column name from upload through Action, export and reopen.
-
-What Phase 6H deliberately did not do
-It did not add a frontend or proxy test, and this was the phase's one real design question. The Phase 6G entry left it open: "Deciding whether the committed suite drives Next.js too — and what starts it — is 6H's first real design question."
-
-The answer taken is no, on three grounds: build plan 6H's eight required items are all about spreadsheet fixtures and backend execution and none of them mentions the frontend; its completion criterion is about verifying "ForgeXL's spreadsheet engine"; and a committed browser suite means a new test runner and a new dependency, which is scope this phase was not given. The consequence is recorded honestly as Known Issue 66 — the /forge-api proxy's body-streaming behaviour still has no committed regression test, and Deviation 22 (no frontend test suite) still stands.
-
-It did not touch test_contract_freeze.py; 6H adds tests and changes no API, so the freeze module is byte-identical to its 6F state, which is what Known Issue 48 asked of this phase. It did not touch services/storage.py's dead runtime code, config.DATA_DIRECTORY / RUNS_DIRECTORY or the runs_dir fixture — build plan 6I.1 owns those. It changed no application code at all: the only non-test file in the diff is this document. It added no dependency: package.json, package-lock.json and backend/requirements.txt are untouched. And it did not begin 6I.
-
-Current Architecture
-Frontend
-Item State
-Framework Next.js 16.3.2 (Turbopack)
-React 19.2.8 / react-dom 19.2.8
-Router App Router (src/app/). No pages/ directory.
-Language Plain JavaScript. Zero .ts/.tsx files.
-Tailwind CSS v4 (4.3.3), CSS-first via postcss.config.mjs + @import "tailwindcss";
-ESLint 9.39.5, flat config extending eslint-config-next/core-web-vitals
-src/ directory In use. jsconfig.json maps @/_ → ./src/_.
-React Compiler Enabled (reactCompiler: true)
-Fonts next/font/google — Geist and Geist Mono
-Frontend files:
-
-src/app/layout.jsx root layout, project metadata
-src/app/page.jsx header + BackendStatus + ActionRunner
-src/app/globals.css Tailwind import + theme tokens
-src/app/favicon.ico
-src/app/forge-api/[...path]/route.js (6G)
-the same-origin transport to FastAPI:
-GET and POST, request body streamed
-through unread, status/body/Content-Type/
-Content-Disposition forwarded back
-src/lib/backend-origin.js (6G) server-only; the ONLY module holding
-the backend's host and port. `import
-                               "server-only"` makes a client import a
-build error.
-src/lib/api.js the only module holding a backend path;
-every value in it is same-origin,
-including the two download URL builders
-src/lib/formatters.js display helpers: file size, extension,
-counts, duration, metric and export labels,
-preview cells
-src/components/backend/BackendStatus.jsx
-client component, /health indicator
-src/components/workbench/ActionRunner.jsx
-"use client" — owns all workflow state
-src/components/workbench/ActionSelector.jsx
-<select> populated from GET /api/actions
-src/components/workbench/ActionDescription.jsx
-name, description, version
-src/components/workbench/FileUploadSlot.jsx
-one slot; click or drag-and-drop
-src/components/workbench/RunButton.jsx
-Run / Processing…, disabled-state rules
-src/components/workbench/RunStatus.jsx
-running / success / structured errors
-src/components/workbench/OutputSelector.jsx (6E)
-rendered only when a Run has >1 result
-src/components/workbench/ResultsSummary.jsx (6E)
-counts, column changes, Action metrics
-src/components/workbench/DataPreview.jsx (6E)
-the paginated result table
-src/components/workbench/AuditSummary.jsx (6E)
-what happened, from manifest.audit
-src/components/workbench/ExportButtons.jsx (6F)
-one link per offered format, plus the
-whole-Run workbook when >1 result
-(renamed from ExportButton.jsx in 6G: the
-file was misnamed and no importer resolved
-— see Known Issue 61)
-src/components/workbench/ArtifactDownloads.jsx (12G)
-the files a Run produced: one row per
-artifact with its label, filename, kind and
-size, a download link each, and a
-"Download All" ZIP link above one file.
-Renders nothing when a Run produced none,
-which is every Run either registered
-Action can produce.
-public/.gitkeep
-(The 6E components were added to the repository in Phase 6E but this list was not updated at the time; the entries above are the actual repository state.)
-
-page.jsx stays a server component; ActionRunner is the client boundary, so server-only and client-only code remain separated (build plan §15). ActionDescription and RunStatus are pure presentation and carry no "use client" directive of their own — they are pulled into the client bundle by their importer.
-
-(The Phase 1 entry above recorded the health indicator as .js at src/components/BackendStatus.js; the paths shown here are the actual repository state. Build plan §15 permits both .js and .jsx.)
-
-Backend
-backend/
-.venv/ git-ignored virtual environment
-requirements.txt pinned direct dependencies
-pytest.ini testpaths=tests, pythonpath=.
-app/
-**init**.py
-config.py all backend settings
-errors.py structured error taxonomy (section 22)
-main.py FastAPI app, CORS, routers, error handler, /health
-actions/
-**init**.py
-base.py Action contract + ActionResult
-registry.py ActionRegistry, ACTION*REGISTRY, lookups
-exact_duplicate_remover.py
-product_master_builder.py
-api/
-**init**.py
-actions.py GET /api/actions
-runs.py POST /api/runs, retrieval, preview, downloads
-models/
-**init**.py
-schemas.py every Pydantic schema
-run.py the logical Run, RunResult, run IDs (6B/6D);
-RunResult also carries the Run's artifacts (12C)
-artifact.py a finished file a Run produced: the Artifact
-value, the flat-filename rule, and the ID and
-filename builders (12A-12C, 12E, 12F)
-library.py Data Library records: Dataset, DatasetVersion,
-DatasetCommit, dataset/version identity,
-KNOWN_DATASETS (9A/9B)
-source_schemas.py the canonical schemas of the three recurring
-source files. The only place a source column
-name is spelled (10A)
-services/
-**init**.py
-run_store.py RunStore, InMemoryRunStore, RUN_STORE (6B)
-data_library.py DataLibrary, LocalDataLibrary, DATA_LIBRARY:
-persistent versioned business datasets as
-Parquet + JSON records. Separate from run
-state; shares no method with it (9A/9C-9E)
-storage.py in-memory upload intake, safe filenames,
-upload limit. Builds no path at all: the
-run-directory helpers 6D left unused were
-removed in 6I (6C/6D/6I)
-parser.py parse_tabular_bytes: CSV + XLSX from memory (6C);
-refuses a repeated column name (7B)
-runner.py the generic Run pipeline, DataFrame-first (6D)
-export.py CSV/XLSX bytes from a result frame (6D);
-check_fits_worksheet refuses a result the
-XLSX format cannot hold (7B)
-workbook.py report-quality XLSX rendering: sheets, styled
-headers, number formats, widths, heights,
-frozen panes, filters, tables, conditional
-formats and literal totals. Calculates nothing
-and writes no formula; reuses export.py's
-options, capacity check and naming rules (12D)
-archive.py a Run's artifacts -> one ZIP, built in memory,
-flat entry names, deterministic bytes (12F)
-preview.py paginated slices of a result frame (6D)
-results.py measuring a result table: schema, row counts,
-columns added and dropped (6E)
-reporting_period.py which month a file covers, read from its date
-column; refuses an ambiguous one (10B)
-ingestion.py monthly commits, the coordinated three-file
-cycle, the historical bootstrap (10C-10G)
-input_resolution.py a dataset reference -> one immutable version
--> a DataFrame, resolved before the Action
-runs. The only place a moving selector
-stops moving (11B-11D)
-tests/
-**init**.py
-conftest.py quarantine (an empty cwd, autouse), Run Store,
-registry, client (runs_dir gone in 6I)
-helpers.py make_action(), CSV/XLSX builders, upload
-helpers, CSV/XLSX value normalisation (6H)
-fixtures/ hand-written Action fixtures (Phase 4) plus the
-6H fixture system:
-spreadsheets.py Table / Workbook, the scenario catalogue,
-large_table() (6H)
-monthly_sources.py synthetic sales / sample / assignment files,
-built on Table so each renders as either
-upload format (10)
-action_cases.py known input -> Action -> expected output (6H)
-test_actions.py Action contract + registry
-test_api.py /health and /api/actions
-test_schemas.py manifest / preview serialisation
-test_run_model.py the logical Run and run IDs (6B)
-test_run_store.py the five store operations, replaceability (6B)
-test_storage.py in-memory upload intake, path safety, upload
-limit (rewritten in 6D, see KI 38; the
-run-directory tests removed in 6I)
-test_parser.py CSV, XLSX from bytes, worksheet ambiguity,
-engine fallback (6C)
-test_runner.py the pipeline, validation, failed Runs, results,
-deletion (rebuilt again in 6D; see KI 37)
-test_export.py CSV/XLSX bytes round trips (6D)
-test_preview.py paging limits and the column schema (6D/6E)
-test_results.py column kinds, added/removed columns,
-describe_output (6E)
-test_audit.py result metadata and the audit summary through
-the pipeline; audit stays out of the data (6E)
-test_runs_api.py the Run endpoints and their status codes
-test_contract_freeze.py the Phase 6A freeze (amended in 6E, 6F, 7,
-10 and 11; every amendment an addition, and no
-frozen value moved in 6I — see KI 48)
-test_spreadsheet_fixtures.py the fixture system itself:
-determinism, faithfulness, scenario coverage,
-synthetic-only (6H)
-test_end_to_end.py fixture -> upload -> Action -> preview ->
-export -> read back, both formats (6H)
-test_input_slots.py named slots: swapping, omitting, optional (6H)
-test_failure_regressions.py the 6H.7 failure battery (6H)
-test_exact_duplicate_remover.py / test_product_master_builder.py /
-test_action_round_trip.py (Phase 4)
-test_upload_form.py bounded memory-only multipart intake (pre-6I)
-test_mixed_xlsx_round_trip.py the repaired XLSX parser through both
-real Actions and both exports (pre-6I)
-test_export_download.py the download routes, filenames, release
-rule and no-server-paths rule (6F)
-test_data_edge_cases.py the 7B edge-case list, end to end, both
-upload formats (7B)
-test_incorrect_schemas.py exact column matching; every near-miss
-refused by name (7C)
-test_hostile_input.py hostile filenames and malformed Run /
-output / Action IDs (7D/7E)
-test_workbook_cases.py the 7F workbook list; formulas read as
-stored values, macro formats refused (7F)
-test_local_exposure.py loopback binding, CORS, and no remote
-call anywhere in the source (7K)
-test_library_models.py dataset/version records, identity, periods,
-supersession metadata, JSON round trip (9B)
-test_data_library.py the seven operations, the storage layout,
-immutability, snapshot semantics, the write
-lock (9A/9C-9E)
-test_library_persistence.py 9F's seven proofs; two of them in a
-separate Python process (9F)
-test_source_schemas.py exact column matching, no aliasing, the
-provisional schema's UNCONFIRMED mark (10A)
-test_reporting_period.py the month from the data not the filename;
-ambiguity refused; every 10B condition (10B)
-test_ingestion.py monthly commits, duplicates, ownership
-checks, the three-file cycle, the
-bootstrap, and the exit criterion (10C-10G)
-test_library_inputs.py library-backed input slots: the extended
-contract, resolution, provenance,
-determinism and every clear failure (11A-11E)
-test_artifacts.py the artifact model, the extended result
-contract, artifact metadata, many artifacts
-per Run, collision rules, filename safety and
-the release rule (12A-12C, 12E, 12F)
-test_workbook.py the report renderer: every 12D item, verified
-by reopening the rendered bytes (12D)
-test_artifact_download.py the two artifact routes, the batch ZIP,
-its safety and determinism, and the Phase 12
-exit criterion end to end (12F/12G)
-benchmarks/ NOT collected by pytest (testpaths=tests and
-the test*\*.py glob). Run directly:
-`.venv/bin/python -m tests.benchmarks.run`
-run.py the 7G/7H/7I performance harness (7G-7I)
-Installed backend packages (resolved 2026-08-22):
-
-fastapi 0.141.1
-pydantic 2.13.4
-uvicorn 0.52.4
-python-multipart 0.0.32
-polars 1.43.2
-fastexcel 0.21.0
-openpyxl 3.1.5
-xlsxwriter 3.2.9
-pytest 9.1.1
-httpx 0.28.1
-pydantic was added to backend/requirements.txt in Phase 2. It was already installed as a FastAPI transitive dependency; it is now declared explicitly because app.models.schemas imports it directly (build plan §15). The resolved version did not change.
-
-Backend configuration values (defaults in backend/app/config.py):
-
-HOST 127.0.0.1
-PORT 8000
-MAX*UPLOAD_BYTES 262144000 (250 MB)
-ALLOWED_FRONTEND_ORIGINS http://127.0.0.1:3000, http://localhost:3000
-LIBRARY_DIRECTORY <repository>/data/library (Phase 9)
-Each is overridable through a FORGEXL*-prefixed environment variable (FORGEXL_BACKEND_HOST, FORGEXL_BACKEND_PORT, FORGEXL_MAX_UPLOAD_BYTES, FORGEXL_ALLOWED_FRONTEND_ORIGINS, FORGEXL_LIBRARY_DIRECTORY). The prefix avoids collisions with the generic HOST/PORT variables that next dev and other local tooling also read; build plan §20 names the settings, not the variable names.
-
-There is still no run-data directory, and LIBRARY_DIRECTORY is not one. DATA_DIRECTORY, RUNS_DIRECTORY and FORGEXL_DATA_DIRECTORY were removed in Phase 6I along with the code that read them (6I.1) and have not come back: a Run writes nothing, and there is no setting that could give it somewhere to write. What Phase 9 added is the location of the persistent Data Library, which holds business data rather than run state — the build plan's "Run State and Business Data Are Different" rule. It is absolute, derived from PROJECT_ROOT rather than the working directory, git-ignored in full, and the directory is created on the first commit rather than at startup. See Deviations.
-
-PROJECT_ROOT is used to point uvicorn --reload at the backend source tree and as the base of the library default.
-
-API surface (current)
-Every path below is FastAPI's own, on 127.0.0.1:8000. The browser addresses none of them directly. Since 6G it addresses each one with /forge-api prepended, on the host that served the page, and the Route Handler at src/app/forge-api/[...path]/route.js forwards it — status, body stream, Content-Type and Content-Disposition unchanged — so the statuses and bodies listed here are what the browser actually receives. The handler adds exactly two responses of its own, neither of them FastAPI's:
-
-502 the backend could not be reached; a plain-text body with no `error`
-object, which `lib/api.js` renders as its NETWORK_ERROR sentence
-499 the browser cancelled the request before the backend answered
-
-GET /health -> 200 {"status": "ok"}
-GET /api/actions -> 200 {"actions": [ActionDefinition, ...]}
-
-POST /api/runs -> 200 RunManifest
-multipart: action_id + one field per slot ID —
-a file for an upload slot, and since Phase 11
-text naming a stored version for a
-library-backed one (`latest`, `period:YYYY-MM`
-or `version:<version id>`). (11A)
-Uploads are read into memory and parsed from
-there (6C); a library reference is resolved to
-one immutable version and loaded as a DataFrame
-before the Action runs (11B). Either way the
-Action receives {slot_id: DataFrame}.
-The Action's result frames are held by the Run.
-The whole pipeline writes nothing to disk and
-needs no run directory at all (6D) — reading a
-stored version is a read, and nothing about a
-Run is written to the library.
-The manifest carries result metadata on every
-output and a derived `audit` summary (6E), plus
-`library_inputs` naming the exact dataset
-versions the Run read (11C) and, since Phase 12,
-`artifacts` describing any finished files the
-Action produced beside its tables (12A-12C);
-`schema_version` is still 2 — every Phase 11 and
-Phase 12 addition has a default.
-400 malformed request (no action_id)
-404 unknown Action
-413 upload over MAX_UPLOAD_BYTES
-422 validation failure — including
-EMPTY_FILE for a zero-byte upload (6C),
-DUPLICATE_COLUMNS for a header row that
-names two columns the same thing (7B),
-INVALID_DATASET_SELECTOR for a reference
-that is not one of the three forms, and
-UNKNOWN_DATASET / UNKNOWN_DATASET_VERSION
-for one that names nothing stored (11E)
-500 Action raised, or DATA_LIBRARY_ERROR if
-the library's stored state could not be
-read
-
-GET /api/runs/{run_id}
--> 200 RunManifest | 404
-Served from the Run Store (in-process memory in
-V1), not from a file. Restarting the backend
-clears run history — build plan Phase 6 rules
-14/15.
-
-GET /api/runs/{run_id}/outputs/{output_id}/preview?offset=&limit=
--> 200 PreviewResponse (default 100, max 500)
-Sliced from the Run's retained result frame (6D),
-with the table's `column_schema` so a client can
-render values by type (6E).
-400 offset/limit out of range
-404 unknown Run or output, or the Run no longer
-holds its result (MISSING_ARTIFACT)
-
-GET /api/runs/{run_id}/outputs/{output_id}/download/csv
-GET /api/runs/{run_id}/outputs/{output_id}/download/xlsx
--> 200 attachment | 404
-The bytes are generated from the retained result
-frame for that request; no file is read or
-written (6D), and the workbook is assembled in a
-memory buffer with no temporary file at all (6F.2).
-Named by the ForgeXL convention (6F.6):
-forgexl-<action>-<output>-<YYYYMMDD-HHMMSS>.<ext>
-404 unknown Run or output, or the Run no longer
-holds its result (MISSING_ARTIFACT)
-422 EXPORT_TOO_LARGE — XLSX only: the result
-exceeds an Excel limit (1,048,575 rows,
-16,384 columns, 32,767 characters in a
-cell) and would be truncated. CSV has no
-such limits and is unaffected. (7B)
-
-GET /api/runs/{run_id}/download/xlsx (new in 6F)
--> 200 attachment | 404
-Every result table of the Run as one workbook,
-one worksheet each, in the Action's declaration
-order (6F.4). Named
-forgexl-<action>-<YYYYMMDD-HHMMSS>.xlsx.
-There is deliberately no whole-Run CSV: a CSV
-file holds one table by definition.
-404 unknown Run, or a Run with no result
-(MISSING_ARTIFACT) — a failed Run included
-
-GET /api/runs/{run_id}/artifacts/{artifact_id}/download (new in 12G)
--> 200 attachment | 404
-One finished file the Action produced, offered
-under the Action's own filename and the
-artifact's own media type. The bytes are what
-the Run has held since it executed; nothing is
-rendered here and nothing is read from disk.
-A non-ASCII filename is carried by an RFC 6266
-`filename*` parameter beside the ASCII one; an
-ASCII filename is sent exactly as every export
-filename has been since 6F.6.
-404 unknown Run (UNKNOWN_RUN), an artifact this
-Run never produced (UNKNOWN_ARTIFACT), or
-one it no longer holds (MISSING_ARTIFACT)
-
-GET /api/runs/{run_id}/artifacts/download/zip (new in 12F)
--> 200 attachment | 404
-Every artifact of the Run as one ZIP, one flat
-entry each, in the order the Action listed them.
-Assembled in memory and deterministic: entries
-are stamped with the Run's completion time, so
-two downloads are byte-identical. Named
-forgexl-<action>-<YYYYMMDD-HHMMSS>.zip — the
-bundle is ForgeXL's file, not the Action's.
-404 unknown Run, or a Run that produced no
-artifact (MISSING_ARTIFACT)
-Every error body has the shape build plan section 22 specifies:
-
-{"error": {"code": "...", "message": "...", "details": {...}}}
-FastAPI's own /docs, /redoc and /openapi.json are present by default; the OpenAPI schema now documents ActionDefinition, ActionInput, ActionOutput and ActionListResponse.
-
-Registered Actions (2):
-
-exact_duplicate_remover 1.0.0 "Exact Duplicate Remover"
-input source_file upload .csv .xlsx no required columns
-output deduplicated_data csv, xlsx
-
-product_master_builder 1.0.0 "Product Master Builder"
-input sales_file upload .csv .xlsx
-required columns SKU, Vintage, Supplier, Producer,
-Selection, Volume
-output product_master csv, xlsx
-The Phase 2 placeholder example_passthrough was removed in Phase 4.
-
-Both are upload-backed, and the contract freeze pins that. Phase 11 made a library-backed input slot possible; no registered Action uses one, because build plan 11A explicitly says neither proof Action should have to change. The first Action that reads the Data Library is build plan Phase 13's monthly report.
-
-Neither produces an artifact either, and the contract freeze pins that too. Phase 12 made artifacts possible; build plan 12B is explicit that no Action has to produce one, and test_no_registered_action_produces_artifacts fails if a later phase quietly turns a deduplicator into a report.
-
-Adding an Action (the architecture being proven)
-Write backend/app/actions/<action>.py — subclass Action, declare metadata, implement run().
-Import it in backend/app/actions/registry.py and add it to ACTION_REGISTRY.
-Add tests (and fixtures).
-Nothing else in the backend changes, and — once Phase 5 exists — no frontend file changes, because the UI is built entirely from GET /api/actions.
-
-Since Phase 11 an input slot may read stored business data instead of an upload: declare it with source=ActionInputSource.LIBRARY and the dataset_id it reads, and nothing else about the Action changes. run(inputs) is identical, and it must not import app.services.data_library — resolving a version is the runner's job, and the contract freeze fails an Action that tries (build plan 11B). The browser has no version picker yet, so such an Action is driven in-process or by naming the version in the request form until build plan 15A builds one.
-
-npm scripts
-dev concurrently -> dev:web + dev:api
-dev:web next dev --hostname 127.0.0.1 --port 3000
-dev:api bash scripts/dev-backend.sh
-dev:lan concurrently -> dev:web:lan + dev:api (6G)
-dev:web:lan node scripts/lan-address.mjs 3000
-&& next dev --hostname 0.0.0.0 --port 3000 (6G)
-build next build
-start next start --hostname 127.0.0.1 --port 3000
-lint eslint
-Every script that runs next dev, next build or next start prefixes it with NEXT_TELEMETRY_DISABLED=1 (Phase 7K, Known Issue 1). Omitted from the listing above for width; test_local_exposure.py asserts it is on all four.
-
-Only dev:web:lan binds 0.0.0.0, and only Next.js. dev:api is unchanged in every script: FastAPI takes its host from config.HOST, which is 127.0.0.1 (build plan 6G.5). scripts/lan-address.mjs prints the LAN URLs before Next starts; it is informational, it takes the port as the argument the line above passes it, and it never exits non-zero.
-
-devDependencies gained concurrently ^10.0.5. No other dependency was added.
-
-Directory status vs build plan §10
-Path Status
-src/app/ Exists (plan sketches root app/; src/ retained per 1.1)
-src/components/ Exists (backend/, workbench/ — 11 components; ArtifactDownloads.jsx added in 12G)
-src/lib/ Exists (api.js, formatters.js, backend-origin.js — 6G)
-backend/app/ Exists (main.py, config.py)
-backend/app/api/ Exists (actions.py, runs.py, upload_form.py; the hyphenated duplicate was removed in Phase 7)
-backend/app/actions/ Exists (base.py, registry.py, the two proof Actions)
-backend/app/models/ Exists (schemas.py, run.py, library.py — 9A/9B, artifact.py — 12A)
-backend/app/services/ Exists (run_store, data_library, ingestion, reporting_period, input_resolution, storage, parser, runner, export, workbook, archive, preview, results)
-backend/tests/ Exists (39 test modules, fixtures/, and benchmarks/ which pytest does not collect)
-data/runs/ Removed in 6I. Nothing has been written there since 6D.
-data/library/ The Phase 9 Data Library. Git-ignored in full; created on the first commit, so absent until something is stored.
-scripts/ Exists (dev-backend.sh, lan-address.mjs — 6G)
-public/ Exists (.gitkeep; starter demo SVGs removed)
-.env.example Exists (no FORGEXL_DATA_DIRECTORY since 6I; gained FORGEXL_LIBRARY_DIRECTORY in Phase 9)
-docs/ Exists (build-plan.md, implementation-status.md, phase-6a-compatibility-audit.md, architecture.md — added in 6I)
-.env.local Not present — not required (frontend default fallback)
-Repository / Git
-Remote: https://github.com/cmgolizio/ForgeXL
-Current branch: claude/forgexl-phase-11-pds3ad
-Descends from: 3de2436 "phase 10 complete"
-Phase 11's diff is 14 files: two new (backend/app/services/input_resolution.py and backend/tests/test_library_inputs.py) and twelve modified, with no deletion and no rename. The current state of main and of the unmerged phase branches is recorded under Next Phase → Repository / Git, which is the entry to trust; the paragraphs below record earlier sessions' own view of the tree and are left as written.
-
-(The Phase 9 session's record follows.)
-
-Phase 9's diff is five new files (backend/app/models/library.py, backend/app/services/data_library.py and three test modules), eight modified files and one rename.
-
-(The Phase 8 session's record follows.)
-
-Phase 8's diff is three files — README.md, one docstring paragraph in backend/app/actions/base.py, and this document — plus one file rename that is not in commit 60817e8; see Known Issue 85.
-
-(The Phase 6I session's record follows.)
-
-main is behind by six phases. At the start of Phase 6I, origin/main was at 70c41b1 ("phase 6C fix"): Phases 6D, 6E, 6F, 6G, 6H and the pre-6I repairs are all on branches main does not contain. This is Known Issue 54, still unresolved and now larger. The 6I branch descends from 8bfe29f, which carries all of that work, so nothing was skipped or duplicated — but a future session that inspects only main will conclude, wrongly, that most of Phase 6 was never done. Merging the phase branches would remove the hazard for good.
-
-Phase 6I's diff is one new document (docs/architecture.md), two backend modules, sixteen test modules, .env.example, .gitignore and this file, plus two file renames and the removal of data/runs/.gitkeep. package.json, package-lock.json and backend/requirements.txt are untouched, and nothing under src/ changed.
-
-(The paragraphs below record earlier sessions' own view of the tree.)
-
-Phase 6H's changes are on claude/phase-6h-fixtures-regression-1uz3xp. The diff is six new test files plus one modified test helper and this document — no application code changed at all:
-
-backend/tests/fixtures/spreadsheets.py new
-backend/tests/fixtures/action_cases.py new
-backend/tests/test_spreadsheet_fixtures.py new
-backend/tests/test_end_to_end.py new
-backend/tests/test_input_slots.py new
-backend/tests/test_failure_regressions.py new
-backend/tests/helpers.py modified (strings_to_formulas
-off; normalise_value/\_rows)
-docs/implementation-status.md modified
-package.json, package-lock.json and backend/requirements.txt are untouched — 6H added no dependency. test_contract_freeze.py is byte-identical to its 6F state. Nothing under src/ was touched. data/runs/ holds only .gitkeep.
-
-(The paragraphs below record earlier sessions' own view of the tree.)
-
-Phase 6G's changes are committed to claude/phase-6g-proxy-api-fixes-0f4uvk. The commit covers next.config.mjs (the rewrite removed), the two new frontend modules (src/app/forge-api/[...path]/route.js, src/lib/backend-origin.js), src/lib/api.js, src/components/workbench/ExportButton.jsx → ExportButtons.jsx, src/components/backend/BackendStatus.jsx, scripts/lan-address.mjs, one line of package.json, .env.example, backend/app/services/parser.py, backend/app/api/runs.py, backend/tests/test_parser.py and this file. package-lock.json and backend/requirements.txt are untouched — no dependency was added — and so is test_contract_freeze.py. data/runs/ holds only .gitkeep.
-
-(The paragraphs below record earlier sessions' own view of the tree.)
-
-Phase 6D's changes were committed and pushed to claude/forgexl-phase-6d-dataframe-0dfm70 at the end of the session. The commit covers five backend modules (models/run.py, services/runner.py, services/export.py, services/preview.py, api/runs.py), eight test modules and this file. test_contract_freeze.py is deliberately not among them, and neither are package.json, package-lock.json, backend/requirements.txt or any file under src/. data/runs/ holds only .gitkeep.
-
-(The paragraph below records the Phase 6C session's own view of the tree.)
-
-Phase 6C's changes are uncommitted; the user has not authorised a commit. git status shows the relocation of the five misplaced Phase 6B modules from src/app/ to backend/app/ (Known Issue 31), the seven backend modules and seven test modules Phase 6C changed, and this file. data/runs/ holds only .gitkeep. test_contract_freeze.py is deliberately not in that list.
-
-(The Phase 6B entry below recorded the branch and last commit as of that session. Phase 6B was committed as 679fff4 after it was written.)
-
-Commit history at start of Phase 2 (4 commits):
-
-58b37d2 phase 1 complete. Frontend and backend (Python) foundations …
-f7f987c phase 0 complete
-a213587 added build plan file to brand new nextjs app
-7152074 Initial commit from Create Next App
-Phase 2 changes are uncommitted; the user has not authorised a commit.
-
-Verified with git add -A --dry-run that exactly the intended files would be staged (16 paths: backend/app/main.py modified, plus the new actions/, api/, models/, services/, tests/ modules and backend/pytest.ini). backend/.venv/, **pycache**/, .pytest_cache/, .env.local and data/runs/<run>/… are all correctly ignored; data/runs/.gitkeep and .env.example are correctly not ignored.
-
-Environment
-Versions verified by direct command execution:
-
-Tool Command Version
-Node.js node --version v22.22.2
-npm npm --version 10.9.7
-Python 3 python3 --version 3.11.15
-Git git --version 2.43.0
-pip in backend/.venv 26.2.1
-Working directory: /home/user/ForgeXL
-
-Host platform of the implementation session: Linux (x86_64), inside a remote ephemeral container — not macOS. The build plan assumes a Mac target. See Known Issues.
-
-Local addresses (verified running):
-
-Frontend http://127.0.0.1:3000
-Backend http://127.0.0.1:8000
-Tests
-Backend test suite (Phase 12)
-cd backend && .venv/bin/python -m pytest
-1903 passed in 22.26s
-Run against the committed tree before any Phase 12 edit — 1,665 passed, the documented figure exactly — and again at the end. No failures, no skips, no xfails, and the same two StarletteDeprecationWarning / DeprecationWarning entries the suite has carried since Phase 7.
-
-238 tests added, in three new modules plus three assertions in the freeze:
-
-Module Tests Covers
-tests/test_artifacts.py 102 12A, 12B, 12C, 12E, and the 12F filename rule
-tests/test_workbook.py 88 12D, every listed item, by reopening the bytes
-tests/test_artifact_download.py 43 12F, 12G, and the Phase 12 exit criterion
-tests/test_contract_freeze.py went from 93 to 96 tests: test_no_registered_action_produces_artifacts, test_an_action_may_use_the_report_renderer and test_the_artifact_type_values_are_frozen.
-
-Four failures appeared during the phase and all four were real. They are recorded because each one changed the implementation:
-
-test_schema_field_names_are_frozen[RunManifest] — expected. artifacts is a deliberate addition to a frozen contract and the freeze was amended to record it.
-test_the_backend_makes_no_outbound_http_client_available — from urllib.parse import quote. The test forbids urllib across the whole backend source tree. urllib.parse cannot make a request, but the blanket rule is worth keeping, so the percent-encoder was written out instead of the import being excused.
-Eleven download-filename tests across test_export_download.py, test_hostile_input.py and test_runs_api.py — the new Content-Disposition emitted filename\* unconditionally, changing a header those tests parse exactly. The fix was not to loosen them: an ASCII filename gains nothing from the extended parameter, so it is now emitted only for a name that needs it and no existing download's header changed.
-test_a_table_style_is_applied_when_asked_for — xlsxwriter stores "Table Style Medium 2" as TableStyleMedium2. The assertion was wrong, not the code.
-Type checking (Phase 12)
-npx pyright
-0 errors, 0 warnings, 0 informations
-Fourteen errors appeared first and every one was fixed rather than suppressed, except two deliberate # type: ignore comments in tests that pass a wrong type on purpose to prove it is refused. Two were in application code: conditional_formats needs a cast because Polars types the parameter with a Mapping key union and a Mapping's key type is invariant, and Series.str.len_chars().max() is typed as any Python literal, so it is checked with isinstance rather than coerced.
-
-Frontend static checks (Phase 12)
-npm run lint exit 0, no output
-npm run build exit 0, compiled successfully
-Three routes, unchanged: /, /\_not-found, /forge-api/[...path]. This is the first phase since 6G to touch src/: one new component, one import and one element in ActionRunner.jsx, two URL builders in lib/api.js and one label helper in lib/formatters.js.
-
-Phase 12 live verification over real HTTP
-next dev on 127.0.0.1:3000 and uvicorn on 127.0.0.1:8000, with an extra artifact-producing Action registered from a scratchpad module outside the repository — no registered Action produces artifacts and Phase 12 was not going to add one. Every request below went through the same-origin proxy at 127.0.0.1:3000/forge-api/....
-
-The regression half first, proving an artifact-free Action is untouched:
-
-product_master_builder succeeded, schema_version 2
-artifacts [] (and audit.artifacts [])
-outputs [("product_master", 2)]
-metrics input_rows 3, output_rows 2,
-duplicate_product_rows_removed 1
-Then the artifact half, from a four-rep file including an accented name:
-
-run_id a47bee73-6a3e-4884-95bb-e429d227c731
-status succeeded, duration_ms 39
-outputs [("summary", 4)]
-artifacts beth-comeaux Beth Comeaux - September 2026.xlsx 8372 B
-kevin-wardell Kevin Wardell - September 2026.xlsx 8340 B
-jennifer-jones Jennifer Jones - September 2026.xlsx 8332 B
-chateau-real Château Réal - September 2026.xlsx 8348 B
-metrics reports_written 4
-The downloads, and what was in them:
-
-GET .../artifacts/chateau-real/download
-200, content-type application/vnd.openxmlformats-...spreadsheetml.sheet
-content-disposition: attachment;
-filename="Ch?teau R?al - September 2026.xlsx";
-filename\*=UTF-8''Ch%C3%A2teau%20R%C3%A9al%20-%20September%202026.xlsx
-worksheets ["Château Réal Detail", "Château Réal Summary"]
-A1 "Château Réal — September 2026"
-A2 "Sales detail by region"
-A4 "Region" (the table header)
-C5 980.75, format $#,##0.00;($#,##0.00)
-freeze panes A5
-totals row ["Total", 12, 980.75]
-
-GET .../artifacts/download/zip
-200, content-type application/zip
-content-disposition: attachment;
-filename="forgexl-rep-reports-20260915-074558.zip"
-entries the four filenames above, in the Action's order
-integrity testzip() clean
-bundle entry == the single download, byte for byte
-The header is byte-identical direct from FastAPI on :8000 and through the Next.js proxy on :3000, which is the proof that the transport-only handler forwards Content-Disposition unchanged.
-
-data/ was NOT CREATED, git status showed only the intended files, and the repository root gained nothing.
-
-Phase 12 browser verification (real headless Chromium)
-Against the running application, Playwright 1.56.1 driving the pre-installed Chromium. The file was supplied through the real file chooser, the Run started with a real click, and both downloads were real link clicks:
-
-action selector ["Select Action", "Exact Duplicate Remover",
-"Product Master Builder", "Rep Reports (demo)"]
-workbench state success
-"Generated Files" visible
-listed files Beth Comeaux - September 2026.xlsx
-Kevin Wardell - September 2026.xlsx
-Jennifer Jones - September 2026.xlsx
-Château Réal - September 2026.xlsx
-first label "Beth Comeaux — September 2026"
-links Download ×4, "Download All (4 files, ZIP)"
-single download Château Réal - September 2026.xlsx
-bundle download forgexl-rep-reports-20260915-074910.zip, 29,540 bytes
-Export section ["Download CSV", "Download Excel"] — still there,
-still separate
-console errors none
-And the regression, with an Action that produces no artifacts:
-
-product_master_builder workbench state success
-"Generated Files" heading 0 occurrences
-Export links ["Download CSV", "Download Excel"]
-first preview row A-1 2021 Acme Château Réal Réserve 750ml
-console errors none
-One finding worth recording, because it is an environment fact and not a bug. The accented artifact first downloaded as download rather than under its name. The header was correct — the same header a browser accepts — and the cause was found by probing Chromium with five header variants against a throwaway server: filename*=UTF-8''hello.txt is honoured, and filename*=UTF-8''Caf%C3%A9.txt is not, in this container, which has LANG and LC_ALL unset. Chromium refuses a non-ASCII download name when it cannot determine a UTF-8 filesystem locale. Re-running with LANG=C.UTF-8 produced Café.txt and, in the application, Château Réal - September 2026.xlsx. No application code was changed for it; the figures above are from the LANG=C.UTF-8 run. Recorded as Known Issue 104.
-
-Backend test suite (Phase 11)
-cd backend && .venv/bin/python -m pytest
-1665 passed, 2 warnings in 16.76s
-Run against the committed tree before any Phase 11 edit — 1,603 passed, the documented figure exactly — and again at the end. No failures, no skips, no xfails. The two warnings are the upstream ones recorded as Known Issue 7 and are deliberately unsuppressed.
-
-62 tests added. 58 are the new module; the other four are the FROZEN_ERRORS rows Phase 11 added to test_contract_freeze.py.
-
-Module Tests Covers
-tests/test_library_inputs.py 58 11A–11E — the contract, resolution, provenance, determinism, every failure
-Four existing test modules were edited, and only one of them changed behaviour. The others assert field lists that Phase 11 added to:
-
-Module Edit
-test_contract_freeze.py ActionInput and RunManifest field lists; both registered Actions pinned as upload-backed; four error rows; four forbidden Action imports
-test_api.py the two GET /api/actions serialisation tests now expect source and dataset_id, and check an upload slot's rules and a library slot's separately
-No existing test's behaviour changed: every assertion that passed before Phase 11 passes now, and the whole 1,603-test baseline was green before the new module was written.
-
-Writing the tests found three things worth recording:
-
-The duplicate-field guard already covered the mismatch cases. Two tests were written to submit a file and a reference under the same field name; upload_form.py refuses that with INVALID_REQUEST / 400, which is correct and predates this phase. The tests were rewritten to express the mismatch the way a client can actually produce it — a file for a library slot with no reference, and a reference for an upload slot with no file — and both now assert the specific warning and the specific failure.
-The first MISSING_INPUT message named the dataset twice. The slot's label and the dataset's label are usually the same words, so "Sales History is required. Name the version of Sales History to use…" read badly. The dataset name was dropped from the sentence; the slot label already names it and details.dataset_id still carries the ID.
-The Data Library's own "not found" messages name a dataset by its ID. Right for a message about stored state, wrong for one a user reads. Until this phase no library failure reached a user at all. input_resolution substitutes the display name on the way out rather than the library being reworded, so each layer says the thing that suits its own reader — recorded as Deviation 78.
-Type checking (Phase 11)
-npx pyright
-0 errors, 0 warnings, 0 informations
-Frontend static checks (Phase 11)
-npm run lint exit 0, no output
-npm run build exit 0, compiled successfully
-Three routes, unchanged: /, /\_not-found, /forge-api/[...path]. Nothing under src/ was modified in this phase, and FROZEN_ROUTES in test_contract_freeze.py is byte-identical for the second phase running.
-
-Phase 11 live verification over real HTTP
-npm run dev, then a real Product Master Builder Run through the same-origin proxy at 127.0.0.1:3000/forge-api/api/runs — the regression half, proving an upload-backed Action is untouched:
-
-run_id fdba7572-e8c9-4c7e-976c-c130ce41ba42
-status succeeded, duration_ms 4
-library_inputs [] (and audit.library_inputs [])
-rows_received 3, output rows 2, accents intact
-data/ NOT CREATED
-GET /api/actions through the proxy served both Actions with "source": "upload" and "dataset_id": null on every slot.
-
-Phase 11 browser verification (real headless Chromium)
-Against the running application, Playwright 1.56.1 driving the pre-installed Chromium:
-
-Action selector ["Select Action", "Exact Duplicate Remover",
-"Product Master Builder"]
-Run Product Master Builder, real file picker, real click
-workbench state success
-preview rows A-1 2021 Acme Château Réal Réserve 750ml
-B-2 2020 Acme Domaine Lumère Cuvée 1.5L
-console errors none
-The frontend was not modified in this phase; this is the check that it did not need to be.
-
-Phase 11 verification of the library-backed path (not a test)
-The suite redirects DATA_LIBRARY at a temporary directory and no registered Action is library-backed, so neither the real library location nor a real HTTP library-backed Run is exercised by pytest. Both were done by hand.
-
-Two real months were committed to the real default library through the real ingestion layer, and a second uvicorn was started on 127.0.0.1:8010 from a throwaway module (in the session scratchpad, not the repository) registering one library-backed Action, monthly_totals. Every request below is curl:
-
-GET /api/actions
-sales_history source "library", dataset_id "sales_history",
-accepted_extensions [], required_columns
-["Customer", "Total Price"]
-
-POST /api/runs action_id=monthly_totals sales_history=latest
-status succeeded, duration_ms 7
-requested "latest"
-resolved version 1b7df5d8-… period 2026-09 from "September Sales.csv"
-row_count 3, column_count 15, source_sha256 recorded
-audit.rows_received 3, metrics {input_rows: 3, customers: 2}
-
-preview 2 rows, Bistro Lumière intact
-download/csv forgexl-monthly-totals-totals-20260908-065421.csv
-download/xlsx 6,135 bytes
-
-POST … sales_history=period:2026-08
-resolved 8809216c-… period 2026-08 2 rows
-Then September was corrected — a new version superseding it, with a reason — and the same four requests re-issued:
-
-the ORIGINAL Run, re-read latest -> 1b7df5d8-… UNCHANGED
-a NEW latest Run d818814f-… from "September Sales (restated).csv"
-version:1b7df5d8-… reproduced the original result exactly,
-from a version that is now superseded
-That is build plan 11C and 11D demonstrated end to end against real persistent state: a moving reference was recorded as the fixed version it resolved to, a later commit could not change what the earlier Run says it used, and naming the recorded version reproduced the run.
-
-Failures, each over real HTTP:
-
-(no reference) 422 MISSING_INPUT
-current 422 INVALID_DATASET_SELECTOR
-period:2026-01 422 UNKNOWN_DATASET_VERSION
-"No Sales History data has been
-committed for 2026-01."
-version:0e8e2c9a-… 422 UNKNOWN_DATASET_VERSION
-version:../../etc/passwd 422 INVALID_DATASET_SELECTOR
-— refused for its shape; no path
-was built
-Finally, in a brand-new Python process with nothing in memory, the library read back all three versions with the supersession chain intact, and data/library/ held exactly seven files: one dataset.json and a version.json + data.parquet per version. Nothing else was written anywhere. The directory was removed afterwards; git status --short --ignored showed !! data/ at every step — ignored, never untracked.
-
-Backend test suite (Phase 10)
-cd backend && .venv/bin/python -m pytest
-1603 passed, 2 warnings in 16.27s
-Run against the committed tree before any Phase 10 edit — 1,475 passed, the documented figure exactly — and again at the end. No failures, no skips, no xfails. The two warnings are the upstream ones recorded as Known Issue 7 and are deliberately unsuppressed.
-
-128 tests added. 127 of them are in three new modules; the 128th is the FROZEN_ERRORS row for INGESTION_VALIDATION_FAILED, which is the one edit Phase 10 made to an existing test module. No existing test's behaviour changed: Phase 10 added a layer above the Data Library rather than altering anything beneath it.
-
-Module Tests Covers
-tests/test_source_schemas.py 33 10A — the canonical schemas and exact matching
-tests/test_reporting_period.py 34 10B — deriving the month from the data
-tests/test_ingestion.py 60 10C–10G — commits, the cycle, the bootstrap
-tests/fixtures/monthly_sources.py builds every source file in memory from Python literals, and reads its header from SALES_SOURCE_SCHEMA.column_names rather than retyping it — a fixture that spelled a column its own way would be testing the fixture. It is deliberately not added to spreadsheets.CATALOGUE, whose sweeps assert every entry is read and returned unchanged; several fixtures here exist to be refused. Same reasoning as Deviation 58.
-
-Writing the tests found two real defects and one test mistake:
-
-The duplicate check was dataset-wide, which refused an unchanged ownership snapshot re-used for a later month. Fixed to match hash and period; see Deviation 71 and the pair of tests that now pin both halves.
-A period already committed was caught only by the Data Library, at commit time. Found by re-reading the coordinated import adversarially rather than by a failing test: the cycle commits its three inputs in order, so if the third input's month was already stored, the first two would land and the third would fail — build plan 10F's misleading state, reached by a rule that was enforced one layer too late. The check moved into validation as PERIOD_ALREADY_COMMITTED, and test_a_cycle_whose_third_input_is_already_committed_commits_nothing is the regression test. The library's own rule remains as the backstop. When the same file is re-uploaded both rules apply and the more specific DUPLICATE_SOURCE_FILE is reported.
-Several tests assumed list_versions returns [] for a dataset that has never been written to. It raises, which is Phase 9's documented behaviour; the tests were wrong and were corrected.
-Type checking (Phase 10)
-npx pyright
-0 errors, 0 warnings, 0 informations
-Frontend static checks (Phase 10)
-npm run lint exit 0, no output
-npm run build exit 0, compiled successfully
-Three routes, unchanged: /, /\_not-found, /forge-api/[...path]. Nothing under src/ was modified in this phase, and FROZEN_ROUTES in test_contract_freeze.py is byte-identical.
-
-Phase 10 live verification over real HTTP
-npm run dev, then a real Product Master Builder Run submitted through the same-origin proxy at 127.0.0.1:3000/forge-api/api/runs:
-
-run_id b8da70a1-815f-461d-80c5-59a6b884aa7a
-status succeeded, duration_ms 5
-preview 2 rows from 3 uploaded, accents intact
-data/ NOT CREATED
-The last line is the point: Phase 10 introduced a layer that writes to disk, and the Run pipeline still writes nothing. The two systems are separate.
-
-Phase 10 verification of the real default library location (not a test)
-The suite redirects DATA_LIBRARY at a temporary directory, so only a run against the real config.LIBRARY_DIRECTORY shows the default is right.
-
-library directory /home/user/ForgeXL/data/library
-bootstrap [('2026-06', 1), ('2026-07', 2), ('2026-08', 3)]
-cycle (XLSX x3) ok, committed sales_history, sample_history,
-account_assignments
-same cycle again not persisted, DUPLICATE_SOURCE_FILE
-.staging empty after six commits
-parquet files 6 — one per committed version
-Then, in a brand-new Python process with nothing in memory:
-
-sales_history [('2026-06',1), ('2026-07',2), ('2026-08',3), ('2026-09',4)]
-sample_history [('2026-09', 2)]
-account_assignments [('2026-09', 3)]
-September's sales read back with all 15 columns, Château Margaux intact, parser_engine fastexcel-calamine, worksheet Data; the ownership snapshot read back with Bistro Lumière intact. The September cycle was supplied as XLSX, so the workbook path was exercised end to end rather than only the CSV one.
-
-The directory was removed afterwards. git status --short --ignored showed !! data/ at every step — ignored, never untracked.
-
-Backend test suite (Phase 9)
-cd backend && .venv/bin/python -m pytest
-1475 passed, 2 warnings in 15.46s
-Run against the committed tree before any Phase 9 edit — 1,335 passed, the documented figure exactly — and again at the end. No failures, no skips, no xfails. The two warnings are the upstream ones recorded as Known Issue 7 and are deliberately unsuppressed.
-
-140 tests added, all in three new modules. No existing test was changed, weakened or deleted, which is the claim that matters for a phase adding persistence to an application whose defining property is that it writes nothing: every Phase 6/7 assertion that a Run touches no filesystem is untouched and still passing.
-
-Module Tests Covers
-test_library_models.py 61 9B — records, identity, periods, supersession, JSON round trip
-test_data_library.py 52 9A, 9C, 9D, 9E — the seven operations, layout, immutability
-test_library_persistence.py 27 9F — the seven required proofs
-Two of them run a separate Python interpreter against the library directory, so "survives a backend restart" is proved by a process that has none of this one's memory rather than by a second object beside the first.
-
-One control was run, on the concurrency guard: the write lock was replaced with nullcontext() and the four-thread test failed; the lock was restored and it passed. A concurrency test that passes either way proves nothing, so it was checked.
-
-Type checking (Phase 9)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Run against the full backend/ tree with both new modules and all three new test modules in it.
-
-Frontend static checks (Phase 9)
-npm run lint -> exit 0, no output, no warnings
-npm run build -> exit 0
-✓ Compiled successfully
-Routes: ○ / ○ /\_not-found ƒ /forge-api/[...path]
-Identical to Phase 8's, and necessarily so: Phase 9 modified no file under src/. The routes are unchanged because no endpoint was added.
-
-Phase 9 live verification over real HTTP
-npm run dev, then a real Product Master Builder Run driven through the same-origin proxy with curl:
-
-Check Result
-GET /forge-api/health {"status":"ok"}
-GET /forge-api/api/actions both Actions, unchanged
-POST /forge-api/api/runs succeeded; metrics input_rows 3, output_rows 2, duplicate_product_rows_removed 1
-preview Château Lafite, Sélection, Weingut Müller intact
-CSV download correct, accents preserved
-repository after the whole Run no data/ directory created
-The last line is the point. The Data Library exists in the code and the Run path still writes nothing at all — nothing calls ensure_known_datasets() on import, at startup, or from a route.
-
-Phase 9 verification of the real default library location (not a test)
-The suite redirects DATA_LIBRARY at a temporary directory, so no test can prove the default setting is right. That was checked by hand, once:
-
-Step Result
-config.LIBRARY_DIRECTORY /home/user/ForgeXL/data/library
-exists before False
-ensure_known_datasets() then one September commit three dataset.json, one version.json, one data.parquet
-a brand-new Python process reads it [('2026-09', 1, 'sept.csv')], rows [{'Account': 'Acme', ...}]
-git status while it existed data/ never appeared — the ignore rule holds
-afterwards directory removed; git status --ignored clean of it
-Backend test suite (Phase 8)
-cd backend && .venv/bin/python -m pytest
-1335 passed, 2 warnings in 12.22s
-Run twice: once against the committed tree before any Phase 8 edit (the integrity check the Phase 7 entry prescribes), and again after the three edits this phase made. Identical both times. No failures, no skips, no xfails. The two warnings are the upstream ones recorded as Known Issue 7 and are deliberately unsuppressed.
-
-Phase 8 added no test. That is deliberate and worth stating: Phase 8 is a validation and handoff phase, and its verification is the acceptance test, the extensibility probe and the clean setup — none of which belongs in a permanent suite. The suite it inherited is the one that had to be green.
-
-Clean setup from an empty container (Phase 8.1)
-The session started with no backend/.venv/ and no node_modules/. The documented setup was followed exactly, and nothing else was done:
-
-Command Result
-npm ci exit 0, 160 packages, 0 vulnerabilities
-python3 -m venv backend/.venv exit 0
-pip install --upgrade pip 24.0 → 26.2.1
-pip install -r backend/requirements.txt exit 0; every version matched the recorded list
-No undocumented step was required. Detected runtimes: Node v22.22.2, npm 10.9.7, Python 3.11.15, Git 2.43.0 — unchanged from Phase 7.
-
-Type checking (Phase 8)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Run against the full backend/ tree after the base.py docstring edit.
-
-Frontend static checks (Phase 8)
-npm run lint -> exit 0, no output, no warnings
-npm run build -> exit 0
-✓ Compiled successfully
-Routes: ○ / ○ /\_not-found ƒ /forge-api/[...path]
-Unchanged from Phase 7: Phase 8 modified no file under src/.
-
-Phase 8 acceptance test (real headless Chromium, build plan 8.4)
-Chromium 1194 via Playwright, installed in the session scratchpad outside the repository, driving the real UI against the real servers.
-
-37 UI checks + 14 workbook checks = 51/51 passed. The full breakdown is under Completed → Phase 8 → 8.4. Summary:
-
-Area Result
-Exact Duplicate Remover, CSV metrics 10/6/4 and "Duplicates removed 4"; preview exact; CSV byte-exact; workbook reopened and every value verified
-Product Master Builder, XLSX metrics 8/5/6 and "Duplicate product rows removed 3"; the six required fields in the required order; the extra column dropped; five accented values intact end to end; both exports verified
-Validation, missing Volume "Validation Failed" naming the column, and no success banner, no results, no preview, no export links
-Preview paging (250-row result) default 100, deep offsets correct, limit=500 accepted, limit=501 and offset=-1 refused with 400
-Page errors none
-Off-origin requests none — port 8000 appeared in no request the browser made
-The downloaded workbooks were reopened with openpyxl, independently of the code that wrote them: correct worksheet names, correct headers, exact values, blanks still blank, and no vbaProject in either archive.
-
-Phase 8 extensibility proof (build plan 8.5)
-A third Action with three input slots and two outputs was registered in the backend; no file under src/ was changed. 20/20 checks passed in real Chromium, including the multi-output path the Phase 5 probe could not reach (output selector, per-table preview switching, whole-Run workbook). Full list under Completed → Phase 8 → 8.5. The probe was removed afterwards and git status confirms the registry is byte-identical to its committed state.
-
-Phase 8 performance re-run (build plan 7G–7I harness)
-Re-run on the clean install to confirm the committed harness still works and the Phase 7 conclusion still holds. Median of five, container hardware, not the target Mac (Known Issue 82):
-
-Whole Run (execute_run) 10,000 50,000 100,000
-CSV 3.6 ms 11.9 ms 32.9 ms
-XLSX 84.1 ms 411.8 ms 919.2 ms
-Against build plan §3.4 (100,000-row CSV, desired < 5 s, acceptance < 15 s): 0.033 s for CSV and 0.919 s for XLSX, both inside the desired target. Consistent with Phase 7's figures; the differences are container variance, and the XLSX export of a full 100,000-row result remains the slowest operation at ~4 s (Known Issue 80).
-
-Preview against a 100,000-row result is unchanged in character: a page costs the same wherever it is taken from (0.2 ms at row 1, at row 10,001 and at the end), and a 100-row page serialises to 8,394 bytes against 8,392,800 for the whole result — a factor of 1,000. Memory: 5.62 MiB payload, 11.95 MiB peak allocation, and the result unreachable after delete_run(), confirmed by weakref.
-
-Phase 8 live verification over real HTTP
-Real uvicorn and a real next start production build, through the real /forge-api proxy:
-
-Check Result
-npm run dev — both servers from one command ready in 1 s
-/health direct, and /forge-api/health proxied both {"status":"ok"}
-npm start (production build) + backend page 200, proxy reached FastAPI
-frontend up, backend down "The ForgeXL backend could not be reached." — a sentence, not a trace
-.xls upload UNSUPPORTED_EXTENSION, naming the accepted formats
-unknown Run ID 404 UNKNOWN_RUN, structured
-backend restarted under a live Run that Run 404 UNKNOWN_RUN on retrieval and on download; a new Run succeeds
-/docs, /openapi.json 200
-repository after every verification git status --short --ignored shows only the edits this phase had made so far — the acceptance test, the extensibility probe and every Run created during them wrote nothing; no data/ directory exists
-Verification servers and the browser were stopped afterwards. Nothing was written into the repository at any point.
-
-Backend test suite (Phase 7)
-cd backend && .venv/bin/python -m pytest
-1335 passed, 2 warnings in 12.24s
-No failures, no skips, no xfails. The two warnings are the upstream ones recorded as Known Issue 7 and are deliberately unsuppressed.
-
-The suite grew from 1,019 to 1,335. Every new test is an assertion about behaviour build plan Phase 7 asks to be checked; none replaces or loosens an existing one.
-
-Module Tests Subphase
-test_hostile_input.py (new) 150 7D, 7E
-test_data_edge_cases.py (new) 36 7B
-test_local_exposure.py (new) 35 7K
-test_incorrect_schemas.py (new) 22 7C
-test_workbook_cases.py (new) 21 7F
-test_parser.py (extended) 62 (was 51) duplicate columns
-test_export.py (extended) 68 (was 56) XLSX capacity
-test_export_download.py (extended) 35 (was 29) the capacity refusal over HTTP
-test_spreadsheet_fixtures.py +20 the three new catalogue fixtures
-test_contract_freeze.py 86 (was 84) two error codes added
-Baseline repair (Phase 7, before any new work)
-cd backend && .venv/bin/python -m pytest # as committed
-1018 passed, 1 error <- test_export.py used the removed runs_dir fixture
-
-cd backend && .venv/bin/python -m pytest # after the three repairs
-1019 passed <- the documented baseline, exactly
-Type checking (Phase 7)
-npx --yes pyright
-0 errors, 0 warnings, 0 informations
-Two genuine errors appeared during the phase and were fixed rather than suppressed: len() on a value typed object (fixed by narrowing with isinstance, which also strengthens the assertion), and len() on the abstract RunStore, which has no **len** — only InMemoryRunStore does (fixed by calling list_runs()). No new # pyright: ignore was added.
-
-Frontend static checks (Phase 7)
-npm run lint exit 0, no findings
-npm run build exit 0
-git diff --check exit 0
-The build produces /, /\_not-found and the dynamic /forge-api/[...path], and now runs with telemetry disabled by the script itself (7K).
-
-Phase 7 performance measurements
-cd backend && .venv/bin/python -m tests.benchmarks.run
-Full tables under Completed → 7G / 7H / 7I. Headline figures, median of five runs, on this Linux container and not on the target Mac:
-
-Measurement 100,000 rows
-whole Run, CSV, in process 16.3 ms
-whole Run, XLSX, in process 799.7 ms
-whole request over the real proxy, CSV (5.89 MB) 93.6 ms
-whole request over the real proxy, XLSX (2.83 MB) 820.5 ms
-preview, any offset, over the proxy ~48 ms, flat
-CSV download of a 100,000-row result 12.3 ms
-XLSX download of a 100,000-row result 1,496 ms
-Build plan section 3.4 asks for under 15 s (acceptance) and under 5 s (desired) for a 100,000-row CSV. Both formats are inside the desired target.
-
-Phase 7 end-to-end verification over real HTTP
-Real uvicorn on 127.0.0.1:8000, real next start on 127.0.0.1:3000, every request through the real /forge-api proxy. /health answered on both the backend directly and through the proxy; the page returned 200.
-
-Check Result
-duplicate column names 422 DUPLICATE_COLUMNS
-empty file 422 EMPTY_FILE
-incorrect schema 422 MISSING_COLUMNS
-ambiguous workbook 422 AMBIGUOUS_WORKBOOK
-traversal-shaped filename 200 — a normal Run, nothing written
-over-long cell, XLSX download 422 EXPORT_TOO_LARGE
-over-long cell, CSV download 200, value intact
-malformed Run ID 404 UNKNOWN_RUN
-unknown output ID 404 UNKNOWN_OUTPUT
-limit=501 400 INVALID_REQUEST
-100,000-row XLSX download, reopened 100,000 × 2, first and last rows correct
-Phase 7 browser verification (real headless Chromium)
-Chromium 1194 via Playwright, installed outside the repository in the session scratchpad, driving the real UI against the real servers. Full table under Completed → Browser verification. Summary: both new refusals render as readable sentences with no [object Object] and no traceback; the CSV download of the same result succeeds with its 40,000-character value intact; a real click-download saved the correct filename with the exact expected bytes; no page errors; every request went to the page's own origin.
-
-Verification servers and the browser were stopped afterwards. Nothing was written into the repository at any point.
-
-Backend test suite (Phase 6I)
-Environment note: this session started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install). No undocumented step was needed and no dependency was added.
-
-The five integrity checks were run first, and two failed. git branch -r showed origin/main at 70c41b1, six phases behind (Known Issue 54). The duplicate-checksum check printed nothing, as required. The suite could not run at all — ModuleNotFoundError: No module named 'app.api.upload_form', 0 of 1,039 collected — because backend/app/api/upload-form.py was committed with a hyphen. After the git mv repair the suite reported the documented 1,039 passed baseline exactly, and npm run build succeeded.
-
-cd backend && .venv/bin/python -m pytest
--> 1019 passed, 2 warnings in 9.84s
-
-no failures · no skips · no xfails
-Module 6H 6I Change
-test_storage.py 64 43 -21 — coverage of the code 6I deleted
-test_runner.py 51 52 +1 — the removal is pinned against regression
-every other module 924 924 unchanged
-Total 1,039 1,019 -20
-The arithmetic is exact and worth stating, because a falling test count in a cleanup phase is the shape a weakened suite has. The 21 removed tests were: create_run directory creation (3), new_run_id round trip (1), the parse_run_id rejection battery (8 parametrised), RunPaths artifact-path safety (4 parametrised), and delete_run_directory (5). Every one covered a function that no longer exists. The parse_run_id battery was a duplicate of the identical list in test_run_model.py, which still runs. No test was skipped, weakened, renamed or deleted to make the suite green, and no assertion was loosened: the three tests whose filesystem probe had to move now watch the process working directory, which is a stronger place to watch than a config value that no longer exists.
-
-Per-module counts at 6I:
-
-test_end_to_end.py 178 test_run_model.py 37
-test_spreadsheet_fixtures.py 123 test_run_store.py 34
-test_contract_freeze.py 84 test_actions.py 30
-test_runs_api.py 59 test_export_download.py 29
-test_export.py 56 test_audit.py 22
-test_failure_regressions.py 52 test_preview.py 21
-test_runner.py 52 test_exact_duplicate_remover 21
-test_parser.py 50 test_input_slots.py 19
-test_storage.py 43 test_action_round_trip.py 17
-test_product_master_builder.py 34 test_results.py 17
-test_api.py 14
-test_upload_form.py 13
-test_schemas.py 12
-test_mixed_xlsx_round_trip.py 2
-The two warnings are the pre-existing upstream ones (Known Issue 7): Starlette's deprecated httpx test-client integration and its deprecated AnyIO BlockingPortal alias. Neither was suppressed.
-
-Phase 6I integrity and static checks
-Check Result
-git branch -r main six phases behind — Known Issue 54
-backend modules under backend/app/, not src/app/ Pass
-md5sum backend/tests/\*.py | ... | uniq -d Prints nothing — pass
-cd backend && .venv/bin/python -m pytest Baseline 1,039 after repair; 1,019 at end
-npx --yes pyright 0 errors, 0 warnings, 0 informations
-npm run lint Exit 0, no findings
-NEXT_TELEMETRY_DISABLED=1 npm run build Exit 0; /, /\_not-found, /forge-api/[...path]
-git diff --cached --check Exit 0, no whitespace errors
-No stray file written into the repository by the suite git status --porcelain shows only intended changes
-Phase 6I audit re-run (6I.2 / 6I.3)
-Every search docs/phase-6a-compatibility-audit.md §1 prescribes, re-run against backend/app and src:
-
-Search Hits
-data/ runs/ inputs/ working/ exports/ manifest.json tmp/ docstrings recording history, URL route paths, frontend URL paths — no filesystem use
-open( mkdir unlink rmtree shutil tempfile FileResponse is*file is_dir write*_ read\__ none in backend/app
-Path( / pathlib PurePosixPath(...).name string handling in extension_of / display_filename, and PROJECT_ROOT
-sqlite3 sqlalchemy psycopg redis pymongo supabase boto3 duckdb alembic none
-file or path use inside actions/ none — only accepted_extensions metadata
-localhost:8000 / 127.0.0.1:8000 / NEXT_PUBLIC in the frontend two comment lines; no request
-Phase 6I live verification (real uvicorn, real next start, real proxy)
-Check Result
-GET /forge-api/health through the proxy {"status":"ok"}
-POST /forge-api/api/runs, product_master_builder, 5-row CSV 200, succeeded, 5 rows -> 3, accents preserved
-Preview through the proxy 3 rows, correct column_schema, Château Margaux / Sélection Privée intact
-CSV download 200, forgexl-product-master-builder-product-master-<ts>.csv, exact bytes
-XLSX download 200, correct media type and filename, 6,318 bytes
-Repository tree after all of it No data/ directory; git status shows only intended edits
-FastAPI killed and restarted, frontend left running /health ok immediately
-Pre-restart Run: retrieval / preview / CSV / XLSX / whole-Run workbook All five: structured UNKNOWN_RUN, HTTP 404 — no crash, no 500
-Fresh Run on the restarted backend 200, succeeded, metrics and audit correct
-Any local path in a manifest None
-Phase 6I memory-release verification (6I.4)
-Real pipeline, 300,000-row / 20.4 MB CSV through product_master_builder:
-
-Step Observation
-Result frame held by the Run Store 300,000 x 6, 20.3 MB (Polars estimate); RSS 116 -> 296 MB
-weakref after dropping local refs Still alive — the store is the only holder
-delete_run(run_id) + gc.collect() weakref() is None — frame unreachable
-get_run afterwards UnknownRunError / UNKNOWN_RUN / HTTP 404
-list_runs() 0 runs
-Peak RSS does not fall afterwards, because the allocator keeps its arena. The weakref is the evidence, not the memory figure.
-
-Phase 6I browser verification (real headless Chromium)
-Chromium 1194 via Playwright installed outside the repository, driving the real production build over real HTTP:
-
-Check Result
-Page load "Backend Connected"
-Action selected, file chosen through the real file input Accepted
-Run "Run Successful", 3 preview rows, metrics and audit rendered
-Every request the browser issued http://127.0.0.1:3000/forge-api/... — never :8000
-FastAPI restarted underneath the open results page Page keeps rendering its result
-Stale download attempted from that page Structured UNKNOWN_RUN 404
-[object Object] anywhere on the page No
-Traceback anywhere on the page No
-Console errors One — the expected 404 from the deliberately stale request
-Playwright, its browser and the verification servers all live outside the repository and were stopped afterwards; package.json gained no dependency (Deviation 22 still stands).
-
-Backend test suite (Phase 6H)
-Environment note: this session started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install). No undocumented step was needed and no dependency was added.
-
-cd backend && .venv/bin/python -m pytest
--> 1011 passed, 1 xfailed, 2 warnings in 7.83s
-The 6G baseline of 641 passed was reproduced before any edit, together with the other four integrity checks the Phase 6G entry listed — git branch -r, backend modules under backend/app/, no duplicate test-module checksums, and npm run build. All five passed.
-
-Module 6G 6H Change
-test_end_to_end.py — 178 new — 6H.3/6H.4/6H.6
-test_spreadsheet_fixtures.py — 122 new — 6H.1/6H.2/6H.8
-test_failure_regressions.py — 52 new — 6H.7
-test_input_slots.py — 19 new — 6H.5
-every other module 641 641 unchanged
-Total 641 1,012 +371 (1 of them xfailed)
-No existing test was changed, weakened, skipped, deleted or renamed. Every pre-existing module reports exactly the count it reported at 6G — test_contract_freeze.py 84, test_parser.py 39, test_storage.py 64, test_runner.py 51, test_runs_api.py 59, and so on — which is the evidence that the new suite was added beside the old one rather than on top of it. The one modified test file, helpers.py, is a builder rather than a test: its change turns text that begins with = back into text, and the whole suite was green both before and after it.
-
-The single xfailed is deliberate and is described under Known Issues 65: it states the correct behaviour for a mixed numeric/text column read from a workbook, and is strict=True so that fixing the parser fails the suite until the marker is removed. It is not a suppressed failure — the defect it names is in the application, was found by this phase's fixtures, and is reported rather than worked around.
-
-Control tests (Phase 6H)
-New tests are only evidence if they can fail. Three were verified by making them fail on purpose:
-
-Control Result
-Plant data/planted.csv test_the_repository_contains_no_spreadsheet_files failed, naming the path; removing it passed
-Point parser.\_parse_xlsx at the openpyxl implementation the strict xfail XPASSed and failed the suite, exactly as intended
-Drop maintain_order=True from the Exact Duplicate Remover 101 of 178 test_end_to_end.py tests failed; restoring it returned to 178 passed
-The third is the important one: it shows the end-to-end suite detects a real behaviour regression in an Action, not merely that the endpoints respond.
-
-Measured fixture costs, which is what settled the generated-vs-cached question:
-
-Rows CSV render XLSX render CSV parse XLSX parse
-5,000 0.017 s/0.29 MB 0.252 s/0.15 MB 0.004 s 0.042 s
-25,000 0.048 s/1.47 MB 0.987 s/0.71 MB 0.003 s 0.202 s
-50,000 0.076 s/2.95 MB 1.878 s/1.42 MB 0.005 s 0.350 s
-25,000 was chosen: large enough that the result cannot be a coincidence, and the whole suite still finishes in under eight seconds.
-
-Type checking (Phase 6H)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Pyright rejected a first draft that annotated a test helper's return as object, which made every response.status_code in test_input_slots.py an error — 37 of them. It was not suppressed and no # type: ignore was added: the annotation was simply wrong and was removed, letting Pyright infer the real response type.
-
-Frontend static checks (Phase 6H)
-npx eslint -> clean, 0 problems
-npm run build -> Compiled successfully
-routes: ○ / ○ /\_not-found ƒ /forge-api/[...path]
-Both were run before and after the phase's work. Nothing under src/ was modified, so they are unchanged from 6G; they are recorded because the Phase 6G entry made npm run build a required pre-flight check and it is worth showing it still passes.
-
-What a developer runs to verify the spreadsheet engine (6H completion criteria)
-cd backend && .venv/bin/python -m pytest
-That is the whole thing. It requires no file picker, no manually saved workbook, no second laptop and no deployment — build plan 6H's completion criteria, item for item.
-
-Backend test suite (Phase 6G)
-Environment note: this session also started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist and were recreated by following the documented setup exactly. No dependency was added: backend/requirements.txt, package.json and package-lock.json are unchanged except for the one dev:web:lan script line.
-
-cd backend && .venv/bin/python -m pytest -> 641 passed, 2 warnings
-The 6F baseline of 638 passed was reproduced before any edit, together with the other two integrity checks (backend modules under backend/, no duplicate test-module checksums).
-
-Module 6F 6G Change
-test_parser.py 36 39 +3 — a failed worksheet probe is never "empty"
-every other 602 602 unchanged
-Total 638 641 +3
-Nothing was weakened to pass, and no existing test changed. The three new tests were each run against the previous implementation first and all three failed, which is what makes them evidence rather than description:
-
-test_a_worksheet_that_fails_to_probe_is_not_reported_as_an_empty_workbook
-test_a_failed_probe_never_lets_the_parser_select_a_different_worksheet
-test_a_failed_probe_that_the_fallback_cannot_rescue_is_a_parse_error
-They monkeypatch fastexcel.read_excel with a thin wrapper around the real reader whose header_row=None probe of one named sheet raises; everything else about the workbook is genuine, so only the one operation under test fails.
-
-The proxy itself has no backend test, deliberately: it is a Next.js Route Handler and the backend cannot see it. It is covered by the HTTP and browser verifications below. A committed frontend suite is Phase 6H's (Deviation 22).
-
-Type checking (Phase 6G)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Pyright rejected a first draft of the probe wrapper that typed \*\*kwargs as object, against fastexcel's precisely-typed load_sheet overloads. It was not suppressed and no # type: ignore was added: the wrapper forwards Any, which is what a pass-through of someone else's signature actually is.
-
-Frontend static checks (Phase 6G)
-npx eslint -> clean, 0 problems
-npm run build -> Compiled successfully
-routes: ○ / ○ /\_not-found ƒ /forge-api/[...path]
-npm run build failed before this session's first edit — see Known Issue 61. The ƒ marks the proxy as server-rendered on demand, which is what export const dynamic = "force-dynamic" asks for; a cached proxy would be a bug.
-
-No backend address in the browser bundle. After the build:
-
-grep -r "127.0.0.1" .next/static/ -> no matches
-grep -r ":8000" .next/static/ -> no matches
-grep -ho "/forge-api" .next/static/ -> 1 occurrence
-The five occurrences of the bare digit string 8000 are hex constants (0x8000000) inside React's bundled internals, and the one occurrence of localhost is a string literal inside a bundled URL parser — neither is ForgeXL's. The only ForgeXL address in the browser is the same-origin path.
-
-Phase 6G end-to-end verification over real HTTP
-Backend on 127.0.0.1:8000, next dev on 127.0.0.1:3000, both started the documented way. Every check below was executed; none is inferred.
-
-Build plan Check Result
-6G.2/6G.3 GET /forge-api/health {"status": "ok"}
-6G.4 12.38 MB CSV upload (12,380,066 bytes) 200 in 0.25 s; backend recorded 12,380,066 bytes, 149,682 rows
-6G.4 same upload through the old rewrites() proxy truncated at 10 MiB, 30.06 s hang, 500, ClientDisconnect — the defect
-6G.4 query string survives the hop ?offset=200&limit=3 → offset 200, limit 3, row 201 correct
-3.3 260.3 MiB upload 413 FILE_TOO_LARGE, "larger than the 250 MB upload limit", 4.6 s
-6F.6 CSV download headers content-type: text/csv; charset=utf-8 + the full content-disposition
-6F.6 XLSX download headers the spreadsheet media type + the full content-disposition
-6F.1 downloaded CSV vs uploaded file SHA-256 identical, 12,380,066 bytes
-6F.2 downloaded workbook reopened with openpyxl sheet Deduplicated Data, 149,683 rows, accented values intact
-6F.4 whole-Run workbook 200, 6,323,765 bytes
-6G.9 missing file / unsupported file / bad workbook 422 MISSING_INPUT / UNSUPPORTED_EXTENSION / PARSE_ERROR
-6G.9 missing columns / unknown Action / no action_id 422 MISSING_COLUMNS / 404 UNKNOWN_ACTION / 400 INVALID_REQUEST
-3.15 ?limit=9999 400 INVALID_REQUEST, "limit may not exceed 500."
-6G.9 backend stopped, GET /forge-api/health 502, text/plain, "The ForgeXL backend could not be reached."
-6G.9 backend stopped, 12.38 MB POST 502 in 0.015 s — refused at the connection, not after buffering the body
-— PUT /forge-api/health 405 — only GET and POST are exported
-6G.5 http://<non-loopback>:8000/health connection refused
-6G.6 http://<non-loopback>:3000/forge-api/health {"status": "ok"}; 12.38 MB upload over the same address: 200, 149,682 rows
-Every structured error body arrived byte-identical to FastAPI's own — the handler forwards the status and the stream and adds nothing.
-
-Phase 6G browser verification (real headless Chromium)
-Playwright driving Chromium against http://<non-loopback-address>:3001 (next start --hostname 0.0.0.0), FastAPI on loopback. No test-only hook exists in the application; every step used the real controls. See the Phase 6G entry above for why a production server, and for what this does and does not prove about the two-laptop acceptance.
-
-title Local Data Workbench
-backend indicator Backend Connected
-file control, 12.38 MB CSV Exact Duplicate Remover read 149,682 rows
-and returned 149,682.
-workbench state success
-preview Showing 1–100 of 149,682
-preview, next page Showing 101–200 of 149,682
-download (CSV) forgexl-exact-duplicate-remover-
-deduplicated-data-<stamp>.csv 12,380,066 bytes
-download (XLSX) forgexl-exact-duplicate-remover-
-deduplicated-data-<stamp>.xlsx 6,323,765 bytes
-drag-and-drop, real CSV Product Master Builder read 500 rows and
-returned 500.
-validation failure Validation Failed — "The uploaded file is
-missing required columns." + the four names
-workbench state validation_error
-backend stopped Backend Unavailable / "The ForgeXL backend did
-not respond. Check that it is running on the
-machine serving this page."
-uncaught page errors none
-The only console entry is the browser's own note that a resource returned 422 — which is the validation case succeeding.
-
-Backend test suite (Phase 6F)
-Environment note: this session started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. Both were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install); no undocumented step was required and no dependency was added. backend/requirements.txt, package.json and package-lock.json are byte-identical to their committed state.
-
-cd backend && .venv/bin/python -m pytest -> 638 passed, 1 warning
-The 6E baseline of 568 passed was reproduced before any edit, together with the other two integrity checks (backend modules under backend/, no duplicate test-module checksums).
-
-Module 6E 6F Change
-test_contract_freeze.py 84 84 amended — one route added to FROZEN_ROUTES
-test_storage.py 64 64 unchanged
-test_runs_api.py 59 59 5 download assertions moved to the 6F convention
-test_export.py 15 56 +41 — 6F.2 to 6F.7 at the service level
-test_runner.py 51 51 unchanged
-test_run_model.py 37 37 unchanged
-test_parser.py 36 36 unchanged
-test_run_store.py 34 34 unchanged
-test_product_master_builder.py 34 34 unchanged
-test_export_download.py — 29 new — 6F's completion battery over real HTTP
-test_actions.py 30 30 unchanged
-test_audit.py 22 22 unchanged
-test_exact_duplicate_remover.py 21 21 unchanged
-test_preview.py 21 21 unchanged
-test_results.py 17 17 unchanged
-test_action_round_trip.py 17 17 2 filename assertions moved to the 6F convention
-test_api.py 14 14 unchanged
-test_schemas.py 12 12 unchanged
-Total 568 638 +70
-Nothing was weakened to pass. Seven assertions across three modules changed, all of them because the download filename convention and the worksheet-name source deliberately changed in this phase, and each is now stricter than before, not looser:
-
-test_runs_api.py and test_action_round_trip.py previously asserted "result.csv" in content-disposition — a substring check. They now read the filename out of the header and compare it against export.download_filename(...) built from that Run's own recorded completion time, so the whole convention is asserted rather than a fragment of it.
-One worksheet-name assertion moved from "rejected" to "Rejected", the output's label. Same exactness, different expected value.
-test_contract_freeze.py gained one route. Every route, method and schema already listed is untouched — this is an addition to the published surface, not a change to any part of it (see Deviations).
-No test was skipped, deleted, loosened or marked xfail, and no warning was suppressed. One test drafted with pl.read_excel(sheet_id=0) raised a Polars FutureWarning; it was rewritten to read each worksheet with fastexcel — the application's own engine — rather than silenced.
-
-What the new module pins. test_export_download.py (29) runs build plan 6F's completion criteria in order — execute an Action, request CSV, read the bytes, verify the content, request XLSX, reopen it from memory, verify the worksheet names, the headers and representative values — and then the rules around them: the whole-Run workbook and its sheet order, a workbook for a Run that has no result, labels Excel would reject (Results: 2026/2027 twice, in two cases) still producing an openable workbook, the filename convention, re-download stability, a hostile upload filename never reaching a download name, and the no-server-path rule across five endpoints. Every workbook is reopened with fastexcel, so an export ForgeXL could not itself ingest fails the test.
-
-41 new tests in test_export.py cover the service directly: the in_memory option and the zero-temporary-file measurement, =SUM(...) staying text, the numeric-format and date-format rules, multi-sheet workbooks and their order, ten worksheet-name cases plus reserved-name, case-insensitive-collision and truncation-collision handling, the filename convention including UTC rendering and a safety regex over hostile IDs, and the retention rules.
-
-Type checking (Phase 6F)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Pyright rejected a first draft that passed a dict[str, str] to Polars' column_formats parameter, whose declared key type is a union. It was not suppressed and no # type: ignore was added: the dict is now built inline at the call site, where Pyright infers it against the expected type.
-
-Frontend static checks (Phase 6F)
-npx eslint . -> clean, 0 problems
-npm run build -> Compiled successfully; routes / and /\_not-found
-(npm run build was re-run after deleting .next/, so the result is a clean build rather than a cached one.)
-
-Phase 6F end-to-end verification over real HTTP
-Backend on 127.0.0.1:8000, next dev on 127.0.0.1:3000, both started the documented way. 19/19 checks passed.
-
-Build plan Check Result
-— product_master_builder executes on a real CSV succeeded
-6F.1 GET .../download/csv 200, text/csv; charset=utf-8
-6F.1 CSV header SKU,Vintage,Supplier,Producer,Selection,Volume
-6F.1 CSV rows the deduplicated result, accents intact
-6F.6 CSV filename forgexl-product-master-builder-product-master-20260901-043949.csv
-6F.2 GET .../download/xlsx 200, correct spreadsheetml content type
-6F.6 XLSX filename same stem, .xlsx
-6F.3 Valid workbook container xl/workbook.xml + [Content_Types].xml present
-6F.5 Worksheet name ["Product Master"] — the output's label
-6F.3 Headers preserved and ordered the six Product Master columns, in order
-6F.3 Representative values Château Margaux / Bodegas Muñoz, 750.0 / 1500.0
-6F.4 GET /api/runs/{id}/download/xlsx 200, one worksheet per result table
-6F.6 Whole-Run filename forgexl-product-master-builder-20260901-043949.xlsx — no output segment
-6F.7 Re-downloading the CSV byte-identical to the first download
-6F.8 Server paths in any header or body none
-6D/6F Files written under data/ 0 — data/runs/.gitkeep only, before and after
-The same script was re-run after the temporary verification Action was removed and registry.py restored: 19/19 again, on the committed two-Action registry.
-
-Phase 6F browser verification (real headless Chromium)
-Driven with Playwright against the real dev servers — a real browser, a real file input, a real file picker, real downloads written to a directory outside the repository. Playwright was installed outside the repository, in the session scratchpad, and launched against the pre-installed Chromium. 14/14 checks passed.
-
-Run 1 — Product Master Builder (one result table).
-
-Check Result
-Results view shows an Export section yes
-Buttons offered Download CSV, Download Excel — from output.formats
-Whole-Run workbook link not rendered (one result table)
-Filename the browser received (CSV) forgexl-product-master-builder-product-master-20260901-044125.csv
-Downloaded CSV content header + 3 deduplicated rows, accents intact
-Filename the browser received (XLSX) same stem, .xlsx
-Downloaded workbook begins PK — a real XLSX file on disk
-Run 2 — a temporary two-output Action, with no frontend change.
-
-Check Result
-Whole-Run workbook link appears Download All Results (Excel)
-Its filename forgexl-split-check-20260901-044126.xlsx
-Worksheets in the downloaded workbook ["Kept Rows", "Rejected Rows"], correct rows in each
-Switching the result selector export buttons follow it
-Secondary result's CSV filename forgexl-split-check-rejected-rows-20260901-044126.csv
-Secondary result's CSV rows only its own row (A3, …)
-Across both runs.
-
-Check Result
-Any page or download URL naming a server path none
-Uncaught page errors none
-Every backend request straight to http://127.0.0.1:8000 (section 5)
-Backend test suite (Phase 6E)
-Environment note: this session also started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. Both were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install); no undocumented step was required and no dependency was added. backend/requirements.txt, package.json and package-lock.json are byte-identical to their committed state.
-
-cd backend && .venv/bin/python -m pytest -> 568 passed, 1 warning
-The committed state was intact this time: the three integrity checks the previous session prescribed all passed before any edit (backend modules under backend/, no duplicate test-module checksums, 519 passed).
-
-Module 6D 6E Change
-test_contract_freeze.py 84 84 amended — 3 field lists + version constant
-test_storage.py 64 64 unchanged
-test_runs_api.py 53 59 +6 — result metadata, preview schema, audit
-test_runner.py 51 51 one case extended (a failure clears the effect)
-test_run_model.py 37 37 updated for the new required fields
-test_parser.py 36 36 unchanged
-test_run_store.py 34 34 unchanged
-test_product_master_builder.py 34 34 unchanged
-test_actions.py 30 30 unchanged
-test_audit.py — 22 new — the audit summary, end to end
-test_exact_duplicate_remover.py 21 21 unchanged
-test_preview.py 17 21 +4 — the page's column schema
-test_results.py — 17 new — the result-metadata service
-test_action_round_trip.py 17 17 unchanged
-test_export.py 15 15 unchanged
-test_api.py 14 14 unchanged
-test_schemas.py 12 12 updated for the new required fields
-Total 519 568 +49
-Nothing was weakened to pass. The four modules whose assertions changed (test_contract_freeze.py, test_schemas.py, test_run_model.py, test_runner.py) changed because the manifest shape deliberately changed: each now asserts the new shape exactly, with the same strictness as before — test_schema_field_names_are_frozen is still an exact tuple equality, and test_manifest_carries_no_dataframe_rows still asserts the complete key set of an output rather than a subset. No test was skipped, deleted or loosened, and no xfail was added.
-
-What the two new modules pin.
-
-test_results.py (17) — that a boolean is not classified as a number, that an unclassified Polars type falls back to other rather than to a guess, that the dtype is reported verbatim, that received columns keep first-appearance order, that reordering columns is reported as neither added nor removed, and that result metadata carries no row of the result (asserted by searching the serialised metadata for the cell values).
-
-test_audit.py (22) — the metadata and the audit through the real pipeline: row counts, dropped and created columns, the schema, several result tables, an Action that states no effect reporting null rather than a number, a failed Run still explaining itself, a running Run reporting the state it is actually in, the audit agreeing field-by-field with the manifest it sits in, and three cases proving no audit value reaches the user's result table (build plan 6E.6), including one that compares the retained frame byte-for-byte against what the Action returned.
-
-Type checking (Phase 6E)
-npx pyright -> 0 errors, 0 warnings, 0 informations
-Frontend static checks (Phase 6E)
-npx eslint . -> clean, 0 problems
-npm run build -> Compiled successfully; routes / and /\_not-found
-ESLint's react-hooks/set-state-in-effect rule caught a first draft of DataPreview that reset its paging offset from an effect. It was not suppressed: the offset reset now happens because ActionRunner gives the component a key of <run id>:<output id>, so a different table is a different component instance and starts at its first page. That is the React idiom the rule points at, and it removed an effect rather than silencing one.
-
-Phase 6E end-to-end verification over real HTTP
-Backend on 127.0.0.1:8000, next dev on 127.0.0.1:3000, both started the documented way.
-
-Check Result
-POST /api/runs (product_master_builder, CSV) 200; schema_version: 2
-Result metadata on the output input_row_count: 75, row_count: 60
-columns_removed ["Customer"] — the sales column the Product Master drops
-columns_added []
-column_schema 6 entries; Vintage → Int64/number, rest String/text
-Audit summary rows_received 75, rows_returned 60, rows_affected 15
-Audit metrics the Action's own three keys, verbatim
-GET .../preview?offset=0&limit=3 3 rows, total_rows: 60, column_schema present
-GET .../preview?offset=58&limit=100 2 rows returned, total_rows: 60
-Accented values through the whole pipeline Château Léoville / Sélection Prestige intact
-Files written anywhere under data/ 0 — data/runs/.gitkeep only, before and after
-Phase 6E browser verification (real headless Chromium)
-Driven with Playwright against the real dev servers — a real browser, a real file input, real network requests. Screenshots saved outside the repository.
-
-Run 1 — Product Master Builder, 280-row CSV (250 unique products).
-
-Check Result
-Backend indicator Backend Connected
-Workbench state success
-Success line "Product Master Builder read 280 rows and returned 250."
-Results figures Input Rows 280 · Output Rows 250 · Columns 6 · Execution 2 ms
-Columns removed shown Customer
-Action metrics "Duplicate product rows removed" listed with its value
-Preview headers SKU, Vintage, Supplier, Producer, Selection, Volume
-Accents in the preview Château Léoville / Sélection Prestige rendered intact
-Alignment from column kinds Vintage right-aligned; every text column left-aligned
-Rows rendered 100 (the page size, not the 250-row result)
-Paging line Showing 1–100 of 250
-Click Next Showing 101–200 of 250
-Network requests for that click exactly one — ?offset=100&limit=100 (build plan section 31)
-Click Previous Showing 1–100 of 250
-Audit summary on screen action + version, status, 280 received, 250 returned, 30 affected, duration, Run ID, the input file with its shape, the result table with its shape
-[object Object] anywhere none
-Server paths anywhere none (/home/, data/runs absent from the rendered page)
-Uncaught page errors none
-Run 2 — a validation failure, same session. A zero-byte CSV posted to Exact Duplicate Remover: state validation_error, panel reads "Validation Failed / empty.csv is empty.", and no results block, no preview table and no audit panel are rendered — a failed Run never shows a result area.
-
-Run 3 — Exact Duplicate Remover, 140-row XLSX (20 duplicates).
-
-Check Result
-Success line "Exact Duplicate Remover read 140 rows and returned 120."
-Figures Input 140 · Output 120 · Columns 4 · Execution 3 ms
-Action metrics Input rows 140, Output rows 120, Duplicates removed 20
-Boolean column InStock rendered false and left-aligned, not as a number
-Vintage right-aligned
-Output selector not rendered — the Action has one output
-Column-change rows not rendered — this Action adds and removes nothing
-Audit 140 received, 120 returned, 20 affected, book.xlsx 140×4
-Uncaught page errors none
-Run 4 — blank cells. A CSV with an empty numeric cell and an empty text cell: both render as a muted —, and the duplicate row is removed (3 → 2). No value is otherwise reformatted.
-
-Run 5 — a two-output Action, to prove the UI needs no Action-specific code. A verification-only server (scratchpad/temp_server.py, outside the repository) served the real application with one extra Action registered, declaring two outputs. No repository file was changed for this test.
-
-Check Result
-Output selector appears yes, with options "Kept Rows" and "Dropped Rows"
-Preview heading Preview — Kept Rows, then Preview — Dropped Rows
-Switching result tables headers change 7 columns → 2; Showing 1–100 of 280 → Showing 1–3 of 3
-Requests on switch the new table's first page only
-Results figures follow the table Output Rows 3, Columns 2 for the secondary table
-Audit "Results Produced" "Kept Rows (primary) 280 rows · 7 columns" and "Dropped Rows 3 rows · 2 columns"
-Run 6 — the validation-warnings panel. The UI only ever submits the slots an Action declares, so a real UNEXPECTED_INPUT warning cannot be produced by clicking. A genuine warning was obtained from the backend first (posting an undeclared stray_file field returned a manifest whose validation.warnings[0].code is UNEXPECTED_INPUT), and that real backend manifest was then served to the UI through request interception. The page rendered an amber panel headed "Warning" reading "…does not use stray_file; the file was ignored." beside — not instead of — the "Run Successful" panel, which is build plan section 6.2's rule that a warning never fails a Run.
-
-Backend test suite (Phase 6D)
-Environment note: this session also started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. Both were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install); no undocumented step was required and no dependency was added.
-
-cd backend && .venv/bin/python -m pytest -> 519 passed, 1 warning
-Three baselines, because the committed state was broken.
-
-State Result
-As committed (70c41b1) 25 failed, 460 passed
-After repairing test_runner.py and test_storage.py 485 passed (the real 6C baseline)
-After Phase 6D 519 passed
-The 485 figure is what Phase 6C would have reported had its work been committed intact. The Phase 6C entry claims 488; the two rebuilt modules are reconstructions, not a recovery of that session's edits, so their individual counts differ (see Known Issues 37 and 38).
-
-Module 6C repaired 6D Change
-test_contract_freeze.py 84 84 file not modified
-test_storage.py 64 64 rebuilt for 6C; untouched by 6D
-test_runs_api.py 49 53 downloads/preview from memory; +2 outputs
-test_runner.py 38 51 rebuilt for 6C; +13 for 6D
-test_run_model.py 26 37 RunResult (+11)
-test_parser.py 36 36 unchanged
-test_run_store.py 34 34 unchanged
-test_product_master_builder.py 34 34 reads the retained frame
-test_actions.py 30 30 unchanged
-test_exact_duplicate_remover.py 21 21 reads the retained frame
-test_preview.py 15 17 rewritten against frames
-test_action_round_trip.py 17 17 unchanged (already reads download bytes)
-test_export.py 11 15 rewritten against bytes
-test_api.py 14 14 unchanged
-test_schemas.py 12 12 unchanged
-Total 485 519 +34
-The single warning is the third-party StarletteDeprecationWarning already recorded as Known Issue 7.
-
-No test was weakened, skipped or deleted to make the suite green. Every test that asserted behaviour 6D removes was rewritten against the behaviour that replaced it:
-
-Assertion that could no longer hold What it asserts now
-test_write_output_creates_all_three_artifacts test_the_csv_export_round_trips / ...\_xlsx_export_is_a_real_workbook...
-test_the_parquet_round_trips_with_its_schema_intact dropped with Parquet; the frame is the working representation now
-test_two_outputs_are_written_side_by_side test_each_output_downloads_and_previews_its_own_table (over HTTP)
-test_an_unsafe_output_id_is_refused (export path building) no path is built; the ID never reaches one
-every preview.read_preview(paths, output_id, ...) call preview.read_preview(frame, ...)
-test_a_missing_parquet_artifact_is_reported test_a_preview_whose_result_has_been_released_returns_404
-test_the_preview_reads_parquet_not_the_csv_export test_previewing_reads_nothing_from_disk
-test_a_download_whose_file_is_missing_returns_404 test_a_download_whose_result_has_been_released_returns_404
-test_the_uploaded_source_is_never_written_to_the_run_directory (which still expected three artifacts) test_a_run_writes_nothing_to_the_filesystem — the stronger fact
-pl.read_parquet(outcome.paths.working_artifact(...)) in both Action modules outcome.result.table(...) / outcome.result.primary
-\_assert_failed_cleanly checking two empty directories checks run.result is None and that nothing was written at all
-The 6D completion criteria, as tests:
-
-Build plan 6D Test
-6D.1 test_the_pipeline_needs_no_run_directory_at_all, test_a_successful_run_writes_nothing_anywhere
-6D.2 test_the_action_run_signature_takes_named_frames, test_an_action_executes_with_no_filesystem_available (both in the unchanged freeze module)
-6D.3 the freeze module's structural checks on both Action modules
-6D.4 the frozen registry inventory in test_contract_freeze.py
-6D.5 test_an_action_with_two_outputs_produces_two_result_tables, test_each_output_downloads_and_previews_its_own_table, test_a_single_table_result_needs_no_ceremony and 8 more in test_run_model.py
-6D.6 RunStatus unchanged, pinned by test_run_status_values_are_frozen
-6D.7 test_a_successful_run_keeps_its_result_frame, test_the_retained_frame_is_the_one_the_action_returned, test_generating_an_export_writes_nothing, test_previewing_reads_nothing_from_disk, test_the_service_no_longer_writes_artifacts
-6D.8 test_a_failed_validation_leaves_no_result, test_an_action_that_raises_leaves_no_result, test_an_action_that_produces_only_some_of_its_outputs_leaves_no_result, test_finalizing_a_failure_clears_any_result_already_recorded, test_deleting_a_run_releases_its_result_frames
-Control tests — the new tests were proved to catch regressions. Eight deliberate breakages were introduced one at a time, each reverted from a scratch-directory backup immediately afterwards. The suite returned to 519 passed after the last revert and the tree was confirmed byte-identical to the backup.
-
-Deliberate break Result
-the runner writes the result frame to disk 5 failures across test_runner.py and test_runs_api.py
-the failure finalizer no longer clears the result 1 failure (test_finalizing_a_failure_clears_any_result_already_recorded)
-the last declared output becomes primary 2 failures (test_run_model.py, test_runner.py)
-delete_run keeps a reference to the Run's frames 2 failures (test_deleting_a_run_releases_its_result_frames and one more)
-an empty preview page reports no columns 2 failures in test_preview.py
-the XLSX export drops its worksheet name 1 failure (test_the_worksheet_is_named_after_the_output)
-a declared output that was not produced is skipped 1 failure (...\_produces_only_some_of_its_outputs_leaves_no_result)
-every output serves the primary table 0 failures — a real gap. Two tests were added (test_each_output_downloads_and_previews_its_own_table, test_each_output_downloads_its_own_worksheet); the same break then produced 2 failures.
-Two controls were informative rather than merely confirmatory, and both changed the work: the failure-finalizer break passed at first (the pipeline cannot currently reach that state, so a direct finalizer test was added), and the per-output download break passed at first (nothing covered a secondary output's own bytes, so two HTTP tests were added).
-
-Deterministic-output comparison against the pre-refactor baseline (6D)
-Build plan 6D requires that "its output must match the pre-refactor deterministic output". Before any 6D code was written, both real Actions were executed through the Phase 6C pipeline against their committed fixtures, as CSV and as XLSX, and the manifest, the result frame (columns, dtypes, every row) and the generated CSV/XLSX were saved to a scratch directory. After 6D the same four cases were re-run with FORGEXL_DATA_DIRECTORY pointed at a path that does not exist:
-
-Case Manifest Result frame CSV bytes XLSX round-trip
-exact_duplicate_remover, CSV input identical identical identical (sha 5c399b39…) same table, same worksheet
-exact_duplicate_remover, XLSX input identical identical identical (sha 05bcadad…) same table, same worksheet
-product_master_builder, CSV input identical identical identical (sha f45f1b78…) same table, same worksheet
-product_master_builder, XLSX input identical identical identical (sha 132b9b4a…) same table, same worksheet
-and the nonexistent data directory was still absent afterwards.
-
-One field is normalised in the comparison and it is worth stating why: inputs[0].file_size_bytes for the two XLSX cases. The XLSX fixture is rebuilt for each comparison and xlsxwriter stamps a creation time into the workbook, so the uploaded file's compressed length can differ by a byte between builds (5901 vs 5902 here). That is the fixture varying, not ForgeXL's output — the comparison asserts the recorded size equals the length of the payload that run actually received before normalising it, and both CSV cases, whose fixtures are byte-stable, matched with nothing normalised.
-
-Type checking (Phase 6D)
-npx pyright -> 43 files analyzed, 0 errors, 0 warnings, 0 informations
-Run twice: once on the repaired 6C baseline and once after 6D.
-
-Frontend static checks (Phase 6D)
-npm run lint -> exit 0, no errors, no warnings
-npm run build -> exit 0, compiled successfully
-Routes: ○ / ○ /\_not-found (both static)
-Unchanged from Phase 6C, as expected: Phase 6D wrote no frontend code. Zero .ts/.tsx files are tracked by git (the five under .next/ are Next.js build output and are git-ignored).
-
-Phase 6D end-to-end verification over real HTTP
-The backend was started with FORGEXL_DATA_DIRECTORY pointed at a scratch directory, so the repository's data/runs/ was never written to.
-
-GET /health -> {"status":"ok"}
-GET /api/actions -> 200, both Actions
-POST /api/runs (CSV) -> 200 "succeeded", duration_ms 4,
-engine "polars-csv", 200 bytes,
-3 rows in -> 2 out,
-duplicate_product_rows_removed 1
-POST /api/runs (XLSX) -> 200 "succeeded", engine
-"fastexcel-calamine", worksheet
-"Sales", 3 rows -> 2 rows
-POST /api/runs (dedupe, CSV) -> 200, duplicates_removed 1
-GET /api/runs/{id} -> 200, served from the Run Store
-GET .../preview?limit=5 -> 200, "Château Réal" and
-"Bodegas Muñoz" intact
-GET .../download/csv -> 200, text/csv; charset=utf-8,
-attachment; filename="product_master.csv",
-accented values intact
-GET .../download/xlsx -> 200, `file` reports
-"Microsoft Excel 2007+"
-The downloaded XLSX was re-read through the application's own parser: it came back as worksheet product_master with the expected columns and rows, so an export ForgeXL could not itself ingest would have failed here.
-
-Error cases, each over real HTTP:
-
-empty.csv (0 bytes) -> 422 EMPTY_FILE "empty.csv is empty."
-a,b\n1,2,3,4\n (ragged) -> 422 PARSE_ERROR
-bad.json -> 422 UNSUPPORTED_EXTENSION
-no file field at all -> 422 MISSING_INPUT "Sales File is required."
-wrong columns -> 422 MISSING_COLUMNS, all six named
-unknown action -> 404 UNKNOWN_ACTION
-GET /api/runs/{unknown uuid} -> 404
-GET /api/runs/not-a-uuid -> 404
-GET /api/runs/..%2Fsecret -> 404
-.../outputs/nope/preview -> 404
-.../outputs/nope/download/csv-> 404
-preview?limit=501 -> 400
-preview?offset=-1 -> 400
-download from unknown run -> 404
-The decisive 6D check — what the backend wrote, after nine real HTTP Runs:
-
-files under the data directory -> 0
-run directories -> 0
-inputs/ directories -> 0
-working/ directories -> 0
-exports/ directories -> 0
-\*.parquet -> 0
-manifest.json -> 0
-repository data/runs/ -> .gitkeep only
-
-server path or traceback in any response body -> 0 occurrences
-server log: "Traceback" or "500 Internal" -> 0 occurrences
-A larger result, to confirm paging really works off the retained frame:
-
-50,000-row CSV -> product_master_builder
--> succeeded, duration_ms 16, 20,000 output rows,
-duplicate_product_rows_removed 30,000
-preview offset=0 -> total 20000, first row SKU-0
-preview offset=19995 -> total 20000, first row SKU-19995
-download/csv -> 588,937 bytes
-download/xlsx -> 509,881 bytes
-files written by that run -> 0
-(No timings are claimed as benchmarks — that is Phase 7G, on the real target machine.)
-
-CORS Origin http://127.0.0.1:3000 -> echoed
-Origin http://evil.example.com -> no access-control headers
-Bind LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
-Restart behaviour (build plan Phase 6 rules 14/15) still holds:
-
-backend stopped and restarted
-GET /api/runs/{earlier id} -> 404 UNKNOWN_RUN
-GET .../download/csv of that run -> 404
-GET /api/actions -> 200, both Actions registered
-POST /api/runs -> 200, a new Run succeeds normally
-orphaned files left behind -> 0 (Known Issue 26 is resolved:
-nothing is written to orphan)
-Phase 6D browser verification (real headless Chromium)
-Phase 6D changed no frontend file, so this exists to prove the Phase 5 UI still works end to end against the DataFrame-first pipeline. Playwright was installed outside the repository, in the session scratchpad, against the pre-installed Chromium at /opt/pw-browsers/chromium-1194. Both servers were the real ones, started with the real npm run dev.
-
-19/19 checks passed: page title; "Backend Connected"; the selector populated from GET /api/actions with both Actions; state idle on load; Version 1.0.0 and the Sales File slot rendered from metadata; state ready after choosing a file; a real CSV Run through the UI reaching success; "Run Successful" shown; a real XLSX Run through the UI reaching success; the second Action running without reloading the app; a bad file classified validation_error with Supplier and Volume named; an empty file explained as "is empty"; no [object Object]; no traceback; no server path rendered anywhere; the browser posting directly to 127.0.0.1:8000/api/runs; no uncaught page errors.
-
-Backend log for the whole browser session: 3 × POST /api/runs 200, 2 × 422, 12 × GET /api/actions 200, 13 × GET /health 200 — no traceback, no 500. The session wrote 0 files under the data directory.
-
-Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and data/runs/ holds only .gitkeep.
-
-Backend test suite (Phase 6C)
-Environment note: this session also started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. The venv was recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt); node_modules/ was already present. No undocumented step was required and no dependency was added.
-
-cd backend && .venv/bin/python -m pytest -> 488 passed, 1 warning
-Baseline. The committed state could not run at all: 0 of 457 tests were collected (Known Issue 31). After the relocation repair, 457 passed — but 34 of those were the duplicated Run Store module (Known Issue 32), so real unique coverage before this phase was 423.
-
-Module Before After Change
-test_runner.py 0\* 45 rebuilt (see Known Issue 32)
-test_storage.py 53 60 upload half rewritten
-test_parser.py 26 36 rewritten against bytes
-test_runs_api.py 46 49 upload assertions inverted
-test_contract_freeze.py 84 84 file not modified
-test_run_store.py 34 34 unchanged
-test_product_master_builder.py 34 34 one expectation updated
-test_actions.py 30 30 unchanged
-test_run_model.py 26 26 unchanged
-test_exact_duplicate_remover.py 21 21 unchanged
-test_action_round_trip.py 17 17 reads downloads from bytes
-test_preview.py 15 15 unchanged
-test_api.py 14 14 unchanged
-test_schemas.py 12 12 unchanged
-test_export.py 11 11 reads exports from bytes
-Total (unique) 423 488 +65
-
-- test_runner.py was on disk but held a copy of test_run_store.py; its 34 collected tests were the Run Store's, counted twice.
-
-The single warning is the third-party StarletteDeprecationWarning already recorded as Known Issue 7.
-
-No test was weakened, skipped or deleted to make the suite green. Every test that asserted behaviour 6C removes was rewritten against the behaviour that replaced it:
-
-Assertion that could no longer hold What it asserts now
-test_a_hostile_filename_never_escapes_its_slot_directory ...\_becomes_a_generated_name_and_writes_nothing — the generated name, and nothing on disk
-test_the_stored_bytes_match_the_upload_exactly test_the_upload_is_held_in_memory_byte_for_byte
-test_two_slots_are_stored_side_by_side test_two_slots_are_read_independently
-test_a_rejected_upload_leaves_no_partial_file test_a_rejected_upload_is_not_retained_in_memory
-test_input_directory_rejects_an_unsafe_slot_id test_an_unsafe_slot_id_reaches_no_path_at_all — the stronger fact
-test_the_uploaded_source_is_preserved_under_a_generated_name (API) split into ...\_is_never_written_to_the_run_directory and ...\_is_recorded_under_a_generated_name
-test_a_hostile_upload_filename_cannot_write_outside_the_run (API) ...\_writes_nothing_anywhere
-test_a_completely_empty_file_fails_the_run expecting PARSE_ERROR expects EMPTY_FILE — the more specific code, not a looser one
-every parse_tabular_file(path, ext) call parse_tabular_bytes(payload, ext)
-Control tests — the new tests were proved to catch regressions. Five deliberate breakages were introduced one at a time and reverted immediately afterwards; the suite was re-run to 488 passed after the last revert and git status confirmed the tree was byte-identical, with the one stray file the first breakage wrote (data/runs/leaked.bin) removed.
-
-Deliberate break Result
-read_upload writes the payload to disk after reading it 19 failures across test_runner.py, test_runs_api.py, the Action modules
-the limit is checked only after the whole stream is read 1 failure (test_the_limit_stops_the_read_before_the_whole_file_is_accumulated)
-an empty upload is accepted instead of refused 5 failures across runner, API and test_product_master_builder.py
-the openpyxl fallback writes a temp file instead of a buffer 1 failure (test_the_fallback_reads_the_same_bytes_without_a_temporary_file)
-an upload is attached to the wrong slot 1 failure (test_each_slot_keeps_its_own_data)
-Type checking (Phase 6C)
-npx pyright -> 43 files analyzed, 0 errors, 0 warnings, 0 informations
-Frontend static checks (Phase 6C)
-npm run lint -> exit 0, no errors, no warnings
-npm run build -> exit 0, compiled successfully
-Routes: ○ / ○ /\_not-found (both static)
-Unchanged from Phase 6B, as expected: Phase 6C wrote no frontend code.
-
-Phase 6C end-to-end verification over real HTTP
-The backend was started with FORGEXL_DATA_DIRECTORY pointed at a scratch directory, so the repository's data/runs/ was never written to.
-
-GET /health -> {"status":"ok"}
-GET /api/actions -> 200, both Actions
-POST /api/runs (CSV, 6C.6) -> 200 "succeeded", duration_ms 34,
-engine "polars-csv", worksheet null,
-size 168 = the file's real length,
-3 rows in -> 2 out,
-duplicate_product_rows_removed 1
-POST /api/runs (XLSX, 6C.7) -> 200 "succeeded", engine
-"fastexcel-calamine", worksheet
-"Sales", 3 rows in -> 2 out
-GET .../preview?limit=5 -> 200, "Château Réal" and
-"Bodegas Muñoz" intact
-GET .../download/csv -> 200, accented values intact
-GET .../download/xlsx -> 200, `file` reports "Microsoft Excel 2007+"
-Error cases (6C.9), each over real HTTP:
-
-empty.csv (0 bytes) -> 422 EMPTY_FILE "empty.csv is empty."
-a,b\n1,2,3,4\n (ragged) -> 422 PARSE_ERROR "…CSV file could not be read…"
-"not a workbook".xlsx -> 422 PARSE_ERROR "…Excel workbook could not be read…"
-two-data-sheet workbook -> 422 AMBIGUOUS_WORKBOOK, section 17 wording
-sales.json -> 422 UNSUPPORTED_EXTENSION
-no file field at all -> 422 MISSING_INPUT "Sales File is required."
-SKU,Vintage only -> 422 MISSING_COLUMNS ["Supplier","Producer",
-"Selection","Volume"]
-168 bytes vs a 64-byte limit -> 413 FILE_TOO_LARGE
-grep for a traceback in any error body -> none
-MIME type is not trusted (6C.5):
-
-valid CSV declared application/octet-stream -> succeeded, polars-csv
-XLSX bytes named .csv declared text/csv -> 422 PARSE_ERROR
-On-disk result after twelve Runs (the decisive 6C check):
-
-inputs/ directories created -> 0
-source.csv / source.xlsx -> 0
-manifest.json -> 0
-files actually written -> only working/<id>.parquet and
-exports/<id>.{csv,xlsx}, and only for
-the Runs that succeeded
-
-CORS Origin http://127.0.0.1:3000 -> echoed
-Origin http://evil.example.com -> no access-control headers
-Bind LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
-Restart behaviour (build plan Phase 6 rules 14/15) still holds:
-
-backend stopped and restarted
-GET /api/runs/{earlier id} -> 404 UNKNOWN_RUN
-GET /api/actions -> 200, both Actions still registered
-POST /api/runs -> 200, a new Run succeeds normally
-Phase 6C browser verification (real headless Chromium)
-Phase 6C changed no frontend file, so this exists to prove the Phase 5 UI still works end to end against the in-memory pipeline. Playwright was installed outside the repository, in the session scratchpad, against the pre-installed Chromium at /opt/pw-browsers/chromium-1194. Both servers were the real ones.
-
-16/16 checks passed: page title; "Backend Connected"; the selector populated from GET /api/actions with both Actions; Version 1.0.0 and the Sales File slot rendered from metadata; state ready after choosing a file; a real CSV Run through the UI reaching success; a real XLSX Run through the UI reaching success; an empty file classified validation_error with "is empty" shown to the user; no [object Object]; no traceback on the page; the browser posting directly to 127.0.0.1:8000/api/runs; no uncaught page errors.
-
-The browser session wrote 0 inputs/ directories, 0 source.\* files and 0 manifests — only the three exports and Parquet files its three successful Runs produced.
-
-Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and data/runs/ holds only .gitkeep.
-
-Backend test suite (Phase 6B)
-Environment note: this session also started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. Both were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install), with no undocumented step required and no dependency added.
-
-cd backend && .venv/bin/python -m pytest -> 455 passed, 1 warning
-
-Before Phase 6B 395 passed
-tests/test_run_store.py (new) 34
-tests/test_run_model.py (new) 26
-tests/test_runner.py 28 -> 32 +4
-tests/test_storage.py 57 -> 53 -4
-
-tests/test_contract_freeze.py 84 unchanged, and the file itself was
-not modified — the Phase 6A freeze
-passes untouched through 6B, which is
-the whole point of it
-tests/test_runs_api.py 46 (unchanged)
-tests/test_product_master_builder.py 34 (one line: reads the Run Store
-instead of the manifest file)
-tests/test_actions.py 30 (unchanged)
-tests/test_parser.py 26 (unchanged)
-tests/test_exact_duplicate_remover.py 21 (unchanged)
-tests/test_action_round_trip.py 17 (unchanged)
-tests/test_preview.py 15 (unchanged)
-tests/test_api.py 14 (unchanged)
-tests/test_schemas.py 12 (unchanged)
-tests/test_export.py 11 (unchanged)
-The single warning is the third-party StarletteDeprecationWarning already recorded as Known Issue 7.
-
-No test was weakened, skipped or deleted to make the suite green. Nine tests in test_storage.py asserted behaviour that no longer exists, because the file they asserted against no longer exists. Each was rewritten against the store that replaced it, not dropped:
-
-Removed from test_storage.py Where its intent now lives
-test_run_exists_is_false_until_a_manifest_is_written test_a_run_is_unknown_until_it_is_created
-test_run_exists_reports_false_for_a_malformed_id test_a_malformed_id_is_never_recorded
-test_write_manifest_produces_readable_json test_to_manifest_carries_every_recorded_field, test_the_manifest_serialises
-test_rewriting_a_manifest_replaces_it_atomically test_update_replaces_the_recorded_state
-test_read_manifest_round_trips_what_was_written test_update_round_trips_everything_it_was_given
-test_read_manifest_raises_for_an_unknown_run test_get_run_raises_for_an_unknown_run
-test_read_manifest_raises_for_a_malformed_run_id test_get_run_raises_for_a_malformed_id (4 cases)
-test_write_manifest_leaves_no_temporary_file_behind test_a_rejected_update_leaves_the_store_unchanged — the in-memory form of "no half-written state"
-test_read_manifest_raises_when_the_manifest_is_corrupt test_a_run_cannot_be_mutated — state cannot be corrupted behind the store's back
-Five new tests replaced them in test_storage.py itself, covering delete_run_directory including the two traversal-shaped refusals.
-
-test_runner.py kept every test it had; three that read manifest.json from disk now read the Run Store, and three new ones cover run recording and lifecycle deletion.
-
-Control tests — the new tests were proved to catch regressions. Four deliberate breakages were introduced one at a time and reverted immediately afterwards; git status confirmed the tree was byte-identical after each:
-
-Deliberate break Result
-InMemoryRunStore.create_run silently overwrites 1 failure (test_a_duplicate_run_id_is_rejected_not_silently_overwritten)
-A failed Run is not written back to the store 4 failures (...\_keeps_its_directory_and_its_record, ...\_records_every_validation_error, and both crash cases)
-new_run_id returns "run-<uuid>" 8+ failures across test_run_model.py and test_run_store.py
-A run_path field is added to the Run model 1 failure (test_no_run_field_holds_a_filesystem_path)
-Type checking (Phase 6B)
-npx pyright -> 43 files analyzed, 0 errors, 0 warnings, 0 informations
-Four more files than Phase 6A's 39: app/models/run.py, app/services/run_store.py, tests/test_run_model.py, tests/test_run_store.py.
-
-Frontend static checks (Phase 6B)
-npm run lint -> exit 0, no errors, no warnings
-npm run build -> exit 0
-✓ Compiled successfully in 6.7s
-Routes: ○ / ○ /\_not-found (both static)
-Unchanged from Phase 6A, as expected: Phase 6B wrote no frontend code.
-
-Phase 6B end-to-end verification over real HTTP
-The backend was started with FORGEXL_DATA_DIRECTORY pointed at a scratch directory, so the repository's data/runs/ was never written to.
-
-GET /health -> {"status":"ok"}
-GET /api/actions -> 200, both Actions
-POST /api/runs (product_master) -> 200, "succeeded", duration_ms 33,
-parser_engine "polars-csv",
-3 input rows -> 2 output rows,
-metrics duplicate_product_rows_removed 1
-GET /api/runs/{id} -> 200, byte-identical to the POST body
-(served from the Run Store)
-GET .../preview?limit=5 -> 200, 2 rows, "Château Réal" intact
-GET .../download/csv -> 200, accented values intact
-GET .../download/xlsx -> 200, `file` reports "Microsoft Excel 2007+"
-POST /api/runs (missing columns) -> 422 MISSING_COLUMNS naming all four
-GET /api/runs/{failed id} -> 200, status "failed", the full
-validation error list, and the
-uploaded filename still recorded
-GET /api/runs/{unknown uuid} -> 404 UNKNOWN_RUN
-GET /api/runs/not-a-uuid -> 404
-GET /api/runs/..%2Fsecret -> 404
-GET .../outputs/nope/preview -> 404
-
-manifest.json written anywhere -> 0 files
-On-disk layout in the scratch directory was inputs/sales_file/source.csv, working/product_master.parquet and exports/product_master.{csv,xlsx} — and no manifest.json. That is the expected interim state: run state moved to memory in 6B, and the remaining files leave in 6C, 6D and 6F.
-
-Restart behaviour (build plan Phase 6 rules 14/15), verified:
-
-backend stopped and restarted
-GET /api/runs/{earlier id} -> 404 UNKNOWN_RUN
-GET /api/actions -> 200, both Actions still registered
-POST /api/runs -> 200, a new Run succeeds normally
-
-CORS Origin http://127.0.0.1:3000 -> echoed
-Origin http://evil.example.com -> no access-control headers
-Bind LISTEN 127.0.0.1:8000 only; nothing on 0.0.0.0
-Phase 6B browser verification (real headless Chromium)
-Phase 6B changed no frontend file, so this exists to prove the Phase 5 UI still works end to end against the new runtime. Playwright was installed outside the repository, in the session scratchpad, against the pre-installed Chromium. Both servers were the real ones.
-
-13/13 checks passed: page title; "Backend Connected"; the selector populated from GET /api/actions with both Actions; Version 1.0.0 and the Sales File slot rendered from metadata; state ready after choosing a file; a real Run through the UI reaching state success and showing "Run Successful"; a second Run with a bad file classified validation_error with Supplier and Volume named; no [object Object]; the browser talking to 127.0.0.1:8000/api/runs directly; no uncaught page errors.
-
-Both servers were stopped afterwards, ports 3000 and 8000 confirmed free, and data/runs/ still holds only .gitkeep.
-
-Backend test suite (Phase 6A)
-Environment note: this session started in a fresh ephemeral container — backend/.venv/ and node_modules/ did not exist. Both were recreated by following the documented setup exactly (python3 -m venv backend/.venv, pip install -r backend/requirements.txt, npm install), with no undocumented step required. That is an incidental clean-setup confirmation; the formal clean-setup test is Phase 8.1.
-
-cd backend && .venv/bin/python -m pytest -> 395 passed, 1 warning
-
-Before Phase 6A 311 passed
-tests/test_contract_freeze.py (new) 84 passed
-
-tests/test_storage.py 57 (unchanged)
-tests/test_runs_api.py 46 (unchanged)
-tests/test_product_master_builder.py 34 (unchanged)
-tests/test_actions.py 30 (unchanged)
-tests/test_runner.py 28 (unchanged)
-tests/test_parser.py 26 (unchanged)
-tests/test_exact_duplicate_remover.py 21 (unchanged)
-tests/test_action_round_trip.py 17 (unchanged)
-tests/test_preview.py 15 (unchanged)
-tests/test_api.py 14 (unchanged)
-tests/test_schemas.py 12 (unchanged)
-tests/test_export.py 11 (unchanged)
-tests/test_contract_freeze.py 84 (added by Phase 6A)
-No existing test was modified, weakened, skipped or deleted. The single warning is the third-party StarletteDeprecationWarning already recorded as Known Issue 7.
-
-What the contract freeze pins (docs/phase-6a-compatibility-audit.md §4):
-
-Area (build plan 6A.5) Coverage
-Action registration Frozen inventory and registration order; ID uniqueness; get_action misses on 5 near-match forms; duplicate-ID and blank-ID rejection
-Action input validation Slot IDs, labels, required, accepted extensions and required columns (exact tuple and order) for both Actions; metadata immutability
-Action execution run() receives frames keyed by slot ID and returns one frame per declared output ID; exact metric key sets; instances hold no state
-Deterministic output Repeat execution identical; input frame never mutated; accents, blanks, nulls and near-duplicates survive; first-occurrence and column order
-Error handling Full 15-row code → HTTP-status table; response body shape; single- vs multi-issue RunValidationError; no traceback in any rendered error
-Public HTTP surface The 7-route inventory read from the generated OpenAPI schema; /health; GET /api/actions against the frozen table; CORS is not wildcard
-Schema freeze Field names of all 13 models; RunStatus values; MANIFEST_SCHEMA_VERSION == 1; preview 100/500 and refuse-don't-clamp; 250 MB limit
-DataFrame-first (6A.4) Both Action modules structurally free of filesystem imports and open(); each executes with DATA_DIRECTORY pointing nowhere
-Control tests — the freeze was proved to actually catch regressions, not merely to pass. Three deliberate breakages were introduced one at a time and each was reverted immediately afterwards:
-
-Deliberate break Result
-exact_duplicate_remover.version 1.0.0 -> 1.0.1 3 failures (...\_frozen_identity, ...\_declared_metadata, ...\_serves_the_frozen_inventory)
-import os / Path / open() added to an Action module 2 failures (...\_imports_a_filesystem_module, ...\_opens_or_executes_anything)
-RunManifest.duration_ms renamed to elapsed_ms 1 failure (test_schema_field_names_are_frozen[RunManifest])
-git status after each revert confirmed the tree was byte-identical to its committed state.
-
-Type checking (Phase 6A)
-npx pyright -> 39 files analyzed, 0 errors, 0 warnings, 0 informations
-Control test: appending \_control: int = "not an int" to tests/test_contract_freeze.py reproduced a reportAssignmentType error at that line, confirming pyright is genuinely analysing the new module rather than skipping it. The line was removed and pyright re-verified clean.
-
-Frontend static checks (Phase 6A)
-npm run lint -> exit 0, no errors, no warnings
-npm run build -> exit 0
-✓ Compiled successfully in 5.3s
-Routes: ○ / ○ /\_not-found (both static)
-Unchanged from Phase 5, as expected: Phase 6A wrote no frontend code.
-
-Phase 6A end-to-end confirmation over real HTTP
-Run to confirm the audited runtime still behaves exactly as documented — i.e. that Phase 6A changed nothing. The backend was started with FORGEXL_DATA_DIRECTORY pointed at a scratch directory, so the repository's data/runs/ was never written to.
-
-GET /health -> {"status":"ok"}
-GET /api/actions -> 200, both Actions
-POST /api/runs -> 200, status "succeeded", duration_ms 50,
-parser_engine "polars-csv",
-input 3 rows -> output 2 rows
-GET .../preview?limit=5 -> 200, 2 rows, positional lists,
-"Château Réal" intact
-GET .../download/csv -> 200, accented values intact
-POST /api/runs (unknown action) -> 404
-manifest path-leakage grep -> 0 occurrences of /home/, /tmp/ or data/runs
-On-disk layout in the scratch directory was the documented one (manifest.json, inputs/sales_file/source.csv, working/product_master.parquet, exports/product_master.{csv,xlsx}) — i.e. the model Phase 6B–6F will replace. The backend was stopped afterwards, port 8000 confirmed free, and data/runs/ still holds only .gitkeep.
-
-Backend test suite (Phase 3)
-cd backend && .venv/bin/python -m pytest -> 231 passed, 1 warning
-
-tests/test_actions.py 26 passed Action contract + registry
-tests/test_api.py 10 passed /health and GET /api/actions
-tests/test_schemas.py 12 passed manifest / preview serialisation
-tests/test_storage.py 57 passed Run dirs, path safety, limit, manifest
-tests/test_parser.py 26 passed CSV, XLSX, ambiguity, engine fallback
-tests/test_runner.py 28 passed pipeline, validation, failed Runs
-tests/test_export.py 11 passed Parquet/CSV/XLSX round trips
-tests/test_preview.py 15 passed paging limits, Parquet-sourced preview
-tests/test_runs_api.py 46 passed Run endpoints and status codes
-The 48 Phase 2 tests still pass unchanged; Phase 3 added 183.
-
-Every test that touches storage runs against its own temporary runs directory (conftest.py redirects config.RUNS_DIRECTORY), so the suite never reads or writes the real data/runs.
-
-Build plan Phase 3 testing list, and the tests that prove each:
-
-Phase 3 requirement Tests
-supported file accepted test_a_supported_file_is_accepted, test_an_xlsx_upload_is_accepted
-unsupported extension rejected test_an_unsupported_extension_returns_422, test_unsupported_extensions_are_rejected (8 cases), test_an_unsupported_upload_is_never_stored
-oversized file rejected test_an_oversized_upload_returns_413, test_an_oversized_upload_is_rejected, test_a_rejected_upload_leaves_no_partial_file
-unknown Action rejected test_an_unknown_action_returns_404
-missing required input rejected test_a_missing_required_input_returns_422, test_a_missing_required_input_fails_the_run
-missing required columns rejected test_missing_required_columns_return_422_with_the_missing_names, test_column_comparison_is_exact, test_column_comparison_is_case_sensitive
-Run directory created test_create_run_creates_the_full_directory_tree, test_each_run_gets_its_own_isolated_directory
-source preserved test_the_source_upload_is_preserved_byte_for_byte, test_the_uploaded_source_is_preserved_under_a_generated_name
-manifest created test_the_manifest_records_the_run_end_to_end, test_the_manifest_on_disk_matches_what_was_returned
-Parquet output created test_write_output_creates_all_three_artifacts, test_the_parquet_round_trips_with_its_schema_intact
-CSV output created test_the_csv_export_round_trips, test_a_downloaded_csv_reads_back_with_the_expected_data
-XLSX output created test_the_xlsx_export_is_a_real_workbook_that_round_trips, test_the_xlsx_download_returns_a_real_workbook
-preview returns limited rows test_the_preview_returns_only_the_requested_rows, test_only_the_requested_rows_are_returned
-invalid Run ID returns 404 test_a_malformed_run_id_returns_404 (4 cases), test_an_unknown_run_id_returns_404
-invalid output returns 404 test_an_unknown_output_returns_404, test_a_traversal_shaped_output_id_returns_404 (3 cases)
-Beyond the required list, the suite also proves: failed Runs retain their directory, manifest, uploaded file and full error list (3.9); the manifest contains no dataframe rows and no filesystem paths (sections 11 and 23); the Excel engine fallback is exercised and recorded (section 6.2); worksheet ambiguity is refused and never retried with the fallback (section 17); an Action that raises or omits a declared output fails cleanly without leaking a traceback; accented text survives every hop; and a hostile upload filename cannot write outside its Run directory.
-
-Phase 3 end-to-end verification over real HTTP
-Backend started with the real scripts/dev-backend.sh; requests issued with curl against http://127.0.0.1:8000.
-
-POST /api/runs (CSV, Origin: http://127.0.0.1:3000)
--> 200, status "succeeded", duration_ms 42,
-inputs[0].parser_engine "polars-csv",
-stored_filename "source.csv"
-GET /api/runs/{id} -> 200
-GET .../preview?limit=2
--> 200, 2 of 3 rows, columns ["a","b"]
-GET .../download/csv -> 200, text/csv,
-content-disposition: attachment;
-filename="passthrough_data.csv"
-body matched the uploaded data exactly
-GET .../download/xlsx
--> 200, `file` reports "Microsoft Excel 2007+"
-
-Error paths:
-unknown action -> 404 UNKNOWN_ACTION
-missing input -> 422 MISSING_INPUT
-unsupported ext -> 422 UNSUPPORTED_EXTENSION
-no action_id -> 400 INVALID_REQUEST
-malformed run id -> 404 UNKNOWN_RUN
-oversized upload -> 413 FILE_TOO_LARGE
-"sample.csv is larger than the 8 bytes upload
-limit." (FORGEXL_MAX_UPLOAD_BYTES=8)
-multi-sheet .xlsx -> 422 AMBIGUOUS_WORKBOOK, message matching the
-wording of build plan section 17
-Run directory layout on disk (build plan section 11)
-data/runs/<run-id>/
-manifest.json
-inputs/source_file/source.csv preserved upload, generated name
-working/passthrough_data.parquet internal representation
-exports/passthrough_data.csv
-exports/passthrough_data.xlsx
-Failed Runs were confirmed retained on disk with status: failed and a populated error.code for FILE_TOO_LARGE, MISSING_INPUT, UNSUPPORTED_EXTENSION and AMBIGUOUS_WORKBOOK. git check-ignore confirmed run artifacts are ignored while data/runs/.gitkeep is not. The Run directories created during verification were removed afterwards, leaving data/runs/ as it was found.
-
-The single warning is third-party and is recorded under Known Issues.
-
-backend/pytest.ini sets testpaths = tests and pythonpath = ., so the suite runs with backend/ as rootdir and imports app.\* without any sys.path manipulation inside test files.
-
-Build plan 2.8 requirements, and the tests that prove each:
-
-2.8 requirement Test
-Actions can register test_action_can_register, test_registry_accepts_actions_at_construction
-list_actions returns registered Actions test_list_actions_returns_registered_actions_in_registration_order, test_list_actions_is_empty_for_an_empty_registry
-get_action returns the correct Action test_get_action_returns_the_matching_action
-Unknown Action returns the expected result test_get_action_returns_none_for_an_unknown_id, test_get_action_never_guesses_a_near_match (7 cases)
-Duplicate IDs rejected, not silently overwritten test_duplicate_action_id_is_rejected_not_silently_overwritten, test_duplicate_action_id_is_rejected_at_construction, test_duplicate_action_id_error_is_a_value_error
-The duplicate-ID test asserts more than "an exception was raised": it also confirms the first Action is still the one registered afterwards and that the registry did not grow.
-
-test_get_action_never_guesses_a_near_match is parametrised over "", "ALPHA", " alpha", "alpha ", "alph", "alpha_extra" and "../alpha" — case, whitespace, truncation, extension and a traversal-shaped ID must all miss rather than resolve.
-
-Registry tests build their own ActionRegistry instances from a throwaway Action (tests/helpers.make_action), so they neither depend on nor mutate the application registry. Two tests do assert against the real one: that it holds at least one Action, and that its IDs are unique.
-
-Phase 5 browser verification (real headless Chromium)
-Both servers were started with the real npm run dev; the browser drove the actual UI at http://127.0.0.1:3000. Playwright was installed outside the repository, in the session scratchpad, and launched against the pre-installed Chromium. Nothing was stubbed or mocked — every Run below hit the real backend and produced a real Run directory.
-
-34/34 checks passed.
-
-Build plan Check Result
-5.1 Every backend request goes browser -> 127.0.0.1:8000 directly pass — no request to a Next.js route
-5.2 Selector populated from GET /api/actions pass — ["Select Action","Exact Duplicate Remover","Product Master Builder"]
-5.3 Options come from the API, not a hardcoded list pass
-5.4 Name + Version 1.0.0 shown; internal ID not shown pass
-5.5 Exact Duplicate Remover renders only Source File pass
-5.5 Product Master Builder renders only Sales File pass
-5.5 Required columns rendered from metadata pass — SKU, Vintage, Supplier, Producer, Selection, Volume
-5.6 Filename, extension and size shown pass — sales.csv · .csv · 162 B
-5.6 File can be removed before the Run pass — state returns to idle
-5.6 Drag-and-drop accepts a dropped file pass — synthetic DragEvent with a DataTransfer
-5.7 Run disabled with no Action selected pass
-5.7 Run disabled with no file chosen pass
-5.7 Unsupported extension refused client-side pass — "Sales File must be .csv or .xlsx."
-5.7 Run enabled only with Action + required file pass
-5.8 Run posted to POST /api/runs pass
-5.8 Files arrive under the Action's own slot IDs pass — inputs/source_file/, inputs/sales_file/ on disk
-5.9 "Processing…" shown while running pass
-5.9 Action selector disabled while running pass
-5.9 No fake progress percentage pass — no NN% anywhere
-5.9 Six rapid clicks submitted exactly one Run pass — 1 POST /api/runs
-5.10 Missing columns listed by name pass — Supplier, Producer, Selection, Volume
-5.10 No [object Object] rendered pass
-5.10 No stack trace rendered pass
-§30 idle -> ready -> running -> success / validation_error pass — read from data-workbench-state
-— XLSX upload runs through the same dynamic slot pass
-— Switching Action clears the previous Run and files pass
-— A second Action runs without reloading the app pass
-— No uncaught page errors across the whole session pass
-The 19 MB / 400,000-row CSV fixture was also run through the browser end-to-end and succeeded; it is what the duplicate-submission check ran against, so the button really was hammered while a Run was genuinely in flight. (No timings are recorded here — benchmarking is Phase 7G.)
-
-Backend log for the whole session: four POST /api/runs 200, one POST /api/runs 422, GET /api/actions 200, GET /health 200. No traceback, no 500, no unhandled exception.
-
-Phase 5 extensibility acceptance test (build plan section 32)
-Build plan section 32 calls this "a critical acceptance test", so it was run against a real third Action rather than reasoned about.
-
-A temporary Action (tmp_three_slot_probe, version 9.9.9) declaring three input slots — current_sales (required, .csv/.xlsx, requires column SKU), historical_sales (required, .csv only) and assignments (optional) — was registered in the backend. Not one frontend file was touched.
-
-11/11 checks passed:
-
-New Action appears in the selector pass
-Three declared inputs render three upload areas pass
-Three independent file inputs exist pass
-Required slots labelled Required, optional one Optional pass
-Per-slot accepted extensions come from metadata pass
-Version 9.9.9 shown from metadata pass
-Run disabled with no files pass
-Run still disabled with 1 of 2 required slots filled pass
-Run enabled with both REQUIRED slots filled pass
-(the optional slot is correctly not waited on)
-.xlsx refused for the .csv-only slot, .csv accepted pass
-("Historical Sales must be .csv.")
-No uncaught page errors pass
-The probe Action and its registry entry were removed afterwards; git checkout backend/app/actions/registry.py restored the registry, and git status confirms the backend is byte-identical to its committed state. The registry again holds exactly ExactDuplicateRemoverAction and ProductMasterBuilderAction.
-
-This is the requirement build plan §3.2 describes as "extremely important" and §8.5 re-tests at handoff: adding an ordinary Action requires a backend module, a registry entry and tests — and no frontend change at all.
-
-Frontend static checks (Phase 5)
-npm run lint -> exit 0, no errors, no warnings
-npm run build -> exit 0
-✓ Compiled successfully in 509ms
-Routes: ○ / ○ /\_not-found (both static)
-The route list is unchanged from Phase 3: Phase 5 added components and library modules, not routes. The page remains statically prerendered — the Action list is fetched in the browser at runtime, so no build-time backend call exists.
-
-Backend suite (unchanged by Phase 5)
-cd backend && .venv/bin/python -m pytest -> 311 passed, 1 warning
-Re-run after the extensibility probe was removed: still 311 passed. Phase 5 added no backend code and changed no backend file.
-
-Run artifacts created during verification
-Runs created while verifying were confirmed on disk with the expected layout —
-
-data/runs/<run-id>/
-manifest.json
-inputs/<slot-id>/source.csv preserved upload, generated name
-working/<output-id>.parquet
-exports/<output-id>.csv
-exports/<output-id>.xlsx
-— including a status: failed directory retained for the 422 validation failure. All of them were removed afterwards, leaving data/runs/ holding only .gitkeep, as it was found.
-
-Frontend lint
-npm run lint -> exit 0, no errors, no warnings
-(re-run in Phase 3 and Phase 5: still clean)
-Frontend production build
-npm run build -> exit 0
-✓ Compiled successfully in 5.9s
-Routes: ○ / ○ /\_not-found (both static)
-
-Unchanged from Phase 2 — Phase 3 added no frontend code, and the route
-list proves it.
-Backend import
-backend/.venv/bin/python -c "import app.main" (cwd = backend/)
--> imports cleanly, no warnings
-routes: /openapi.json /docs
-/docs/oauth2-redirect /redoc /health
-Backend configuration
-config defaults -> HOST 127.0.0.1, PORT 8000,
-DATA_DIRECTORY /home/user/ForgeXL/data,
-RUNS_DIRECTORY /home/user/ForgeXL/data/runs,
-MAX_UPLOAD_BYTES 262144000,
-ORIGINS [127.0.0.1:3000, localhost:3000]
-env override -> FORGEXL_BACKEND_PORT=8123 -> PORT 8123
-FORGEXL_ALLOWED_FRONTEND_ORIGINS=... honoured
-defaults restored when unset
-Combined startup (re-verified in Phase 3)
-npm run dev -> [api] Uvicorn running on http://127.0.0.1:8000
-[web] - Local: http://127.0.0.1:3000
-[web] ✓ Ready in 398ms
-[api] Application startup complete.
-GET http://127.0.0.1:8000/health -> {"status":"ok"}
-GET http://127.0.0.1:8000/api/actions -> 200
-GET http://127.0.0.1:3000/ -> 200
-Combined startup (Phase 1 record)
-npm run dev -> [web] ✓ Ready in 390ms
-[web] - Local: http://127.0.0.1:3000
-[api] Uvicorn running on http://127.0.0.1:8000
-[api] Application startup complete.
-GET /health
-curl http://127.0.0.1:8000/health
--> HTTP/1.1 200 OK
-content-type: application/json
-{"status":"ok"}
-CORS
-Origin: http://127.0.0.1:3000 -> 200, access-control-allow-origin:
-http://127.0.0.1:3000
-Origin: http://localhost:3000 -> 200, access-control-allow-origin:
-http://localhost:3000
-Origin: http://evil.example.com -> 200, NO access-control-\* headers
-(origin not echoed, no wildcard)
-OPTIONS preflight (allowed) -> 200, allow-methods: GET, POST
-allow-origin: http://127.0.0.1:3000
-Loopback binding
-/proc/net/tcp -> LISTEN 127.0.0.1:3000
-LISTEN 127.0.0.1:8000
-(nothing on 0.0.0.0)
-curl http://192.0.2.2:3000/ -> connection refused
-curl http://192.0.2.2:8000/health -> connection refused
-(192.0.2.2 = this host's non-loopback address)
-Frontend reaches backend (real browser, headless Chromium)
-Backend running:
-title "Local Data Workbench"
-h1 "Local Data Workbench"
-tagline "Local data-processing proof of concept."
-indicator "Backend Connected"
-requests made GET http://127.0.0.1:8000/health (direct, not proxied)
-console errors none
-
-Backend stopped:
-indicator "Backend Unavailable"
-console errors only the browser's own
-"net::ERR_CONNECTION_REFUSED" resource log lines;
-no uncaught page errors
-GET /api/actions over real HTTP (Phase 2.7)
-curl -i http://127.0.0.1:8000/api/actions
--> HTTP/1.1 200 OK
-content-type: application/json
-content-length: 584
-{"actions":[{"id":"example_passthrough", …}]}
-Full body parsed with json.tool: one Action, with id, version, name, description, inputs and outputs; the single input slot reports id=source_file, label="Source File", required=true, accepted_extensions=[".csv",".xlsx"], required_columns=[]; the single output reports id=passthrough_data, label="Passthrough Data", formats=["csv","xlsx"].
-
-OpenAPI schema (definitions are serialisable)
-curl http://127.0.0.1:8000/openapi.json
-paths -> ['/api/actions', '/health']
-schemas -> ['ActionDefinition', 'ActionInput',
-'ActionListResponse', 'ActionOutput']
-/api/actions 200 -> $ref #/components/schemas/ActionListResponse
-CORS on /api/runs (Phase 3)
-Origin: http://127.0.0.1:3000 -> access-control-allow-origin:
-http://127.0.0.1:3000
-Origin: http://localhost:3000 -> access-control-allow-origin:
-http://localhost:3000
-Origin: http://evil.example.com -> no access-control-_ headers at all
-(origin not echoed, no wildcard)
-Loopback binding (Phase 3)
-/proc/net/tcp -> 0100007F:1F40 state 0A (127.0.0.1:8000 LISTEN)
-nothing bound to 0.0.0.0
-http://192.0.2.2:8000/health -> connection refused
-(192.0.2.2 = this host's non-loopback address)
-CORS on /api/actions
-Origin: http://127.0.0.1:3000 -> 200, access-control-allow-origin:
-http://127.0.0.1:3000
-Origin: http://localhost:3000 -> 200, access-control-allow-origin:
-http://localhost:3000
-Origin: http://evil.example.com -> 200, NO access-control-_ headers
-OPTIONS preflight (allowed) -> 200, allow-methods: GET, POST
-allow-origin: http://127.0.0.1:3000
-max-age: 600
-Browser reaches /api/actions (real headless Chromium)
-Loaded http://127.0.0.1:3000/, then issued the cross-origin request from the page context — the same call the Phase 5 Action selector will make. No frontend application code was written or changed for this check; Playwright was installed outside the repository, in the session scratchpad.
-
-page origin http://127.0.0.1:3000
-fetch status 200
-action ids ['example_passthrough']
-input slots ['source_file (Source File) .csv/.xlsx']
-output ids ['passthrough_data']
-page errors none
-Combined startup after mounting the router
-npm run dev -> [web] ✓ Ready in 376ms
-[web] - Local: http://127.0.0.1:3000
-[api] Uvicorn running on http://127.0.0.1:8000
-[api] Application startup complete.
-[api] "GET /api/actions HTTP/1.1" 200 OK
-
-/proc/net/tcp -> LISTEN 127.0.0.1:3000
-LISTEN 127.0.0.1:8000
-http://192.0.2.2:8000/api/actions -> connection refused
-http://192.0.2.2:3000/ -> connection refused
-Type checking
-npx pyright -> 0 errors, 0 warnings, 0 informations
-(all backend source and test files, including
-every module added in Phase 3)
-Control test: appending a deliberately invalid assignment to backend/app/actions/registry.py reproduced a reportAssignmentType error, confirming pyright is actually analysing the new modules rather than skipping them. The file was restored and re-verified clean.
-
-Environment variable plumbing
-.env.local with NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8123
--> next dev reports "- Environments: .env.local"
--> browser requests http://127.0.0.1:8123/health
--> confirms the documented override in .env.example is real
-(.env.local removed afterwards; default fallback is what ships)
-Known Issues
-Next.js telemetry is enabled by default. Resolved in Phase 7K, by the repo-local option this entry itself proposes: the four npm scripts that run Next.js now export NEXT_TELEMETRY_DISABLED=1, and a test in test_local_exposure.py asserts that every such script carries it. The machine-global next telemetry disable was rejected for the reason given below — it writes outside the repository, so it would fix one machine and leave the next checkout sending telemetry again. Original text follows.
-
-Next.js telemetry is enabled by default. npx next telemetry status reports Enabled. This is Next.js's own anonymous build/usage telemetry to Vercel; it carries no uploaded data and no application data, so it does not violate build plan §8's rule about transmitting uploaded data. It is nonetheless an outbound network call from a deliberately local-only project. It was not changed in Phase 1, because disabling it via next telemetry disable writes to machine-global config outside this repository. Phase 7K ("verify no remote analytics/data calls") should make an explicit decision; the repo-local option is exporting NEXT_TELEMETRY_DISABLED=1 in the dev scripts.
-
-Two /health requests per page load in development. React Strict Mode (on by default in next dev) invokes effects twice. Expected dev-only behaviour, not a bug; a production build issues one request.
-
-Implementation host is Linux, not macOS. The build plan targets a Mac (§3.4 benchmark hardware, Phase 1.8 "Mac-compatible development script"). scripts/dev-backend.sh uses only portable POSIX/bash constructs and the standard backend/.venv/bin/python layout, so it should run unchanged on macOS, but this has not been executed there. Phase 7 performance numbers must be produced on the real target machine to mean anything.
-
-README.md is still the Create Next App default. Resolved in Phase 8.2. Rewritten from scratch: purpose, prerequisites with verified versions, the four setup commands, npm run dev and npm run dev:lan, the local URLs, the test and benchmark commands, lint and build, a section of its own on where Runs are stored (in memory, nothing on disk, cleared by a restart), the supported and rejected formats, and both Actions with their input slots, required columns and outputs. Every command in it was executed during Phase 8; see Known Issue 76. Original text follows.
-
-README.md is still the Create Next App default. It documents app/page.js (this project uses src/app/page.js) and http://localhost:3000 rather than the canonical http://127.0.0.1:3000, and it does not yet describe backend setup. Rewriting it is Phase 8.2.
-
-backend/requirements.txt pins direct dependencies only. Transitive dependency versions are left to pip. This is reproducible for the packages the project actually chose but is not a full lockfile. If exact reproducibility becomes necessary, a pip freeze lock can be added later.
-
-No backend test suite yet. Resolved in Phase 2. backend/tests/ now holds 48 tests, including regression coverage for /health and for the CORS behaviour of /api/actions, which Phase 1 could only verify manually.
-
-StarletteDeprecationWarning from the FastAPI test client. Running the suite prints:
-
-Using `httpx` with `starlette.testclient` is deprecated;
-install `httpx2` instead.
-Emitted by Starlette 1.6.0 at import of starlette.testclient, because httpx 0.28.1 is installed rather than the newer httpx2. It is a third-party notice, not a defect in this project's code, and it affects only the test client — never the running application. It is deliberately not suppressed (build plan 7A). httpx is the dependency build plan §6.2 names, so switching to httpx2 is a dependency decision that belongs to Phase 7A rather than to Phase 2.
-
-example_passthrough is a placeholder and must be removed in Phase 4. Resolved in Phase 4 and re-verified in Phase 5. backend/app/actions/example_passthrough.py no longer exists, its import and registry entry are gone, and ACTION_REGISTRY holds exactly ExactDuplicateRemoverAction and ProductMasterBuilderAction. The two tests that assert only that the application registry is non-empty with unique IDs still pass, as predicted.
-
-The Action contract is defined but has never executed inside a Run. Resolved in Phase 3. The contract now drives the real pipeline: Action.run(), Action.validate() and ActionResult are exercised through POST /api/runs, and RunManifest / PreviewResponse are produced from real Runs rather than from synthetic round-trips. The contract's shape held: no change to base.py, registry.py or schemas.py was needed to build the pipeline on top of it.
-
-Added in Phase 3:
-
-Phase 2 was committed into the wrong directory; repaired here. Commit 90dd7e8 placed the backend Python package under src/app/ instead of backend/app/, and named schemas.py as schema.py. The entire backend suite failed at collection (0 of 48 tests ran) and every intra-package import was unresolvable — the cause of the reported "Import ... could not be resolved" warnings. Repaired with git mv at the start of this session; see the Phase 3 entry under Completed. Nothing outstanding, but the earlier Phase 2 notes in this file describe a state that did not exist on disk until the repair.
-
-The upload limit is enforced after the request body has been received. Starlette's max_part_size bounds only non-file form fields, so the 250 MB limit is enforced while the runner copies each file into its Run directory. Starlette spools file parts to disk rather than memory, so an oversized upload cannot become a memory error, and the response is a clean 413 — but the bytes do reach the machine before being rejected. Enforcing it earlier would mean rejecting on Content-Length, which would wrongly reject a legitimate multi-file Action whose files are individually under the limit but collectively over it. Revisit in Phase 7 if it matters.
-
-A workbook whose second sheet holds even one cell is refused. \_select_data_worksheet treats any sheet containing cells as a data sheet, so a workbook with a data sheet plus a one-cell "Notes" tab raises AMBIGUOUS_WORKBOOK. This is the conservative reading of build plan section 17 ("Accuracy is more important than pretending to support every workbook") and is what the section's own error message tells the user to fix. A worksheet-selection UI is the intended later replacement.
-
-POST /api/runs executes synchronously. As build plan 3.12 requires — no job queue. A large upload therefore holds the request open for the duration of the Run. Phase 7G/7H will measure how long that actually is.
-
-Performance has not been measured. Measured in Phase 7G-7I — see Tests and Completed. The remaining half of this issue is real and is carried forward as Known Issue 82: the numbers were produced in a Linux container, and build plan section 3.4 asks for a Mac. Original text follows.
-
-Performance has not been measured. No benchmark fixtures were generated and no timing was recorded beyond incidental duration_ms values on tiny files. That is Phase 7G-7I, and must be done on the real target machine.
-
-Added in Phase 5:
-
-Phase 4 was implemented but never recorded in this file. Commit 584fea3 added both proof Actions, their fixtures and their tests, and removed the placeholder Action, but the session that did it did not update docs/implementation-status.md — the file still read "Last Completed Phase: Phase 3" and "Phase 4 … Not started" at the start of the Phase 5 session. Phase 5 verified the Phase 4 work by execution (311 tests passing, both definitions served by GET /api/actions, no frontend modification) and wrote the retroactive entry under Completed. That entry is a record of what was verified, not of how the work was done, and it does not claim the Phase 4 sub-steps were re-executed. Nothing is outstanding, but Phase 4's own testing narrative (4A-4E, and in particular the accented-text and Excel round-trip assertions) is described only by the tests themselves.
-
-The Run result view is intentionally minimal. Mostly resolved in Phase 6E. On success the UI now shows the row counts, the columns the result added or dropped, the Action's own metrics, output selection when a Run made more than one table, the paginated preview with type-aware alignment, validation warnings, the audit summary and the Run ID. Two pieces of the original list remain and are not 6E's: the CSV/XLSX download buttons belong to Phase 6F (Known Issue 47), and "Start New Run" was never a build-plan requirement — choosing another Action or replacing a file already clears the previous result. (The last sentence of the original entry is also now obsolete: since Phase 6D the backend writes no export to data/runs/<run-id>/exports/, because no such directory is created.)
-
-Client-side extension checking duplicates a backend rule. Build plan 5.7 requires the convenience check, so the accepted-extension list is evaluated in two places. The frontend copy is driven entirely by the accepted_extensions the backend sent for that slot, so the two cannot disagree about policy — but fileExtension() in src/lib/formatters.js is a second implementation of the backend's extension_of(), and the two would have to be changed together if the rule for deriving an extension from a filename ever changed. The backend remains authoritative: a file that slips past the browser is still refused with 422.
-
-ActionRunner holds all workflow state in one component. Six useState hooks plus a useRef guard, with no reducer, context or state library. At Phase 5's size this is the simpler option and keeps the data flow readable in one file. If Phase 6 adds output selection and preview paging on top, a useReducer may become the clearer expression; that is a refactor to judge then, not a defect now.
-
-Two /api/actions requests per page load in development. The same React Strict Mode double-invocation already recorded as Known Issue 2 for /health. Dev-only; the aborted first request is harmless and a production build issues one.
-
-Added in Phase 6A:
-
-InputMetadata.stored_filename and MANIFEST_SCHEMA_VERSION need an explicit decision in Phase 6B/6D. Resolved in Phase 6C: the field is kept and redefined as the generated name an input is known by, derived from its extension alone. It is still the evidence for build plan section 16's actual rule — that the client's filename never became a name the application used. MANIFEST_SCHEMA_VERSION stays 1, test_contract_freeze.py passes unmodified, and the docstrings in models/schemas.py and services/storage.py state the new meaning. See the Phase 6C entry for why dropping it was rejected. The original text follows.
-
-InputMetadata.stored_filename and MANIFEST_SCHEMA_VERSION need an explicit decision in Phase 6B/6D. stored_filename records the generated on-disk name (source.csv) and nothing is stored on disk in V1. The options are to drop the field — a manifest shape change, so MANIFEST_SCHEMA_VERSION must be bumped from 1 — or to keep it as the logical name of the in-memory input. The frontend does not read it today, so either is safe for the UI. It must not be dropped silently: the freeze test test_schema_field_names_are_frozen[RunManifest] will fail, which is the point.
-
-FORGEXL_DATA_DIRECTORY becomes a documented setting with no consumer. .env.example documents it and config.DATA_DIRECTORY / RUNS_DIRECTORY derive from it. Once run state lives in memory, nothing reads either constant. .env.example must be corrected in the same phase the constants are removed (6I), or the file will document a setting that does nothing.
-
-Roughly half the existing backend suite is coupled to the on-disk model and will need rewriting during 6B–6H. test_storage.py (57), test_runner.py (28), test_parser.py (26), test_preview.py (15) and test_export.py (11) assert directories, manifests on disk, stored uploads or Parquet files; parts of test_runs_api.py, test_action_round_trip.py and the two Action test modules do the same. That is expected work, not a defect — but the rule is rewrite them against the new runtime, never delete or skip one to make the suite green. test_actions.py, test_api.py, test_schemas.py and the new test_contract_freeze.py are already filesystem-free and must keep passing untouched throughout.
-
-The build plan's Phase 6 was renumbered after Phase 5 was written. See the note at the top of this file. Known Issue 16 and the Phase 5 entry refer to "build plan Phase 6 (6.1-6.9)", which no longer exists under that numbering; that scope now lives in 6E and 6F. Nothing is wrong in the codebase — only the cross-references in the older entries are stale, and they are left as written rather than rewritten after the fact.
-
-Phase 6 will supersede build plan section 28 (internal Parquet). Section 28 requires the preview to read working/<output-id>.parquet. Phase 6E.2 requires the preview to be built from the result DataFrame and explicitly forbids generating a temporary spreadsheet to read back. The Phase 6 architectural rules state that they override any earlier build-plan instruction that conflicts with them, so Parquet becomes unnecessary. This is recorded because it is a real, deliberate reversal of an earlier requirement, not an oversight.
-
-Added in Phase 6B:
-
-Run history no longer survives a backend restart. Run state is process memory in V1, so GET /api/runs/{id} returns 404 for a Run created before the last restart, and data/runs/<run-id>/manifest.json is no longer written or read. This is deliberate and is what build plan Phase 6 rules 14 and 15 authorise ("Run state may be stored in memory for V1", "Restarting the FastAPI development server may clear V1 run history"). It supersedes the manifest-as-file half of build plan §9.5, §11 and §23 — the manifest itself is unchanged and is still what the API returns, it is simply derived from the Run rather than read from disk. Recorded here because it is a real, deliberate reversal of an earlier requirement, not an oversight. The replacement, when persistence is wanted, is a PersistentRunStore (Known Issue 28).
-
-A backend restart orphans the run directories left on disk. Uploads, Parquet and exports are still written under data/runs/<run-id>/ until 6C/6D/6F, but the run record that made them reachable is gone after a restart, so nothing can serve or delete them. runner.delete_run() cleans up a Run it still knows about; it cannot clean up one the process has forgotten. This disappears entirely once 6F removes on-disk exports — the files it orphans are the files that stop being written. No action is needed in 6C-6E beyond not making it worse.
-
-Two functions are called create_run. run_store.create_run(run) records run state; storage.create_run(run_id) makes the directory tree the upload and the exports still need. They are always called through their module prefix, and the second disappears with the on-disk model, so renaming a working Phase 3 function purely for the duration of the migration was judged worse than the ambiguity — build plan Phase 6 rule 6 ("do not rewrite functioning Phase 0/1-5 functionality solely to conform to a new naming convention"). The one place they appear together carries a comment.
-
-InMemoryRunStore grows without bound within one process. Nothing evicts a Run, and V1 has no reason to: the process is a local development server, a Run's record is metadata measured in kilobytes, and delete_run() exists for a caller that wants one gone. It becomes a real question only when 6D/6E start retaining result DataFrames in the run — that is where a retention policy belongs, alongside 6D.8's "allow memory associated with abandoned processing to be released".
-
-Known Issue 20 is deferred to 6C, not resolved. Resolved in Phase 6C — see Known Issue 20. Original text:
-
-Known Issue 20 is deferred to 6C, not resolved. InputMetadata.stored_filename still records a real generated on-disk name because 6B did not change upload handling. 6C is where the upload stops reaching disk and the field must either be dropped (bumping MANIFEST_SCHEMA_VERSION) or redefined as the logical name of the in-memory input.
-
-Known Issue 22 is partly worked off. Of the roughly half of the suite coupled to the on-disk model, 6B rewrote the run-state part: test_storage.py (57 -> 53) and test_runner.py (28 -> 32). The parts coupled to stored uploads, Parquet and exports — test_parser.py, test_preview.py, test_export.py and the on-disk parts of test_runs_api.py, test_action_round_trip.py and the two Action test modules — are still ahead, in 6C, 6D, 6E and 6F.
-
-Added in Phase 6C:
-
-Phase 6B was committed into the wrong directory; repaired here. Commit 679fff4 ("phase 6B complete") wrote models/run.py, models/**init**.py, services/run_store.py, services/**init**.py, services/runner.py, services/storage.py and api/runs.py under src/app/ — the Next.js App Router directory — instead of backend/app/. This is Known Issue 10 recurring identically for Phase 6B. backend/app/ had no Run model and no Run Store, and the whole suite failed at collection with ImportError: cannot import name 'run_store' from 'app.services' — 0 of 457 tests ran. Repaired at the start of this session with git mv, so history is preserved and no file content was edited; the suite then reported 457 passed. Nothing is outstanding, but the Phase 6B entry above describes a state that did not exist under backend/ until this repair, and any future session must check that new backend modules landed under backend/app/ before reporting a phase complete — this has now happened twice.
-
-backend/tests/test_runner.py was destroyed by the Phase 6B commit and has been rebuilt. The file was overwritten with a byte-identical copy of tests/test_run_store.py (verified: identical md5), so Phase 3's entire runner pipeline module was gone and the 457-test count was inflated by 34 Run Store tests collected twice. The Phase 6B entry's claim of "test_runner.py 28 -> 32" describes work that is not in the repository. The Phase 6A version (28 tests, commit f481552) was recovered and carried forward: through 6B (outcomes read from the Run Store rather than manifest.json, plus run-recording and lifecycle-deletion coverage) and through 6C (uploads in memory), reaching 45 tests. The rebuild is a reconstruction from the 6A source plus the documented 6B intent, not a recovery of the 6B session's actual edits, which were never committed.
-
-A failed Run still creates two empty directories. storage.create_run() builds working/ and exports/ before the inputs are read, so a Run that fails validation leaves both behind empty — and, since 6C, with nothing else in the Run directory at all. Moving the call later would be a behaviour change 6C does not ask for, and both directories disappear when 6F generates exports in memory. Harmless interim state; no action needed in 6D or 6E beyond not making it worse.
-
-An upload is held in memory at up to MAX_UPLOAD_BYTES. That is the architecture Phase 6 mandates, and the read is bounded so the buffer never exceeds the limit — but with the 250 MB default, a single upload can hold 250 MB of process memory, and bytes(buffer) briefly doubles that at the moment the payload is finalised. The runner releases the payloads as soon as they have become dataframes, which keeps the peak to the parse itself rather than the Run's whole lifetime. Phase 7G-7I is where the real figure should be measured on the target machine; if it matters, the lever is FORGEXL_MAX_UPLOAD_BYTES, which is already configurable.
-
-Known Issue 11 has changed shape. The upload limit is still enforced after the request body has reached the machine (Starlette's max_part_size still bounds only non-file fields), but it is now enforced while the runner reads the part into memory rather than while copying it to disk. Starlette still spools file parts, so an oversized upload still cannot become a memory error, and the response is still a clean 413. The underlying trade-off is unchanged; only the location of the check moved.
-
-Known Issue 22 is further worked off. Of the roughly half of the suite coupled to the on-disk model, 6C rewrote the upload and parsing part: test_parser.py (26 -> 36, now entirely byte-based), the upload half of test_storage.py (53 -> 60) and the upload assertions in test_runs_api.py (46 -> 49). test_export.py and test_action_round_trip.py now read spreadsheets back from bytes rather than paths, though the artifacts they read are still written to disk. What remains coupled is the output side — test_preview.py (Parquet), test_export.py (the three written artifacts) and the download half of test_runs_api.py — which is 6E's and 6F's work.
-
-Added in Phase 6D:
-
-backend/tests/test_runner.py was destroyed by the Phase 6C commit and has been rebuilt — the second time this has happened to this file. Commit 70c41b1 ("phase 6C fix") left test_runner.py byte-identical to tests/test_runs_api.py (verified: identical md5 in the commit itself, not only on disk). Known Issue 32 recorded the same failure for Phase 6B, where the donor was test_run_store.py. The Phase 6C entry's claim of "test_runner.py … reaching 45 tests" describes work that is not in the repository. The Phase 6A version (28 tests, commit f481552) was recovered and carried forward through 6B (outcomes read from the Run Store), 6C (uploads in memory) and 6D (results in memory), reaching 51 tests. It is a reconstruction from the 6A source plus the documented 6B/6C intent, not a recovery of those sessions' actual edits, which were never committed — which is why its count differs from the 45 the 6C entry claims.
-
-This class of defect has now occurred four times (Known Issues 10, 31, 32 and this one). Any future session must, before writing any code, verify that (a) new backend modules landed under backend/app/ and not src/app/, and (b) no two test modules are byte-identical:
-
-cd backend/tests && md5sum \*.py | awk '{print $1}' | sort | uniq -d
-An empty result is the passing condition.
-
-backend/tests/test_storage.py was never updated by the Phase 6C commit, and the committed suite therefore failed. The file in 70c41b1 is byte-identical to its Phase 6B version, so it still asserted storage.store_upload() and RunPaths.input_directory() — both removed by Phase 6C. cd backend && .venv/bin/python -m pytest on the committed state reported 25 failed, 460 passed. The Phase 6C entry's claim of "test_storage.py 53 -> 60, upload half rewritten" describes work that is not in the repository. The module was rewritten in this session against the Phase 6C in-memory intake (read_upload, LoadedUpload, and the stronger "a hostile slot ID reaches no path at all" assertion), reaching 64 tests, and the suite was brought to green before any Phase 6D code was written.
-
-services/storage.py now holds dead runtime code. create_run(), RunPaths and its working / exports / working_artifact / export_artifact members, run_paths(), runs_directory() and delete_run_directory() are no longer called by anything in app/ — the pipeline builds no path at all. They were deliberately left in place: build plan 6I.1 explicitly owns removing "run-directory creation … working-directory creation … export-directory creation … path-building helpers", and removing them in 6D would be doing a later phase's work. tests/test_storage.py still covers them, so they cannot rot silently in the meantime. config.DATA_DIRECTORY and RUNS_DIRECTORY are likewise now read only by this dead code and by the test fixtures — see Known Issue 21, whose .env.example correction is due in the same phase.
-
-A Run's result frames stay in memory for the life of the process. Known Issue 28 predicted this would become a real question "when 6D/6E start retaining result DataFrames in the run" — it now has. InMemoryRunStore evicts nothing, so a session that runs twenty 50,000-row Actions holds all twenty result frames until the backend restarts or delete_run() is called. Nothing calls delete_run() today: no route exposes it (build plan 6B asks for the capability, not an endpoint). For a local single-user POC this is acceptable and is what build plan Phase 6 rules 14/15 authorise, and 6D.8's actual requirement — that the memory can be released — is met and pinned by a weakref test. A retention policy or an eviction rule is a real decision for Phase 7J ("Memory/Architecture Review"), which is where the measurement belongs.
-
-Build plan section 28 (internal Parquet) is now superseded in code, not just on paper. Known Issue 24 recorded the reversal as deliberate and predicted 6E would carry it out. 6D's completion criteria ("no required working/ directory") forced it a phase earlier, so working/<id>.parquet is no longer written and pl.scan_parquet no longer appears in the backend. Nothing is outstanding; the cross-reference in Known Issue 24 and in the Phase 6C notes is simply a phase off.
-
-Preview and download changed mechanism in 6D rather than in 6E/6F. docs/phase-6a-compatibility-audit.md §7.1 assigns preview.read_preview to 6E and export.py / the download route to 6F. Once 6D stopped writing files, leaving those two reading files would have broken two working endpoints, so both were re-pointed at the retained frames. Only the mechanism moved: the PreviewResponse shape, the 100/500 limit rules, the download media types and the <output-id>.<format> filename are all byte-identical to their pre-6D behaviour. What 6E and 6F still own is listed under Next Phase. Recorded because it is a real, deliberate departure from the Phase 6A migration schedule, not an oversight.
-
-A failed Run still creates two empty directories (Known Issue 33). Resolved in Phase 6D: no directory is created at all.
-
-A backend restart orphans the run directories left on disk (Known Issue 26). Resolved in Phase 6D, exactly as that issue predicted: the files it orphaned are the files that stopped being written.
-
-Two functions are called create_run (Known Issue 27). Resolved in Phase 6D: storage.create_run() is no longer called by anything, so run_store.create_run() is the only one in the pipeline.
-
-Known Issue 22 is now fully worked off. The half of the suite that was coupled to the on-disk model has been rewritten against the new runtime, in four stages: 6B (run state), 6C (uploads and parsing), and 6D (the output side — test_export.py 11 -> 15, test_preview.py 15 -> 17, and the download/preview half of test_runs_api.py). Nothing in the suite now reads or writes a Run artifact. test_actions.py, test_api.py, test_schemas.py and test_contract_freeze.py remain untouched throughout, as that issue required.
-
-Added in Phase 6E:
-
-Results cannot be exported from the browser yet. Resolved in Phase 6F, which owns export. ExportButtons.jsx renders one link per format the backend offers for the selected output, plus the whole-Run workbook link when a Run has more than one result table. Known Issue 16 is now fully closed: the results view shows status, metrics, the paginated preview, validation warnings, the audit summary and export.
-
-test_contract_freeze.py is no longer "unchanged since 6A". It was amended once, in this phase, for the manifest-shape change build plan 6E.1/6E.4/6E.5 requires. Three schema field lists, the MANIFEST_SCHEMA_VERSION assertion and one PreviewResponse construction changed; every other assertion is untouched. Recorded because the module's value came from passing unmodified, and a future session must be able to see that the change was a decision rather than drift. It was amended a second time in Phase 6F, by one line: the whole-Run workbook route of 6F.4 was added to FROZEN_ROUTES. That is an addition to the published surface rather than a change to any part of it, and the module's docstring now records both amendments. 6G, 6H and 6I should leave it unchanged — none of them has a reason to alter a frozen contract, and 6G in particular changes the browser-side prefix, not the server routes.
-
-MANIFEST_SCHEMA_VERSION is 2, and nothing reads a version 1 manifest. The bump is honest — the new required fields mean an old manifest would not validate — but it has no consumer, because Phase 6B stopped writing manifest.json and no manifest outlives the process. The constant is documentation of a shape change, not a migration path. It becomes load bearing only if run history is ever persisted (the PersistentRunStore extension point 6I.8 records).
-
-The audit duplicates facts the manifest already carries. audit.action, audit.status, audit.metrics, audit.warnings, audit.errors and audit.duration_ms restate manifest fields, and audit.inputs restates part of manifest.inputs. That is what build plan 6E.5 asks for — an assembled explanation — and the duplication is made safe by deriving the audit in Run.to_audit() rather than storing it, with a test asserting the two agree field by field. It does make the response body larger; the cost is a few hundred bytes on a metadata payload that never contains rows.
-
-rows_affected is only as good as the Action that reports it. The runner cannot verify the figure — it is the Action's own claim about what it did, exactly as the metrics dict is. A test proves the measured metadata (row counts, columns, schema) cannot be corrupted by an Action that reports a wrong count, but a wrong rows_affected would be displayed as given. Both real Actions compute it from the same two heights the freeze test already checks for internal consistency.
-
-Two preview requests per page in development. React Strict Mode invokes effects twice in next dev, so selecting a result table fires the preview fetch twice. The same dev-only behaviour as Known Issues 2 and 19; a production build issues one request. Observed directly during the browser verification.
-
-A very wide result relies on horizontal scrolling alone. The preview table scrolls inside its own overflow-x-auto box, which is what build plan section 31 requires, but there is no column freezing or column selection — a 60-column result means a lot of scrolling. Deliberately out of scope: section 31 also says not to add a spreadsheet component to the POC.
-
-Added in Phase 6F:
-
-Phase 6E was complete on an unmerged branch, not on main. The repository this session started in was at phase 6D complete; 6E lived on claude/forgexl-phase-6e-fe009v (commit 1caab84), which main did not contain. The 6F branch was re-based onto that commit — a fast-forward, since 6D is its ancestor — so no 6E work was skipped or duplicated. Recorded because it will recur: a session told "phases 0-6X are complete" must check git branch -r, not only the checked-out branch, before concluding that work is missing. Merging the phase branches into main would remove the hazard.
-
-The XLSX export used to write 12 temporary files per download. Resolved in this phase and recorded because it stood, unnoticed, from Phase 3 through 6E — including through 6D, whose whole point was that a Run writes nothing. Polars' write_excel opens its own xlsxwriter.Workbook, and xlsxwriter spools workbook parts through the OS temporary directory unless in_memory is set, which Polars does not set. The 6D-era test that asserted "nothing is written" only watched the current working directory and data/runs, so /tmp went unobserved. The new test spies on tempfile itself. The lesson generalises: an assertion that nothing was written must name where it looked.
-
-Excel used to display the user's numbers with a format they never had. Also resolved in this phase, also long-standing. Polars applies #,##0.000;[Red]-#,##0.000 to numeric columns, which showed 0.000123 as 0.000. The stored value was always exact, so no test comparing values caught it; the defect was only visible to a human opening the file. Now written with General. Date formats are deliberately kept.
-
-The whole-Run workbook is not offered as CSV. Deliberate: a CSV file holds one table. A user who wants every table as CSV downloads each one. Noted so a future session does not read the asymmetry as an oversight.
-
-export.WORKBOOK_OPTIONS reproduces four Polars defaults by hand. Opening the workbook in export.py — which 6F.2 and 6F.4 both require — means Polars no longer applies use_zip64, nan_inf_to_errors, strings_to_formulas and default_date_format itself, so they are set explicitly. If a future Polars release changes one of those defaults, ForgeXL will keep the old one until this constant is updated. The values are commented with what each is for, and strings_to_formulas: False has its own test because it is a data-safety rule (build plan section 16), not only a default.
-
-Downloads are stamped in UTC, not local time. A user in UTC-7 downloading at 8:45 pm gets a filename reading 20260901-034512. The alternative — local time — would rename a Run when the machine's timezone changed, and would sort a downloads folder incorrectly across a timezone move. Recorded because the number in the filename will not match the user's wall clock. It is not used for anything but naming; the manifest carries the real ISO timestamps.
-
-A worksheet name numbered for the reserved word "History". An output labelled History becomes History 2, because Excel reserves History and refuses to open a workbook that uses it. The number reads oddly with no "History 1" beside it. It is valid, understandable enough, and loses no data; a better rename is not worth a special case for a label neither real Action uses.
-
-npm run build was broken on main before Phase 6G, and had been since the components were written. ActionRunner.jsx imports @/components/workbench/ExportButtons; the file on disk was ExportButton.jsx. Not a case difference — a missing letter — so it failed on every filesystem, and next build reported Module not found rather than producing a bundle. This document has referred to the file as ExportButtons.jsx since the Phase 6F entry, so the file was renamed to that name rather than the import being changed. Resolved; recorded because it means no build since Phase 6F's session had actually succeeded.
-
-The proxy forwards exactly two response headers, and re-frames the request. Coming back, only Content-Type and Content-Disposition are copied from FastAPI — enough for every response ForgeXL sends today, but a header a future endpoint adds (an ETag, a Cache-Control) has to be added to FORWARDED_RESPONSE_HEADERS or it will not reach the browser. Going out, content-length is dropped and the upstream request is chunked, so FastAPI no longer learns the body's size from a header; nothing depends on that — storage.read_upload counts the bytes it actually receives rather than trusting a header, which is why the 250 MB limit still holds exactly. Both are deliberate; both are the kind of thing a later endpoint could trip over quietly.
-
-next dev's HMR websocket is refused with 403 from this container's only non-loopback address. That address is 192.0.2.2 (TEST-NET-1, assigned by the sandbox; a real LAN never uses it). Headless Chromium's ws://192.0.2.2:3000/\_next/hmr handshake is answered 403 and the page then never hydrates, while the same browser against 127.0.0.1:3000 on the same dev server hydrates normally, and a curl websocket handshake carrying the same Origin is answered 101. Adding the host to allowedDevOrigins — by the FORGEXL_DEV_ALLOWED_ORIGINS variable and by editing the list directly — did not change it, so the cause is not that allowlist and has not been identified. It is dev-only (there is no HMR in a production build), it is specific to this address, and it is unrelated to anything Phase 6G changed. The browser acceptance was therefore run against next start. A real second Mac on a real 192.168.x LAN would not hit this, but that has not been demonstrated — see Known Issue 64.
-
-The two-machine acceptance of build plan 6G.7-6G.9 has not been performed on real hardware. This session had one ephemeral Linux container and no second laptop. What was done — a real headless Chromium, driving the real UI, over a real non-loopback address, uploading a real 12.38 MB file from a real filesystem, downloading and reopening the result — exercises the whole path the second laptop uses, but it does not prove the two things only a second machine can: that a Mac's own file picker and Finder drag-and-drop behave the same, and that the exported workbook opens correctly in Microsoft Excel. Both remain the user's to run, on the two Macs, before 6G is called accepted on the target hardware. Nothing in the code is expected to change if it fails; the finding would be a UX or Excel- compatibility one.
-
-Added in Phase 6H:
-
-Resolved before Phase 6I: mixed numeric/text XLSX values were silently lost. The old preferred read turned [10, "n/a", 2.5, None, -3, 0] into [10.0, None, 2.5, None, -3.0, 0.0]. The user explicitly authorised blocker repairs on 2026-09-05 and deferred Phase 6I to the next session.
-
-The preferred engine now uses strict, full-column inference. Because the pinned fastexcel version can still null literal n/a under those settings, nullable columns are checked against an explicit text read of the same worksheet. A newly blanked cell triggers the existing openpyxl fallback; genuine blanks do not. Homogeneous columns keep their native types. Incompatible cell types in the fallback become text, with a visible MIXED_COLUMN_TYPES validation/audit warning naming the affected columns. The manifest records openpyxl when that engine produced the input frame.
-
-The original regression remains, its strict xfail marker is removed, and its assertions now check all six values, not just one non-null cell. Additional tests cover null-like strings, text after row 1,000, mixed booleans/numbers, fallback failure, and both real Actions through preview and CSV/XLSX downloads. No test was weakened. The suite has no xfails. See Pre-6I Blocker Repairs for verification and remaining limitations.
-
-The /forge-api proxy still has no committed regression test. Build plan 6H's eight required items are all about spreadsheet fixtures and backend execution, its completion criterion is about "ForgeXL's spreadsheet engine", and a committed browser or Node suite would mean a second test runner and a new dependency — scope this phase was not given. So the answer to the design question Phase 6G left open ("does the committed suite drive Next.js too?") is no, deliberately.
-
-What that leaves uncovered is specific and worth naming: the Route Handler at src/app/forge-api/[...path]/route.js must keep streaming the request body. Any change that reads it — a log line, a size check, a formData() call — silently reintroduces the 10 MiB truncation Phase 6G fixed (Deviation 43), and nothing in the repository would catch it. The backend suite cannot: FastAPI never sees the handler. Deviation 22 (no frontend test suite) therefore still stands, and this remains a Phase 7A decision, exactly as that deviation says.
-
-tests/helpers.xlsx_bytes used to write text beginning with = as an Excel formula. xlsxwriter's default, never overridden, so a fixture cell containing =SUM(A1) became a formula and read back as its cached value (0). Fixed in this phase by setting strings_to_formulas: False, the same setting app.services.export already applies to real exports.
-
-Recorded because it stood from Phase 3 until now and because of what it implies: a fixture builder that silently converts data cannot be used to prove the application never does. No existing test depended on it — the one test that wants a real formula calls write_formula explicitly — and the suite was green before and after. The lesson generalises, and matches Known Issue 55's: a test's evidence is only as good as the fixture it was built from, so the fixture builder deserves tests of its own. It now has 122.
-
-The larger fixture is generated per run, not cached. The open question Phase 6G recorded. Generated won: a stored multi-megabyte blob is a second artifact that can drift from the code that reads it, and build plan 6H.8 wants no spreadsheets in the repository at all. The cost is real but small — at 25,000 rows the workbook takes ~1.0 s to write, which is most of the difference between a 7-second suite and a 6-second one. If the suite ever needs to be faster, LARGE_ROW_COUNT in tests/fixtures/action_cases.py is the one knob, and the expected output stays correct at any value because it is closed form.
-
-The end-to-end suite exercises TestClient, not a running server. Every test in test_end_to_end.py, test_input_slots.py and test_failure_regressions.py drives the real FastAPI application in process. That covers routing, validation, execution, preview, export and every error shape, but it is not the same as an HTTP socket: it does not exercise uvicorn, the proxy hop (Known Issue 66), or anything about multipart framing that Starlette's test transport smooths over. The real-HTTP and real-browser verifications of Phases 6E-6G remain the evidence for that layer, and they still live in the session scratchpad (Deviation 22).
-
-Known Issue 65 is now resolved by the user-authorised pre-6I repairs. No remaining code blocker was found in this repair pass. Known Issue 64 remains an outstanding target-hardware acceptance check; the other deferred work keeps its existing phase ownership.
-
-Added in Phase 7:
-
-Committed state that did not match its own record — the seventh instance, and a new variant. Three defects were found before any Phase 7 work, and two of them were recorded as already done in the Phase 6I entry: backend/app/api/upload-form.py was still present beside upload_form.py (byte-identical, an unimportable module name), and backend/tests/test_mixed_xlsv_round_trip.py was still misspelled. The entry describes both as git mv renames; the commit contains an add and no rename. The third was live: test_export.py still declared the runs_dir fixture 6I deleted, so the committed suite reported 1,018 passed, 1 error rather than the documented 1,019 passed.
-
-Known Issues 10, 31, 32, 37, 38 and 70 are the same family. What is new is that the check list catches a repository that cannot run, and nothing was checking a phase entry against the tree it claims to describe — two of these three were invisible to a green suite. The check list at the end of this document now includes a search for duplicate module content across backend/app as well as backend/tests, which is what would have caught the hyphenated file.
-
-A mixed numeric column carries floating-point precision. One Polars column holds one type, so a column containing both a decimal and an integer larger than 2^53 is inferred Float64, and 2^53 + 1 reads back as 2^53. The conditions are narrow and all three are pinned by tests: an integer-only column is exact at any size (Polars widens past 64 bits when the file asks for it), a column holding any text stays text and loses nothing, and only the mixed case is affected.
-
-Not repaired, deliberately. This is IEEE-754, the same representation Excel itself uses, so the same file shows the same number there — and repairing it means changing how numeric columns are inferred, which is an architecture decision outside this phase (build plan section 14). Recorded because build plan Phase 7's exit criteria require known limitations to be documented, and because a value that changed silently is exactly what section 3.3 is about, even when the cause is the number system rather than the code.
-
-A refused XLSX download is shown as a JSON body, not as an in-page message. ExportButtons.jsx renders each export as a plain link, which build plan 6F and section 29 ask for — the browser follows it as an ordinary navigation, so the file streams to the downloads folder and never becomes a copy of the result in page memory. The consequence is that when a download is refused, the browser displays the structured error body rather than the page rendering it. The message is readable and complete — it names the column, both numbers and the CSV alternative — but it appears in a new tab instead of beside the result.
-
-Turning the links into fetch calls would fix the presentation and undo the reason they are links. That is a Phase 6F design decision to revisit, not a Phase 7 repair, and the case is rare: it needs a result past an Excel limit. Confirmed in the browser verification.
-
-The XLSX export of a large result is the slowest operation in ForgeXL. Measured: 3.3 s in process for a 100,000-row frame, 1.5 s over the proxy for the 100,000-row result actually produced (the difference is the column count). It is xlsxwriter's cost, not ForgeXL's — the same 100,000 rows export to CSV in 12 ms. Nothing is wrong and nothing is being fixed; it is recorded so that a future session reading "exports are generated per request" (6F.7) knows what that costs at size. It does not affect Run timings, because since Phase 6F an export is generated at download time and not during the Run.
-
-The XLSX parser still reads the worksheet three times. Down from four (see Completed → 7J), and each remaining pass is required by a stated rule: the ambiguity probe of build plan section 17, which now also supplies the header for the duplicate-name check; the main load; and the nullable text re-read that repairs Known Issue 65, which only runs when a column contains nulls. calamine parses a whole sheet on every load_sheet regardless of n_rows, so each pass costs a full parse — about 250 ms per pass at 100,000 rows. Removing another would mean giving up one of those correctness rules, which build plan 7J's "do not perform speculative micro-optimization" does not ask for. Recorded so the cost is known rather than rediscovered.
-
-Performance has been measured, but not on the target machine. Known Issue 14 is resolved in substance: every figure build plan 7G, 7H and 7I asks for now exists, repeated five times each, with the spread printed beside the median. But build plan section 3.4 specifies "ordinary modern Mac hardware" and every number in this document was produced in a Linux container (Known Issue 3). The margins are large — 0.016 s against a 15 s acceptance threshold — so the conclusion is very unlikely to change, but the measurement on the Mac is still owed and is the user's to make. The harness is committed and takes one command.
-
-Added in Phase 8:
-
-Committed state that did not match its own record — the eighth instance, and the same file twice. backend/tests/test_mixed_xlsv_round_trip.py was misspelled (xlsv for xlsx). Phase 6I's entry records the rename as done; it was not done. Phase 7 found that, repaired it, and recorded it under its own Files renamed — and the rename is not in commit d3a0676 either: git log --diff-filter=R shows no rename in that commit at all. So two consecutive phases recorded the same rename and neither performed it. Renamed with git mv in Phase 8; no content was edited.
-
-This is the eighth instance of the family Known Issues 10, 31, 32, 37, 38, 70 and 77 name, and the second where a phase entry describes work that is not in the tree. It is invisible to the test suite for the reason Phase 7 already identified — pytest collects test\_\*.py by glob, so a misspelled test filename runs exactly as well as a correct one — which is why the check that catches it is now first in the list at the end of this document: read the last phase's "Files created / modified / renamed / deleted" lists against git show --name-status for its commit, before trusting any of them.
-
-The underlying cause is unchanged and is not a code defect: work is reported in this document by the session that did it, and nothing verifies the report against the commit. Nothing in the application is affected by any of the eight.
-
-The proof of concept's two outstanding validations both need hardware this session does not have. Not new, but they are now the only things standing between Phase 8 and a fully evidenced GO, so they are restated here rather than left in the middle of the list: the two-machine acceptance (Known Issue 64) and the Mac performance run (Known Issue 82). Both are the user's to perform, neither requires a code change, and neither is expected to change the recommendation. See Completed → Phase 8 → build plan §36.
-
-Added in Phase 9:
-
-The same rename has now been recorded as done by three consecutive phases and performed by none of them — the ninth instance of this family. backend/tests/test_mixed_xlsv_round_trip.py (xlsv for xlsx) was recorded as renamed by Phase 6I, again by Phase 7, and again by Phase 8. git log --diff-filter=R shows the rename in none of 2513e0e, d3a0676 or 60817e8; git show --name-status 60817e8 lists four modified files and no rename at all. Phase 9 found it still misspelled and repaired it with git mv.
-
-What is probably happening, and what would actually fix it. Each phase ran git mv and then wrote its report, and the rename is genuinely staged when the report is written — git status shows it, which is what the report is written from. What no phase has verified is the commit: the commits are made after the report, and something between the two is losing a staged rename. A staged rename is also invisible to every other check in the list, because pytest collects test\_\*.py by glob and a misspelled filename runs exactly as well as a correct one.
-
-So the fix is not another git mv. It is: after committing, run git show --name-status HEAD and confirm every rename the report claims is in it. That check has been added to the list at the end of this document, positioned after the commit rather than before it. Until a phase does that, the tenth instance is likelier than not.
-
-Family: Known Issues 10, 31, 32, 37, 38, 70, 77, 83 and this one.
-
-The Data Library is built and connected to nothing. Deliberate — build plan Phase 9 ends before ingestion, and the assignment forbade preparing later phases — but worth stating plainly so it is not mistaken for an oversight: no route reaches it, no Action knows it exists, the runner does not import it, and nothing calls ensure_known_datasets(). A reader who starts the application and looks for data/library/ will not find it, and that is correct. Phase 10 fills it; Phase 11 lets an Action read it.
-
-list_versions reads one JSON file per version. The library has no index file, on purpose: the layout is the catalogue, so nothing can disagree with the data it describes. The cost is that listing a dataset's versions opens every version record, and the derived queries built on it (current_versions, superseded_version_ids, current_version) each do a full listing — so current_version(..., period) reads every record to answer about one month.
-
-At the scale this is designed for — one version per month, a handful of corrections — that is a few dozen small files and is not worth optimising. It would matter if a dataset ever accumulated thousands of versions, or if a report resolved a period inside a loop. An index or a per-instance cache would both reintroduce something that can go stale, so neither was added speculatively; if Phase 13's report generation makes this visible, measure it first.
-
-The Data Library's write lock protects one process, not one directory. LocalDataLibrary holds a threading.Lock, which closes the real hazard: Uvicorn runs synchronous endpoints in a thread pool, so two commits can arrive at once and every write here is a check-then-write against state on disk. That is tested, and the test was checked against an unlocked build.
-
-Two separate processes sharing one library directory are not protected. Two backends could both decide September was free and both publish, leaving two live versions of one month — which current_version reports as DATA_LIBRARY_ERROR rather than silently picking one, so the damage is visible rather than silent. ForgeXL is a local single-user application and two concurrent backends are not a supported configuration; a file lock would be the fix if that ever changes.
-
-Added in Phase 10:
-
-The Phase 9 entry says package.json is untouched, and the commit modifies it. git show 63e69fb -- package.json shows a "test" script added: (cd backend && .venv/bin/python -m pytest). The Phase 9 entry states twice that package.json is untouched.
-
-Harmless in substance — the script is correct and useful, and it is what npm test now runs — but it is the inverse of the Known Issue 85 family: there, work reported as done was missing from the commit; here, work in the commit is missing from the report. The same cause and the same fix apply, and the fix worked this time: git show --name-status HEAD after committing, read against the report. Phase 10 ran it and its lists match.
-
-The account-assignment source schema is provisional. Marked confirmed=False, asserted by a test, and documented in docs/monthly-source-schemas.md with the procedure to confirm it. The user was explicit that it should be built this way.
-
-What is not at risk: the shape of the ingestion layer, which reads a schema and names no column of its own. Confirming it is an edit to one declaration plus one test assertion.
-
-What is at risk until it is confirmed: a real export whose account or rep column is spelled differently will be refused with SOURCE_SCHEMA_MISMATCH naming Customer / Sales Person as missing. That is the intended failure — it reports rather than guesses — but it will happen on the first real file if the guess is wrong. Two choices minimise the blast radius: the names are taken verbatim from the confirmed transaction schema rather than invented, and only two columns are required, so extra columns in the real export do not add to the risk.
-
-The ingestion layer is reachable in-process and from nowhere else. Deliberate, and the direct successor to Known Issue 86: build plan Phase 10 describes no route and no UI, and the monthly reporting workflow is 15A. A reader who starts the application will find no way to import a month, and that is correct for this phase. FROZEN_ROUTES is byte-identical.
-
-FUTURE_DATED_ROWS refuses a month rather than warning about it. A single mistyped invoice date in the future — 2027-09-04 for 2026-09-04 — refuses the whole file. That is deliberate (Deviation 70): the row would otherwise be committed into a month that has not happened, and the month a row lands in is the one thing this layer exists to get right. But it is strict, the fix is on the source side, and if real exports turn out to carry legitimately future-dated rows this is the first rule to revisit. The check takes an injected today, so relaxing it is local.
-
-Reading a stored history means reading one Parquet file per month. The Data Library stores a version per reporting period, so a report covering two years reads 24 files and concatenates them. That is the right storage model — it is what makes one month correctable and current_version(period) answerable — and at monthly granularity the cost is small. It compounds Known Issue 87, which is about the metadata reads; both would matter together only if Phase 13's report generation resolves periods in a loop. Measure before optimising.
-
-Added in Phase 11:
-
-No registered Action reads the Data Library. The successor to Known Issues 86 and 91, and deliberate for the same reason: build plan 11A says the two proof Actions must not have to change, and Phase 11 is about the input contract rather than about a new Action. So the library-backed path exists, is fully tested, and is exercised by no Action a user can select. A reader who starts the application will see the same two Actions as before and no way to reach stored history, and that is correct for this phase. The first Action that reads the library is build plan Phase 13's monthly report.
-
-The consequence worth stating: the path was verified by hand against a real backend and a real library, because pytest alone cannot exercise what no registered Action does. See Tests → Phase 11 verification of the library-backed path.
-
-The reference form is text in a multipart field, and it is not versioned. latest, period:YYYY-MM and version:<id> cross the wire as one form field beside the uploaded files. That is the smallest thing that works in the existing POST /api/runs contract and adds no route, which is what a phase describing no HTTP surface should do. It is also a string grammar, and string grammars accumulate cases. If build plan 15A wants a richer selection — a range of months, several versions in one slot — it should decide the shape then rather than extending this one; DatasetSelector is a single parse function with a single as_text, so replacing it is local.
-
-There is no way to choose a dataset version in the browser. Direct consequence of 94, and equally deliberate. FileUploadSlot renders an upload control for every slot it is given; a library-backed slot would render as a drop zone that does nothing. It cannot happen today, because no registered Action has one. Building the picker also needs endpoints to list datasets and versions, which no phase has authorised and which build plan Phase 11 does not describe. Do not add either speculatively — build plan 15A owns the monthly reporting UI and is where the shape of that choice should be decided. A phase that registers a library-backed Action before then must handle the frontend in the same phase.
-
-latest is a rule, and the rule is a judgement. Build plan 11D permits a moving concept and does not say what "latest" means. It is implemented as the greatest reporting month among live versions, not the most recent commit, because a corrected old month is committed last and answering "latest" with it would be wrong. That is the right answer for monthly history; it is worth knowing it is a choice this implementation made rather than one the build plan specified, and test_latest_is_the_newest_month_not_the_newest_commit is where it is pinned. A dataset whose versions carry no period at all sorts below every version that has one — nothing the ingestion layer produces is period-less, so that branch exists only because the model permits it.
-
-A library-backed slot reads exactly one version. Build plan 11B's diagram is singular — one reference, one version, one DataFrame — and that is what was built. A report covering two years of history therefore cannot be expressed as one library-backed slot today. It is not a gap in Phase 11: build plan 13E ("Shared Prepared Data Model") is where combining many months is designed, and doing it here would have been inventing an interface for a requirement not yet written. When 13E arrives, the choice is between a slot that resolves several versions and a prepared data model that concatenates them above the Action contract; the second keeps resolve_slot as it is.
-
-Added in Phase 6I:
-
-Committed state that could not import — the sixth instance, this time a filename. Commit 8bfe29f committed backend/app/api/upload-form.py with a hyphen, which is not a legal Python module name, while runs.py and test_upload_form.py both import app.api.upload_form. The backend could not import at all: 0 of 1,039 tests ran, and python -m app.main would not start. The same commit misspelled backend/tests/test_mixed_xlsv_round_trip.py (xlsv for xlsx), which was harmless but did not match the name this document records. Both were repaired with git mv; no content was edited.
-
-Known Issues 10, 31, 32, 37 and 38 are the same family — committed state that cannot import or cannot run. Two were the src/app/ vs backend/app/ confusion, two were a test module overwritten with a copy of another, one was a test module left stale by the commit that should have rewritten it, and this one is a character in a filename. The existing structural checks looked for none of the last kind. The check list at the end of this document now runs the suite first, which catches every variant at once, and it is the check that caught this one.
-
-services/storage.py holds dead runtime code (Known Issue 39). Resolved in Phase 6I. create_run, RunPaths and its members, run_paths, runs_directory and delete_run_directory are gone, along with the shutil import they alone needed. The module is 177 lines, down from 273, and builds no path at all.
-
-FORGEXL_DATA_DIRECTORY is a documented setting with no consumer (Known Issue 21). Resolved in Phase 6I, in the same phase as the code, as that issue required. config.DATA_DIRECTORY, config.RUNS_DIRECTORY, the .env.example block and the data/ tree are all gone. .env.example now says explicitly that there is no data-directory setting and why.
-
-test_contract_freeze.py was amended a third time, in a cleanup phase. The Next Phase note written at the end of 6H said 6I had no reason to touch it, and that an edit to FROZEN_ROUTES during a cleanup phase would mean something had changed that 6I was not asked to change. That warning holds: FROZEN_ROUTES is byte-identical, and no route, error code, metric key, schema field or limit moved. What changed is one test that monkeypatched config.DATA_DIRECTORY — a setting 6I.1 was explicitly instructed to delete — plus two docstring sentences. Recorded because the module's value comes from a reader being able to see that every change to it was a decision.
-
-The suite's filesystem isolation is now autouse, which changes ~1,000 tests' environment. conftest.quarantine chdirs each test into an empty temporary directory. That is a deliberate translation of what the runs_dir fixture was doing for the hundred-plus tests that declared it without reading it, applied uniformly rather than dropped — but it does mean every test now runs with a different working directory than before. Three tests in test_parser.py asserted tmp_path was empty and had to be pointed at quarantine instead, since the fixture's directory lives inside tmp_path. Any future test that asserts on tmp_path as a whole will need the same treatment; asserting on quarantine is the pattern to follow.
-
-main is now six phases behind, and Known Issue 54 has grown. Substantially reduced since Phase 8. origin/main has moved to 8bfe29f ("fixed problems prior to starting Phase 6I") and now carries Phases 6D through 6H and the pre-6I repairs. Two commits remain unmerged — 2513e0e (6I) and d3a0676 (Phase 7) — and both are ancestors of the Phase 8 branch, so nothing is lost or duplicated. The hazard this entry describes is much smaller but not gone: a session inspecting main alone would still miss 6I and Phase 7. Merging remains the user's to do. Original text follows.
-
-At the start of this session origin/main was at 70c41b1 ("phase 6C fix"). Phases 6D, 6E, 6F, 6G, 6H, the pre-6I repairs and now 6I are all on branches main does not contain. Nothing is lost — each branch descends from the last — but a session that inspects main alone will conclude that most of Phase 6 was never built. That has already caused one recorded incident (Known Issue 54). Merging the phase branches is the fix and is the user's to make.
-
-README.md is still the Create Next App default, and now omits more. Resolved in Phase 8.2, along with Known Issue 4. Every gap this entry named is now covered: npm run dev:lan, running the test suite, the backend virtual environment, docs/architecture.md, and — added since this entry was written — the benchmark harness. Original text follows.
-
-README.md is still the Create Next App default, and now omits more. Known Issue 4, unchanged and still Phase 8.2's, but worth restating at the end of Phase 6: a new reader finds nothing there about npm run dev:lan, about running the test suite, about the backend virtual environment, or about docs/architecture.md. 6I.9 forbids unrelated cleanup and 6I.6 asks for an architecture document, not a README rewrite, so the architecture document was written and the README was left alone.
-
-No registered Action produces an artifact, so no user can see one. Build plan 12B is explicit that artifacts stay optional and 12G asks only for generic frontend support, so this is the phase working as specified rather than a gap in it — but the consequence is worth stating plainly: a user running ForgeXL today never sees the "Generated Files" section, because neither proof Action produces a file. The whole framework is exercised by tests, by an in-process Action, and by a scratchpad Action during live verification. The first Action a user can reach that produces one is build plan Phase 13's monthly report. Closing this is Phase 13's, not a follow-up to Phase 12.
-
-An artifact-only Action is not possible. RunResult.of() still requires at least one result table, so an Action that produces nothing but files cannot be written: it must declare and return at least one output. That is Phase 12 staying inside its scope — build plan 12B says the result contract must be extended safely and that existing Actions must keep working, and says nothing about relaxing the tabular requirement. It is also not obviously wrong: a report Action that returns the table its workbooks were rendered from gives the user something to preview and to export as CSV, which a file-only Action would not. If Phase 13's report genuinely has no table worth returning, the invariant is one line in RunResult.of() plus the MISSING_ARTIFACT branches in api/runs.py.
-
-Artifacts are held in memory for the life of the Run, uncapped. A Run producing forty rep workbooks holds forty workbooks' bytes until the Run is forgotten, on top of its result frames. There is no size limit, no streaming and no spill to disk, and there deliberately is not: build plan 12C says artifacts "may remain in runtime memory for a Run" and the whole architecture rests on a Run writing nothing. A rendered workbook of a few thousand rows is single-digit megabytes, so the realistic Phase 13 case is comfortable. If a future report produces hundreds of large files, the answer is a persistence decision (build plan §7: evidence first), not a cap bolted on now.
-
-The report renderer's conditional formats are four rules, not arbitrary xlsxwriter dictionaries. ConditionalRule is a closed enum — negative-red, positive-green, data bar, three-colour scale — for the same reason CellFormat is closed: consistent styling across reports is build plan 12D's last item, and an escape hatch taking a raw format dictionary would make it unenforceable. A rule Phase 13 needs and this set lacks is one enum member and one dictionary entry.
-
-openpyxl's column_dimensions cannot be trusted for a width inside a stored range, and the width tests say so. xlsxwriter writes <col min="1" max="2" width="..."> when two adjacent columns share a width, and openpyxl keys that under A only — asking for B silently returns a default of 13.0 rather than the width in the file. This cost real time during 12D, when correct widths read as wrong ones. The tests parse the worksheet XML instead and the module docstring says why, so the next reader does not "simplify" them back.
-
-Chromium in this container refuses a non-ASCII download filename. LANG and LC_ALL are unset, so Chromium cannot determine a UTF-8 filesystem locale and falls back to naming the file download. The Content-Disposition header ForgeXL sends is correct — RFC 6266 quoted parameter plus RFC 5987 filename\* — and the same header produces Château Réal - September 2026.xlsx when the browser is launched with LANG=C.UTF-8. Confirmed by probing Chromium with five header variants against a throwaway server. It is an artefact of this ephemeral container and would not appear on a developer's Mac; it is recorded so a future session that sees download does not go looking for a bug in the header.
-
-Nothing verifies a rendered report in Excel itself. Every assertion about a workbook is made by reopening it with openpyxl or fastexcel, which is a strong check — a file ForgeXL could not itself ingest fails — but neither is Excel. Number formats, conditional formats, table styles and frozen panes are asserted as stored, not as displayed. Build plan 12D asks for report-quality workbooks and this is the limit of what can be proved in a Linux container with no Excel in it. Opening one Phase 13 report in real Excel on the target Mac is worth doing once.
-
-Deviations From Build Plan
-src/ directory retained (carried forward from Phase 0). Build plan §10 sketches root-level app/, components/ and lib/. This repository was created by Create Next App with src/app/, and jsconfig.json maps @/_ → ./src/_. Phase 1.1 explicitly instructs: "Do not add a src/ folder unless the repository already uses one. Prefer the simplest existing convention." Accordingly Phase 1 placed the health indicator at src/components/BackendStatus.js, and Phase 5's lib/api.js should become src/lib/api.js. Layout only; no architectural effect.
-
-.gitignore carries a !.env.example negation (from Phase 0). Not listed in §0.5, but required so §20 / Phase 1.7 (.env.example committed as documentation) is achievable. Verified working.
-
-The startup script is scripts/dev-backend.sh, not scripts/dev.sh. §10 sketches a single scripts/dev.sh. Phase 1.8 permits "an npm script or Mac-compatible development script", explicitly suggests concurrently, and §8.3 states the target workflow is npm run dev. The combined launcher is therefore the dev npm script, and the shell script is named for what it actually does — start the backend — rather than being misleadingly called dev.sh while starting only one service. npm run dev remains the single command a user runs.
-
-Backend environment variables are FORGEXL\_-prefixed. §20 lists the settings to centralize (HOST, PORT, DATA_DIRECTORY, MAX_UPLOAD_BYTES, ALLOWED_FRONTEND_ORIGINS) and those are the constant names inside config.py. The environment variables that override them are prefixed to avoid colliding with the generic HOST/PORT variables that next dev and other local tooling read from the same shell.
-
-Create Next App demo assets deleted. public/file.svg, globe.svg, next.svg, vercel.svg and window.svg were removed under Phase 1.2 ("Remove Starter Noise") after grep confirmed nothing references them. public/.gitkeep preserves the directory §10 expects. src/app/favicon.ico was kept — replacing the icon is not Phase 1 work.
-
-pyrightconfig.json added (after Phase 1, at the user's request). Not part of §10's structure and not application code — editor tooling only, with no runtime effect. It fixes two false errors the language server reports against correct code: fastapi/uvicorn "could not be resolved" (the type checker looking at the system interpreter instead of backend/.venv), and from app import config -> "unknown import symbol" (Pylance's autoSearchPaths treats ./src as a Python source root, so the Next.js src/app/ directory shadows the real backend/app package).
-
-The config declares an execution environment rooted at backend/, which mirrors what scripts/dev-backend.sh does to sys.path at runtime by running python -m app.main from that directory, and points venvPath / venv at backend/.venv. Editor-agnostic: any pyright-based language server reads it (Pylance, Neovim, Zed, the pyright CLI). A VS Code-only .vscode/settings.json was added first and then removed in favour of this.
-
-Verified by running npx pyright: 3 files analyzed, 0 errors. A control test (temporarily adding a genuinely bad import) reproduced both of the original error messages, confirming the checks are active rather than the config silently skipping the backend.
-
-One VS Code caveat: venvPath/venv are honoured by the pyright CLI, but Pylance uses the interpreter selected in VS Code, so Python: Select Interpreter -> ./backend/.venv/bin/python is still needed there. The import-path half of the fix applies everywhere.
-
-Added in Phase 2:
-
-ActionRegistry is a class, not a bare module-level dict. §25 sketches ACTION_REGISTRY = {action.id: action, ...} with list_actions() and get_action(action_id) functions. Those exist and are what the API calls; ACTION_REGISTRY is simply an ActionRegistry instance rather than a raw dict. The reason is testing: build plan 2.8 requires proving that duplicate IDs are rejected and that lookups miss correctly, and instantiable registries let each test build an isolated one instead of mutating a global dict and resetting it afterwards. No behavioural difference; the class is ~40 lines with three methods.
-
-backend/tests/ has an **init**.py and a helpers.py. §10 sketches tests/ containing fixtures/ and the test modules. The package marker plus pythonpath = . makes from tests.helpers import make_action an unambiguous absolute import rather than relying on pytest's implicit sys.path insertion. fixtures/ was not created: it would be an empty untracked directory until Phase 4 supplies real fixture data.
-
-InputMetadata carries a worksheet field. The manifest sketch in §23 does not list it, but §3.6 requires recording "the worksheet and parser engine used" for XLSX inputs. §23 states that "exact internal implementation may differ slightly if justified". Null for CSV inputs.
-
-PreviewResponse.rows is a list of positional lists, not a list of objects. §21 requires the response to contain columns, rows, offset, limit and total_rows, without fixing the row encoding. Positional rows aligned to columns avoid repeating every column name on every row, and sidestep the ambiguity a dataset with duplicate column names would create in an object encoding. Phase 3 will materialise rows as lists when reading Parquet.
-
-pydantic was added to backend/requirements.txt. §6.2's dependency list does not name it (it arrives with FastAPI), but §15 mandates Pydantic models for API-facing structured data and app.models.schemas now imports it directly. A direct import should be a declared dependency. The resolved version is unchanged (2.13.4); nothing was upgraded or downgraded.
-
-One # pyright: ignore in test code. npx pyright initially reported three errors, all in the new tests. Two were fixed properly: an Action | None lookup was bound to a variable and null-checked, and a test that relied on Pydantic coercing tuples into list[list[Any]] was deleted rather than kept against the declared type. The third remains: a test instantiates a deliberately abstract Action to prove TypeError is raised, so that line carries a narrow # pyright: ignore[reportAbstractUsage] with a comment — the static error is the assertion. No error in application code was suppressed; pyright reports 0 errors.
-
-Added in Phase 3:
-
-backend/app/errors.py is a new module not sketched in section 10. Build plan section 15 requires "Python exceptions internally … converted into structured API errors at the boundary", and section 22 fixes the error shape. Putting the taxonomy in one app-level module lets main.py convert every internal failure with a single handler instead of a long except chain spread across the API modules, and lets a service raise the right error without importing FastAPI. It is shared vocabulary rather than a service, so it sits beside config.py rather than under services/.
-
-Three test modules beyond the three section 10 sketches. Section 10 lists test_actions.py, test_parser.py and test_api.py. test_parser.py exists as named; the Run endpoints went into test_runs_api.py rather than swelling test_api.py, and test_storage.py, test_runner.py, test_export.py and test_preview.py each cover one service. Section 15 asks for small files; one 230-test module would not be that. conftest.py holds the shared fixtures. fixtures/ still does not exist — test data is generated in process by helpers.csv_bytes / helpers.xlsx_bytes, so there are no binary blobs in the repository; Phase 4 may add real fixture files.
-
-XLSX is read through fastexcel directly, not pl.read_excel. pl.read_excel defaults to drop_empty_rows=True and drop_empty_cols=True, which would silently discard data and violate build plan section 3.3 ("never silently drop rows"). Calling ExcelReader.load_sheet(...).to_polars() uses the same calamine engine the build plan prefers, with no implicit row or column removal.
-
-A submitted form field the Action does not declare produces a warning, not an error. The build plan does not say what to do with an unexpected input slot. Ignoring it silently would hide a frontend/backend mismatch; failing the Run would be harsher than the situation warrants. It is recorded as an UNEXPECTED_INPUT warning in the manifest, and warnings never fail a Run (section 6.2).
-
-An over-large preview limit is refused, not clamped. Build plan section 21 sets the maximum at 500 without saying what to do above it. A silently clamped page would misreport what the caller received, so limit=501 returns 400 with the maximum in details.
-
-Added in Phase 5:
-
-Frontend files live under src/lib/ and src/components/workbench/. Build plan §10 sketches root-level lib/api.js, lib/formatters.js and a flat components/ directory. The src/ prefix is the deviation already recorded as item 1 and carried forward. Within src/components/, the six Phase 5 components are grouped in a workbench/ subdirectory, matching the backend/BackendStatus.jsx grouping Phase 1 established, rather than being scattered at the top level. File names are otherwise exactly those §10 lists. Layout only; no architectural effect.
-
-An extra component, ActionRunner.jsx, is not in §10's list. §10 names the presentational components; something has to own the state that connects them. Putting that in ActionRunner rather than in page.jsx keeps page.jsx a server component, so the client boundary is one explicit file instead of the whole page (build plan §15, "keep server-only and client-only code separated"). It contains no Action-specific logic.
-
-ResultsSummary.js, DataPreview.js and ExportButtons.js were not created. §10 lists them among the eventual components, but they implement build plan Phase 6 (6.1, 6.4, 6.7), and Phase 5's exit criteria explicitly defer result presentation: "Result preview/export refinement is Phase 6." Creating empty or placeholder versions now would be scaffolding for a Phase that has not been authorised.
-
-src/lib/formatters.js holds three helpers, not a general formatting library. §10 lists the file; Phase 5 only needs file-size rendering, extension extraction and list phrasing, so only those exist. Number and duration formatting arrive when Phase 6 needs them.
-
-The frontend has no automated test suite. Build plan Phase 5 specifies no frontend tests, and §37's definition of done requires "frontend lint passes" and "frontend production build passes" rather than frontend unit tests. Phase 5 was verified instead by driving the real UI in a real browser against the real backend (34 checks, plus 11 extensibility checks). Those scripts live in the session scratchpad, outside the repository, so they are evidence rather than a committed regression suite — re-running them in a later session means rewriting them. If frontend regressions become a concern, adding a committed browser test is a Phase 7A decision.
-
-BackendStatus.jsx was modified in Phase 5. It is Phase 1 code, but build plan 5.1 requires that backend URLs not be scattered across components, and it held the only other copy of the base URL. It now calls fetchHealth() from src/lib/api.js. Behaviour is unchanged; this is the only pre-existing frontend file Phase 5 touched other than page.jsx.
-
-Added in Phase 6A:
-
-A new document, docs/phase-6a-compatibility-audit.md. Build plan §10 sketches docs/ as holding build-plan.md and implementation-status.md only. Phase 6A's deliverable is explicitly "documented filesystem dependency points ... identified public contracts ... a clear list of components requiring migration", which is a reference document, not a status update. Folding a 300-line dependency inventory into this status file would bury it; keeping it separate lets 6I re-run the audit against it directly (build plan 6I.2). This file links to it and summarises its conclusions.
-
-The contract-freeze tests live in a new module rather than being spread across the existing ones. Build plan §10 sketches three test modules and the suite already has twelve (Deviation 14). test_contract_freeze.py exists as one module because its defining property is that it is filesystem-independent and must survive 6B–6I unchanged — a property that only holds if the tests are kept together and away from the fixtures (runs_dir, run_paths) that disappear with the on-disk model.
-
-Added in Phase 6B:
-
-Two modules §10 does not sketch: app/models/run.py and app/services/run_store.py. Build plan §10 lists models/schemas.py and five services. Build plan 6B explicitly requires "a logical Run model" and "a Run Store abstraction" as separate concepts — the model is a value, the store is a service — so folding either into schemas.py or storage.py would have contradicted the phase that asked for them. §10 predates Phase 6 by several revisions; Phase 6's rules override it where they conflict.
-
-The logical Run is a frozen dataclass, not a Pydantic model. models/ otherwise holds Pydantic schemas. The Run is runtime state that is never serialised directly, and from 6D/6E it will carry Polars frames that Pydantic cannot validate — the same reasoning Phase 2 applied to ActionResult (build plan 2.2 permits it explicitly). Pydantic keeps the boundary: Run.to_manifest() returns the unchanged RunManifest.
-
-new_run_id and parse_run_id moved from services/storage.py to models/run.py. The Phase 6A audit's §7.1 said to keep them; it did not say where. Run identity belongs to the Run, and storage.py is dismantled across 6C-6I, so leaving the ID convention inside it would have meant moving it later anyway. Neither function's behaviour changed by a character, and storage.py imports both — so storage.new_run_id and storage.parse_run_id still resolve and no existing call site changed.
-
-Two more test modules, test_run_model.py and test_run_store.py. The same reasoning as Deviations 14 and 25: one module per unit under test. Both are deliberately filesystem-free, like test_contract_freeze.py, so they survive 6C-6I unchanged.
-
-storage.delete_run_directory() is a new function that deletes files. Build plan 6B.6 asks for deletion that releases a Run's "associated runtime state". While uploads and exports are still on disk, forgetting only the record would leave the user's uploaded file orphaned, so runner.delete_run() removes both. The function refuses anything that is not a direct child of the runs directory, is called from exactly one place, and is not reachable over HTTP. It disappears with the on-disk model.
-
-Build plan section 28 (internal Parquet) was removed in Phase 6D, not 6E. Section 28 requires each output to be written as working/<output-id>.parquet and the preview to read it back. Build plan 6D.7 forbids intermediary spreadsheet files and 6D's completion criteria requires a Run to execute "with no required … working/ … directory", so Parquet could not survive this phase. The Phase 6 architectural rules state that they override any earlier build-plan instruction that conflicts with them. Known Issue 24 recorded the reversal as deliberate when Phase 6A found it; only the phase it happened in differs from the prediction.
-
-The preview and download mechanisms moved in Phase 6D, ahead of the Phase 6A migration schedule. docs/phase-6a-compatibility-audit.md §7.1 assigns preview.read_preview to 6E and services/export.py plus the download route to 6F. Once 6D stopped writing files, leaving those two reading files would have broken two working endpoints, so both now read the Run's retained result frames. The change was held to exactly that: the PreviewResponse shape, the 100/500 limit rules, the download media types and the <output-id>.<format> filename are byte-identical to their pre-6D behaviour, and every deliverable 6E and 6F actually list is untouched (see Next Phase). Recorded as Known Issue 42.
-
-RunStatus was kept at three values rather than the six build plan 6D.6 lists. 6D.6 offers created / validating / ready / running / completed / failed as an example and says explicitly: "Use existing equivalent status names if already established." running / succeeded / failed are established, are public API, and are pinned by test_contract_freeze.py. A Run executes synchronously with no job queue (build plan 3.12), so created, validating and ready are states no client can observe; completed is succeeded. Adding statuses nothing could ever report would have changed a frozen contract for no caller's benefit.
-
-MANIFEST_SCHEMA_VERSION moved from 1 to 2, and test_contract_freeze.py was amended (Phase 6E). Build plan section 23 fixes the manifest's approximate shape and Phase 6A froze it exactly. Build plan 6E.1, 6E.4 and 6E.5 require result metadata, column type information and an audit summary, none of which that shape could carry, so the manifest was extended: OutputMetadata gained four required fields, RunManifest gained a required audit, and PreviewResponse gained column_schema. Nothing already frozen changed name, order or meaning. The version constant was bumped because a version 1 manifest no longer validates. Recorded here and in Known Issues 48 and 49 because Phase 6A's whole purpose was to make this a decision rather than a side effect.
-
-ActionResult gained an optional rows_affected field (Phase 6E). Build plan 6E.5 asks for "rows affected" and qualifies it with "where supported by the Action". Deriving it generically from two row counts would be a guess about what a transformation did, which build plan section 3.3 forbids, so Actions state it or say nothing. It is optional and defaults to None, so an Action that ignores it is unaffected — the field is additive to the Action contract, not a new requirement on it. Both real Actions set it; neither changed its ID, version, inputs, outputs, metrics or transformation.
-
-One module §10 does not sketch: app/services/results.py (Phase 6E). Build plan §10 lists five services. The result-metadata logic could have gone into runner.py, but the runner, the preview and (in 6F) the export all need the same description of a result frame, and describing a result twice is how two descriptions come to disagree. Same reasoning that placed run_store.py beside them in 6B.
-
-Four frontend components §10 does not sketch, and one it does under a different name (Phase 6E). §10 lists ResultsSummary, DataPreview and ExportButtons. ResultsSummary.jsx and DataPreview.jsx exist under those names. AuditSummary.jsx and OutputSelector.jsx are additions required by build plan 6E.5 and by 6E.1's "available result tables", which §10 predates. ExportButtons was not built in 6E — see deviation 38.
-
-Added in Phase 6F:
-
-ExportButtons.jsx was built in Phase 6F rather than Phase 6E. §10 lists it among the eventual components and §29's layout puts the two download buttons after the preview, which is exactly where it now sits. It was deferred out of 6E because 6E's completion criteria do not list export and 6F.6 changes the filename convention it depends on. Known Issue 47 is closed.
-
-A worksheet is named after the output's label, not its ID. Before this phase the sheet was product_master; it is now Product Master. Build plan 6F.5 requires an "understandable" name, this is the phase that owns worksheet naming, and the label is the human-readable name the Action already declares and the UI already shows. Nothing frozen changed: the output ID, the manifest and the API shapes are untouched, and the two existing tests that asserted the old sheet name now assert the new one with the same exactness.
-
-One route was added that §21's API contract does not list: GET /api/runs/{run_id}/download/xlsx. Build plan 6F.4 requires that several result tables be exportable to separate worksheets, and a per-output endpoint can only ever produce one worksheet, so without a run-level route the requirement would have been satisfied only on paper — a capability with no caller, which build plan §15 explicitly warns against. §21 states what the API "should provide", a floor rather than a ceiling, and the Phase 6 rules override earlier instructions they conflict with. FROZEN_ROUTES was amended by exactly this one addition; no existing route, method or schema changed.
-
-Numeric columns in an XLSX export carry Excel's General format instead of the #,##0.000 Polars applies by default. Build plan 6F.3 requires "sensible cell values"; the default showed 0.000123 as 0.000 and added grouping separators the user's data never had. This is a presentation change only — the stored values were always exact — and it matches the rule the preview already follows (§3.3). Temporal formats are deliberately unchanged.
-
-The XLSX workbook is opened by export.py, not by Polars. Required by 6F.2 (in_memory, so no temporary file is written) and by 6F.4 (several worksheets in one workbook). The four Polars workbook defaults are reproduced explicitly in export.WORKBOOK_OPTIONS — see Known Issue 58.
-
-/forge-api/_ is a Route Handler, not a rewrites() entry (Phase 6G). Build plan 6G.3 says "configure a Next.js rewrite/proxy" and sketches /forge-api/:path_ → http://127.0.0.1:8000/:path\*. A rewrites() entry produces exactly that mapping and was what the repository shipped — but it cannot carry an upload. Next.js forwards a buffered clone of the request body for an external rewrite, capped at proxyClientMaxBodySize (10 MiB by default), and past the cap it forwards a truncated body rather than refusing the request. Measured: a valid 12.38 MB CSV hung for 30 s and ended in ClientDisconnect. ForgeXL's own limit is 250 MB with a structured 413, so the sketch had to give way to the requirement. The mapping 6G.3 asks for is unchanged; only the mechanism differs, and the Route Handler satisfies 6G.4 more strictly than the rewrite did — it never buffers the body at all.
-
-Two modules and one route §10 does not sketch (Phase 6G): src/app/forge-api/[...path]/route.js and src/lib/backend-origin.js. §10 predates the same-origin architecture of Phase 6; 6G.3 requires the forwarding and Phase 6 rule 9 requires the backend's address to stay off the browser, which is what the second module (import "server-only") enforces.
-
-scripts/lan-address.mjs takes its port as an argument (Phase 6G). It read process.env.PORT, which next dev does not consult when --port is given, so a stray PORT in the shell made it print URLs that answer nothing. package.json now passes the same literal to both commands on the one line, which is the only arrangement in which they cannot drift.
-
-Added in Phase 6H:
-
-Four more test modules and two more fixture modules than §10 sketches. The same reasoning as Deviations 14, 25 and 29, applied again: one module per unit under test. test_spreadsheet_fixtures.py tests the fixture system, test_end_to_end.py the 6H.4 pipeline, test_input_slots.py the 6H.5 slot rules and test_failure_regressions.py the 6H.7 battery; fixtures/spreadsheets.py builds the datasets and fixtures/action_cases.py states the expected outputs. Build plan §10 sketches three test modules and the suite now has twenty-two — §15 asks for small files, and one 1,000-test module would not be that.
-
-The fixture system is a Python module, not a directory of spreadsheets. Build plan §10 sketches tests/fixtures/ as a place for fixture data, and Deviation 14 already recorded that Phase 3 generated its data in process rather than committing blobs. Build plan 6H.1 makes that the rule ("programmatically generate deterministic test workbooks... do not depend exclusively on manually created files") and 6H.8 forbids proprietary spreadsheets in the automated suite, so fixtures/ holds Python that builds workbooks rather than workbooks. A test asserts the repository contains no spreadsheet file at all.
-
-"Invalid configuration" (build plan 6H.7) is read as the request-shaped equivalents. ForgeXL has no user-supplied Action configuration — an Action declares its own inputs, outputs, accepted extensions and required columns in Python, and the API accepts only action_id plus files. There is therefore no configuration for a user to get wrong. The nearest things that exist are covered instead, and the module docstring says so: a missing or blank action_id, an output ID the Action does not declare, a format an output is not offered in, and paging parameters outside the documented range. Recorded because it is an interpretation of a build-plan line rather than a literal reading of it.
-
-One xfail(strict=True) in the suite. The project has never used one and the general rule is that a failing test is fixed rather than marked. This is the case the rule does not cover: the test asserts the correct behaviour of application code whose fix is a product decision outside this phase's scope (Known Issue 65). Marking it strict is what makes it a tracking mechanism rather than a suppression — the marker cannot outlive the defect, because fixing the parser fails the suite until the marker is removed. No other test is skipped, xfailed or loosened.
-
-tests/helpers.py was modified by a phase that changed no application code. It is shared Phase 3 code, and Phase 6 rule 6 says not to rewrite working code to suit a new convention. This is not that: the builder wrote text beginning with = as an Excel formula (Known Issue 67), which is a defect in the tool the whole suite's evidence rests on. Behaviour for every existing caller is unchanged and the suite was green before and after. The two normalisation helpers added alongside it are new functions, not changes to existing ones.
-
-data/runs/ no longer exists, and neither does data/ (Phase 6I). Build plan §10 sketches data/runs/.gitkeep in the expected repository structure, and §11 specifies a per-Run directory tree under it. Nothing has been written there since Phase 6D, and the Phase 6 architectural rules — which state that they override any earlier build-plan instruction that conflicts with them — remove the need for it entirely (rules 1-3). Build plan 6I.1 then explicitly assigns removing "run-directory creation … working-directory creation … export-directory creation … path-building helpers" to this phase. The directory was removed with them. The .gitignore rule was kept, widened to data/, so a directory reintroduced by accident is not committed.
-
-The backend has no data-directory setting (Phase 6I). Build plan §20 lists DATA_DIRECTORY among the settings backend configuration should centralise. It is gone, for the same reason as Deviation 51: there is nothing left that could read it, and leaving it would mean .env.example documented a variable that does nothing — the exact outcome Known Issue 21 was recorded to prevent. HOST, PORT, MAX_UPLOAD_BYTES and ALLOWED_FRONTEND_ORIGINS, the other four settings §20 names, are all still centralised in config.py.
-
-Build plan §28 (internal Parquet) is superseded, and now permanently. Recorded as a deliberate reversal in Known Issues 24 and 41 and carried out in Phase 6D. Restated here at the close of Phase 6 because it is the one place where a numbered build-plan section describes a mechanism the finished V1 does not have: the preview is sliced from the retained result DataFrame, as build plan 6E.2 requires and as 6E.2 explicitly forbids doing any other way.
-
-docs/architecture.md is a fourth document under docs/ (Phase 6I). Build plan §10 sketches docs/ as holding build-plan.md and implementation-status.md. 6A added phase-6a-compatibility-audit.md and 6I.6 asks for the architecture to be documented; a section inside the status file would have buried it in a 5,000-line phase log. Layout only.
-
-Added in Phase 7:
-
-Two error codes were added to the frozen taxonomy. DUPLICATE_COLUMNS (422) and EXPORT_TOO_LARGE (422) are new entries in FROZEN_ERRORS in test_contract_freeze.py, which is that module's fourth amendment. Like 6F's route addition they are additions and not changes: every code, class and status already in the table is untouched, and so are FROZEN_ROUTES, the Action inventory, the metric keys, the schema field lists and MANIFEST_SCHEMA_VERSION.
-
-Each names a failure that previously had no code at all, because it was not being reported: a duplicated column was silently renamed by the parser, and an over-long cell was silently truncated by the workbook writer. Build plan section 22's status list is examples rather than a closed set, and 422 is the one that fits both — the request was understood and cannot be processed as asked.
-
-A new test directory, backend/tests/benchmarks/, that pytest does not collect. Build plan §10 sketches tests/ as holding test modules, and Deviations 14, 25, 29 and 46 have already extended it. This one is different in kind rather than in count: a benchmark asserts nothing and takes minutes, so it must not run during python -m pytest. It does not: pytest.ini sets testpaths = tests and pytest collects only test\_\*.py, so benchmarks/run.py is inert to the suite and is invoked directly. Build plan 7G requires the numbers to be recorded in docs/implementation-status.md, which is where they are; the harness is committed so they can be reproduced rather than taken on trust.
-
-package.json sets an environment variable inline in four scripts. NEXT_TELEMETRY_DISABLED=1 prefixes next dev, next build, next start and the LAN variant. Build plan §20 asks for configuration to be centralised in .env.example and config.py; this is not application configuration but a property of how the tool is invoked, and it has to be set before Next.js starts rather than read by it. VAR=1 command is POSIX shell and the build plan's target is a Mac, so no cross-env dependency was added. See Known Issue 1.
-
-Two fixtures live outside CATALOGUE. REFUSED_TABLES and CSV_ONLY_TABLES in tests/fixtures/spreadsheets.py hold the duplicate- column fixture and the 40,000-character-cell fixture. Every entry in CATALOGUE is a dataset ForgeXL reads and returns unchanged, and the sweep tests in test_spreadsheet_fixtures.py assert exactly that of all of them; adding either of these would have meant loosening those sweeps to accommodate a fixture that is supposed to be refused. Separating them keeps the sweeps' property intact, which is the property that makes them evidence. The same reasoning WORKBOOKS already followed for workbook- structure fixtures.
-
-A refusal was added where a Run previously succeeded. A file whose header names two columns the same thing is now refused with DUPLICATE_COLUMNS instead of being accepted with the second column silently renamed. This is a behaviour change to a previously working path, and it is recorded as a deviation rather than only as a repair because a user with such a file will notice. It is what build plan section 3.3 requires in three separate clauses, and section 17's precedent — refuse an ambiguity rather than resolve it silently — is the model. See Completed → 7B.
-
-Added in Phase 8:
-
-Three lines of build plan §37's Definition of Done are superseded rather than met, and all three are the same substitution. §37 was written for the on-disk model, and Phase 6 replaced it under the rule that its architectural rules override earlier conflicting build-plan instructions. Recorded here so the substitution is visible rather than quiet:
-
-§37 line What ForgeXL does instead
-"source uploads are preserved" the upload is never written at all (Phase 6 rule 1), so the user's file cannot be modified — a stronger guarantee of the same intent, but the server keeps no copy
-"Run manifests exist" the manifest exists as an API object (MANIFEST_SCHEMA_VERSION 2) returned by POST /api/runs and GET /api/runs/{id}, not as a manifest.json on disk (Phase 6 rules 1-3)
-"internal outputs use Parquet" no file is written, so there is nothing for Parquet to be. Already Deviations 31 and 53
-Each is a consequence of one decision — ForgeXL V1 writes nothing — and that decision is authorised by the Phase 6 rules and documented in docs/architecture.md §5. The audit lives under Completed → Phase 8 → build plan §37.
-
-A temporary third Action was registered and removed during Phase 8.5. tmp_extensibility_probe ("Territory Coverage Probe", 9.9.9), with three input slots and two outputs, existed for the duration of the extensibility proof. It is the same technique the Phase 5 probe used, and it is recorded for the same reason: application code was added, briefly, by a phase whose diff does not contain it. The module was deleted, the registry restored with git checkout, GET /api/actions returns exactly the two real Actions, and git status shows registry.py byte-identical to its committed state. Nothing under src/ was touched at any point, which is the whole claim being proven.
-
-Phase 8 added no test to the suite. Every phase from 2 onward has grown it; Phase 8 did not, and the count is unchanged at 1,335. Deliberate: Phase 8's verification is a clean-setup test, a browser acceptance test and an extensibility probe, none of which belongs in a permanent suite — the probe registers an Action that must not exist, and the acceptance test needs a running browser and two live servers. The behaviours they exercise are already covered by test_end_to_end.py, test_export_download.py and the Phase 7 modules. The harnesses themselves lived in the session scratchpad and were removed with it.
-
-Added in Phase 9:
-
-Build plan 9B's "report month" and "reporting period" are one field. 9B lists "reporting period or effective period" among the required fields and "report month" among the where-applicable ones. DatasetVersion has a single period, and the docstring says so explicitly.
-
-Recording the same month under two names would create two things that can disagree, and a version whose two months disagreed would be unreproducible in exactly the way build plan 9E exists to prevent. For a monthly history version the reporting period is the report month; for a snapshot it is the month the snapshot is effective for. The actual date extremes found in the data are recorded separately, as min_date and max_date, which is the distinct fact 9B also asks for.
-
-Supersession is recorded forward only; the reverse is derived. 9D asks to "mark which version supersedes the previous version". A new version carries supersedes and supersession_reason; the superseded version carries nothing, and superseded_version_ids() derives the set from the forward pointers.
-
-Writing a superseded_by field back into the older record would mean rewriting an immutable record, which is the very thing 9D requires must not happen. The mark exists and is queryable in both directions; only its storage is one-directional.
-
-A period that already has a live version can only be re-committed as an explicit replacement. Build plan 9D forbids silently overwriting stored history and describes how a deliberate replacement works. It does not literally say what happens if the same month is committed twice without one.
-
-Allowing it would satisfy 9D's letter — nothing is overwritten — and defeat its purpose: the library would hold two live versions of September with nothing to say which is true, and any report reading "September" would have to guess. So a second commit for a period that already has a live version is refused, naming the existing version and saying that replacing it is deliberate. The invariant this buys — exactly one live version per period — is what makes current_version() a question with one answer.
-
-Two supporting rules follow from the same reasoning: a replacement must cover the same period as the version it replaces, and a version that has already been replaced cannot be replaced again (a forked chain could not explain what happened). A replacement can itself be replaced, so corrections still chain.
-
-A snapshot version must state its period; a history version need not. 9E requires account assignments to be stored by effective reporting period. Enforced as a rule on the snapshot kind rather than left to the caller: a snapshot with no month could not be selected for a report and could not be superseded by a later month, so it would be stored as something nothing can ever use.
-
-History versions are deliberately allowed to have no period, because build plan 10G's historical bootstrap "may accept a wider historical period than recurring monthly ingestion" and needs to be expressible.
-
-config.LIBRARY_DIRECTORY reintroduces a configured write location, six phases after Phase 6I removed one. Deviation 31 and the Phase 6I entry both record that the backend had no configured place to write at all, and that was load-bearing: it is why a Run provably touches no filesystem.
-
-That property is unchanged. LIBRARY_DIRECTORY is not a run-data directory and is not reachable from the Run pipeline — no route, service or Action imports the Data Library, and a live Run was verified to create no data/ directory. It is the location of persistent business data, which the build plan's "Run State and Business Data Are Different" rule requires to be a different thing in a different place. DATA_DIRECTORY, RUNS_DIRECTORY and FORGEXL_DATA_DIRECTORY remain deleted.
-
-Added in Phase 10:
-
-A missing required column fails an import; an unexpected extra column is a warning and is kept. Build plan 10A fixes the accepted schemas and forbids guessing, but does not say what happens to a column the schema does not declare.
-
-Refusing extras would block a month over a column nothing reads — exports gain columns, and a report that does not read them is unaffected. Ignoring them silently would hide a source-schema change, which build plan 13H lists among the conditions that make a report unreliable. So the column is reported (UNEXPECTED_SOURCE_COLUMNS) and stored with the rest of the file, which build plan 10E requires anyway: a column dropped at ingest could not be recovered later.
-
-Column order is recorded but not required. The canonical order in docs/monthly-source-schemas.md is the order the export produces. A file that reorders its columns has lost nothing, and refusing it would be a rule about presentation rather than about data. Presence is matched exactly; position is not matched at all.
-
-Future-dated rows are an error rather than a warning. Build plan 10B lists them among the situations to "detect" without saying which way.
-
-A reporting month is imported after it has happened, so a date after today is wrong, and a wrong date silently decides which month a row lands in — the failure this whole layer exists to prevent. Warning and committing anyway would put rows in a month that has not occurred. See Known Issue 92 for the cost of the strictness.
-
-A duplicate is the same bytes committed for the same reporting period, not the same bytes anywhere in the dataset. Build plan 10C.5 says to "detect an already-imported identical file" without qualifying it by period.
-
-Dataset-wide was implemented first and a test caught it. Account ownership often does not change from one month to the next, so October's assignment export is byte-for-byte September's, and refusing it would force the user to perturb a correct file in order to record a true fact. For a history dataset the bytes decide the month, so identical bytes are always the same month and the two rules are equivalent — 10C.5's intent is met exactly. The period only ever narrows the rule for a snapshot, where the month comes from the caller instead of from the data.
-
-The coordinated monthly import returns its refusal instead of raising. Build plan 10F requires the user to "receive a clear explanation of what was and was not persisted". A returned ReportingCycleImport is that explanation, and it carries every issue from all three files at once; an exception carries one issue where a caller needs all of them. The single-file commit functions do raise, because there the one issue is the whole story.
-
-Phase 10 adds no HTTP route, so ingestion has no user-facing surface yet. Build plan Phase 10 describes no endpoint, no frontend and no UI; build plan 15A is the "Monthly Reports" workflow surface, and 15A says the frontend "may orchestrate existing backend capabilities" — which is what this phase built. Adding a route now would mean amending FROZEN_ROUTES during a phase that did not ask for it, which is exactly what Phase 6I's note warns against. It is byte-identical. See Known Issue 91.
-
-RunValidationError's constructor body moved to a shared base class. Phase 10 needed the same "one issue is reported as itself, several are reported together" behaviour for ingestion, and writing it twice would have been two definitions of one rule. IssueReportingError now holds it and both RunValidationError and IngestionValidationError inherit it.
-
-No contract changed: the code (VALIDATION_FAILED), the status (422), the message, the details shape and the single-issue behaviour are all identical, and every test_contract_freeze.py assertion about RunValidationError passes without being touched. (That module was edited in this phase, for the unrelated addition in Deviation 75; no assertion about RunValidationError was among the edits.) Recorded because a frozen behaviour's implementation moved, and the value of that module comes from every change near it being visible as a decision.
-
-test_contract_freeze.py was amended a fifth time — one added error code. INGESTION_VALIDATION_FAILED is the class every monthly-ingestion refusal arrives through, and the freeze table's purpose is to pin every error the backend reports with the status the API boundary returns.
-
-An addition, like 6F's route and Phase 7's two codes: nothing already in the table moved, and FROZEN_ROUTES, the Action inventory, the metric keys, the schema field lists and the manifest version are all untouched. FROZEN_ROUTES being byte-identical after a phase that added a whole subsystem is the fact worth recording.
-
-Added in Phase 11:
-
-A library reference is submitted as a text form field, not through a new route. Build plan 11A says an input slot may originate from a Data Library dataset version; it does not say how a client names the version. POST /api/runs already carries action_id as a text field beside the files, so a library-backed slot carries its reference the same way, under its own slot ID.
-
-The alternatives were a new endpoint, which build plan Phase 11 describes none of and which would have meant amending FROZEN_ROUTES in a phase that did not ask for it, and a JSON body, which the multipart contract has no room for. Recorded because the wire format is a decision, and Known Issue 95 says what to do if it needs to grow.
-
-MANIFEST_SCHEMA_VERSION was not bumped, although the manifest gained a field. RunManifest.library_inputs defaults to empty, so a manifest for an upload-only Run is byte-identical to what it was and a version 2 manifest written before this phase still validates against the model. Phase 6E bumped the version because its additions were required and a version 1 manifest genuinely stopped validating; bumping here would have claimed an incompatibility that does not exist. ActionInput's two new fields are the same case — both default to what every Action already meant.
-
-A Data Library "not found" message is reworded on its way to a user. data_library names a dataset by its ID, which is right for a message about stored state and wrong for one a nontechnical user reads (build plan §3.5, §22). Until Phase 11 no library failure reached a user at all. input_resolution.\_named substitutes the dataset's display name into the message, keeping the library's own code and details untouched, rather than rewording data_library itself — so each layer says the thing that suits its own reader, and Phase 9's messages and tests are unchanged.
-
-A mismatched submission produces one of two warning codes, not one. A file sent for a library-backed slot warns UNEXPECTED_INPUT, the existing code with its existing message. A dataset reference sent for an upload slot warns UNEXPECTED_DATASET_REFERENCE, which is new. One code covering both was the obvious alternative and was rejected: "the file was ignored" and "the reference was ignored" send the user to different places, and reusing the existing code with a reworded message would have changed a message every existing test and client has seen since Phase 3.
-
-Both are warnings and neither fails a Run, exactly as UNEXPECTED_INPUT has always behaved. The Run fails separately, on the input that is actually missing.
-
-test_contract_freeze.py was amended a sixth time — every part of it an addition. Two schema field lists (ActionInput gained source and dataset_id; RunManifest gained library_inputs), the Action inventory (both registered slots now pin source as upload and dataset_id as null), four error rows, and four forbidden Action imports.
-
-Nothing already frozen moved: not a route, an error code that was already listed, a metric key, a field's position or meaning, a limit, or the manifest version. FROZEN_ROUTES is byte-identical for the second phase running. The Action-inventory addition is the one worth calling out as a tightening rather than a widening — it is build plan 11A's instruction not to change either proof Action, written down as an assertion, so a later phase converting one to library-backed fails a test rather than passing quietly.
-
-The three Phase 9 error classes added to FROZEN_ERRORS (UNKNOWN_DATASET, UNKNOWN_DATASET_VERSION, DATA_LIBRARY_ERROR) were not omissions in Phase 9: they had no HTTP surface to reach until an Action could read the library. Pinning them now is what keeps a library failure from quietly changing status later.
-
-The rich renderer is a module beside export.py, not code inside it. The Phase 11 hand-off note said build plan 12D's rendering "belongs beside those rather than in a second workbook writer", and this is the reading taken: app/services/workbook.py imports WORKBOOK_OPTIONS, check_fits_worksheet, worksheet_names and GENERAL_NUMBER_FORMAT from export.py and adds no second set of rules, but lives in its own module. Folding ~400 lines of formatting into export.py would have doubled it and mixed two jobs — "render this result table faithfully" and "render this report attractively" — that want opposite defaults. The same argument Phase 6E used to split results.py out of export and preview.
-
-An Action may import app.services.workbook, and the contract freeze says so deliberately. FORBIDDEN_ACTION_IMPORTS is byte-identical — xlsxwriter and app.services.export are still forbidden, so an Action still cannot drive the spreadsheet engine — and app.services.workbook was not added to it. Every entry on that list guards against an Action touching the filesystem or reproducing a pipeline stage; a pure function from already-calculated report data to bytes does neither, and it is the sanctioned alternative to the import that is forbidden. Stated as an assertion (test_an_action_may_use_the_report_renderer) rather than left as an absence, so it reads as a decision rather than an oversight.
-
-A totals row is literal values, and ForgeXL writes no formula anywhere. Build plan 12D asks for "readable totals". Both obvious mechanisms — xlsxwriter's table total_function and Polars' column_totals — write =SUBTOTAL(...), which means the file shows one number and stores another, and a reader that does not evaluate formulas shows a third. That is build plan §3.3's "silently convert invalid data into valid-looking data", so the totals row is written as ordinary styled cells beneath the table and the caller supplies the figures. The consequence is that ForgeXL's totals do not recalculate when a reader edits the sheet, which is the honest behaviour for a generated report.
-
-MANIFEST_SCHEMA_VERSION was not bumped again, for the same reason Phase 11 did not bump it (Deviation 77). RunManifest.artifacts and RunAudit.artifacts both default to empty, so a manifest for a Run that produced only tables is byte-identical to what it was and a version 2 manifest written before this phase still validates. Bumping would have claimed an incompatibility that does not exist.
-
-Content-Disposition gained a second parameter, but only for names that need one. The straightforward implementation emits filename and filename\* on every download; that changed the header for every export and broke eleven tests that parse it exactly. The extended parameter carries no information for an ASCII name, so it is emitted only for a non-ASCII one. Every export download's header is unchanged, and those tests were left as they were rather than loosened to accept a new shape.
-
-The percent-encoder is written out rather than taken from urllib.parse.quote. test_local_exposure.py forbids the backend importing any part of urllib, on the grounds that an application that never imports an HTTP client cannot reach one by accident. urllib.parse cannot make a request and the test is blunter than its own rationale — but the blunt rule is enforceable and the six lines it costs are trivial, so the rule was kept and the function written.
-
-artifact_ids() was added beyond the literal text of build plan 12E. 12E requires IDs that are "collision-safe and deterministic where appropriate" and gives per-rep filenames as its example, so an Action is expected to derive both from data. artifact_filename() alone left every Action to reinvent URL-safe slugging and collision handling, and the first live run proved it: a hand-rolled ID produced château-réal and failed the Run. The helper is what makes 12E's requirement achievable rather than merely stated.
-
-test_contract_freeze.py was amended a seventh time — every part of it an addition. Two routes (FROZEN_ROUTES's first change since Phase 6F), one schema field (RunManifest.artifacts) plus the new ArtifactMetadata model, and one error row (UNKNOWN_ARTIFACT). Nothing already frozen moved: not an existing route, an error code already listed, a metric key, a field's position or meaning, a limit, or the manifest version. FROZEN_ACTIONS and FORBIDDEN_ACTION_IMPORTS are both byte-identical, and three new tests pin why — that neither registered Action produces an artifact, that the forbidden-import set is exactly what it was, and that the artifact kinds are frozen.
-
-No architectural conflicts were found. Framework, router, language, styling, backend framework, data engine and lockfile all match the build plan. Nothing from §4 (Non-Goals) is present: no Docker, no database, no DuckDB, no auth, no cloud service, no AI functionality, no job queue, no TypeScript, no plugin loader, no dynamic execution from disk, no heavyweight upload or component library. Uploads are not proxied through Next.js — the browser calls FastAPI directly, as §5 requires, which Phase 5 confirmed by watching the requests the real browser actually made. (Superseded by Phase 6G: uploads now pass through the Next.js Route Handler at /forge-api/\*, as build plan 6G.3 requires. §5's actual rule — copy the file once — is unaffected: the handler streams the body through and never reads it, so there is still exactly one copy and one parse, both in Python.)
-
-Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and native browser APIs (fetch, FormData, File, DataTransfer). package.json is unchanged, and remained unchanged through 6A-6F — as did package-lock.json and backend/requirements.txt. Phase 6F added no dependency either: xlsxwriter was already a declared direct dependency (build plan §6.2), previously reached only through Polars and now imported directly.
-
-Next Phase
-Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine.
-
-Not started. Nothing for it has been scaffolded, stubbed or prepared: there is no report specification document, no reporting Action, no rep roster, no reporting-period resolution beyond Phase 10B's month detection, and no calculation table of any kind. No registered Action reads the Data Library and none produces an artifact.
-
-Phase 13 is the first phase that uses all three of the post-POC foundations at once: it reads stored dataset versions through Phase 11's library-backed input slots, calculates a report, and hands the result out through Phase 12's artifacts. Read build plan 13A–13G in full before starting; 13A ("Create the Report Specification") comes first for a reason — the specification is what the calculation engine is checked against, and writing the engine first would leave nothing to check it with.
-
-Phase 12 is complete
-Every exit criterion build plan Phase 12 lists, checked against what is actually in the repository:
-
-Criterion Evidence
-12A dataset outputs vs artifacts ArtifactMetadata beside OutputMetadata, carrying none of a table's facts; test_an_artifact_carries_no_row_or_column_counts
-12B extend ActionResult safely artifacts appended with a default of (); both proof Actions untouched and pinned as artifact-free in the contract freeze
-12C artifact metadata exactly the six declared facts, no path anywhere, bytes held in RunResult and released with the Run (weakref test)
-12D rich XLSX rendering app/services/workbook.py; every 12D item tested by reopening the rendered bytes; calculates nothing and writes no formula
-12E multiple artifacts per Run one workbook per rep, in the Action's order; artifact_ids() / artifact_filename(); collisions numbered or refused, never silently renamed
-12F batch ZIP export app/services/archive.py; flat entry names checked twice; deterministic bytes; built in memory
-12G artifact API and frontend two routes and ArtifactDownloads.jsx, entirely manifest-driven — no Action ID, artifact ID or name appears in any frontend file
-exit criterion, as one sentence a test Action produces three polished XLSX artifacts plus a ZIP bundle through generic infrastructure, verified in tests, over real HTTP and in a real browser
-docs/implementation-status.md updated this entry
-What a Phase 13 session inherits
-A clean container is the normal starting condition. backend/.venv/ and node_modules/ will not exist. README.md documents the four commands that rebuild them; they were followed exactly this session and needed nothing else.
-The suite must report 1,903 passed, zero failures, zero skips, zero xfails.
-Phase 13's Action is the first that uses both new foundations. It declares a library-backed input slot (source=ActionInputSource.LIBRARY plus a dataset_id, Phase 11) and returns artifacts (Phase 12). Both halves already work end to end and neither needs extending to be used.
-Render reports with app.services.workbook, and never with xlsxwriter directly. The contract freeze fails an Action that imports the engine. The renderer takes Sheet and Column objects and calculates nothing — a totals row's values are supplied by the caller, because the formatting layer is forbidden from doing business arithmetic (build plan 12D). Phase 13's calculation engine is where those figures come from.
-Name files with artifact_ids() and artifact_filename(). Do not hand-roll either. A hand-rolled ID is what failed the first live Run of this phase; an ID is a URL token and a filename is a name, and the two helpers keep the difference straight.
-A Run still writes nothing, and Phase 13 must not change that. An artifact is bytes an Action produced, held in memory and handed back. test_data_library.py, test_library_inputs.py and test_artifacts.py all assert the working directory stays empty; keep those passing.
-An Action must still declare at least one tabular output (Known Issue 100). If Phase 13's report genuinely has no table worth returning, that is a one-line invariant to revisit — with the reasoning recorded, not silently.
-A test that touches the library gets an empty one automatically. The autouse data_library fixture in conftest.py redirects DATA_LIBRARY at a temporary directory. Do not construct a LocalDataLibrary(config.LIBRARY_DIRECTORY) in a test — that writes into the repository.
-The frontend should need nothing. ArtifactDownloads.jsx renders whatever manifest.artifacts contains, so a report Action's files appear with no src/ change at all. That is the property to check rather than to assume: if Phase 13 finds itself editing a frontend file, something has been hardcoded that should not be.
-Known Issues 99–105 are Phase 12's deliberate gaps. 99 (no registered Action produces an artifact) is Phase 13's to close by existing. 100–102 are scope boundaries with their reasoning recorded; 103 and 104 are environment facts worth knowing before they cost time again; 105 (nothing opens a report in real Excel) is worth doing once, on the target Mac, with a Phase 13 report.
-Repository / Git
-Remote: https://github.com/cmgolizio/ForgeXL
-Current branch: claude/forgexl-phase-12-rr6hk2
-Descends from: 2699cd2 "phase 11 complete"
-origin/main is at 8bfe29f ("fixed problems prior to starting Phase 6I"). Six commits are now unmerged — 2513e0e (6I), d3a0676 (Phase 7), 60817e8 (Phase 8), 63e69fb (Phase 9), 3de2436 (Phase 10) and 2699cd2 (Phase 11) — and all six are ancestors of this branch, so nothing is skipped or duplicated. Known Issue 75 stands, one commit larger again: a session inspecting main alone would miss 6I and Phases 7 through 11. Merging is the user's to do.
-
-Phase 12's diff is 20 files: seven new (backend/app/models/artifact.py, backend/app/services/workbook.py, backend/app/services/archive.py, backend/tests/test_artifacts.py, backend/tests/test_workbook.py, backend/tests/test_artifact_download.py and src/components/workbench/ArtifactDownloads.jsx) and thirteen modified, with no deletion and no rename. package.json, package-lock.json and backend/requirements.txt are untouched — Phase 12 added no dependency; zipfile and unicodedata are standard library, and xlsxwriter, openpyxl and polars were already pinned.
-
-src/ changed for the first time since Phase 6G: one new component, one import and one element in ActionRunner.jsx, two URL builders in lib/api.js and one label helper in lib/formatters.js.
-
-Before writing any code, verify the repository is intact
-Run these in order. They catch different failures and none substitutes for another.
-
-git show --name-status HEAD # FIRST — does the last phase entry match its own commit?
-cd backend && .venv/bin/python -m pytest # catches most of the rest at once
-git branch -r # is the last phase on an unmerged branch?
-ls backend/app/models backend/app/services backend/app/api # not src/app/
-ls backend/app/_.py backend/app/_/_.py backend/tests/_.py | grep -- - # hyphens are not legal module names
-md5sum backend/tests/_.py backend/app/_.py backend/app/_/_.py | awk '{print $1}' | sort | uniq -d
-npx pyright
-npm run build
-The suite must report 1903 passed, zero xfails, and pyright 0 errors. Every other line must produce no output, and the build must succeed.
-
-And one check that belongs at the end of your phase, not the start. Phase 9 found the same file rename recorded as done by three consecutive phases and present in none of their commits (Known Issue 85). Phases 10, 11 and 12 all ran the fix that issue prescribes and it worked every time. Keep doing it:
-
-# AFTER committing, before reporting the phase complete:
-
-git show --name-status HEAD
-Confirm that every file your report lists as created, modified, renamed or deleted actually appears there — and the reverse, that every file in the commit appears in your report. Phase 10 found the inverse failure in Phase 9's entry (Known Issue 89): a package.json change that is in the commit and not in the report. Read the list both ways.
-
-If the environment is fresh — no backend/.venv/, no node_modules/ — rebuild it with the four commands in README.md. That path was exercised end to end in Phase 8.1 and again in Phases 9, 10, 11 and 12, and needs nothing beyond what is written there.
+If the environment is fresh — no backend/.venv/, no node_modules/ — rebuild it with the four commands in README.md. That path was exercised end to end in Phase 8.1 and again in Phases 9, 10, 11, 12 and 13, and needs nothing beyond what is written there.

@@ -176,6 +176,15 @@ class DatasetSelectorKind(str, Enum):
     #: is what every other kind resolves *to*, and what a Run records.
     VERSION = "version"
 
+    #: Every live version of the dataset, optionally bounded at a month.
+    #: Unlike the three above it names a *set*, because build plan 13B
+    #: requires an Action's inputs to "include the historical information
+    #: required by the report specification" and a year-over-year comparison
+    #: spans more months than one version holds. Every version it resolves to
+    #: is recorded on the Run individually, so provenance is unchanged
+    #: (build plan 11C).
+    HISTORY = "history"
+
 
 #: Separates a selector's kind from its value, as in ``period:2026-09``.
 SELECTOR_SEPARATOR = ":"
@@ -194,7 +203,12 @@ class DatasetSelector:
     ``latest``                  the newest live version
     ``period:2026-09``          the live version for September 2026
     ``version:<version id>``    that exact version, superseded or not
+    ``history``                 every live version, oldest month first
+    ``history:2026-09``         every live version through September 2026
     ==========================  ==========================================
+
+    The first three name one version and the last two name a set. Which of
+    those a selector is, is :attr:`selects_many`.
 
     A frozen dataclass rather than a Pydantic model for the same reason
     :class:`DatasetCommit` is one: it is an internal value, and what reaches
@@ -214,6 +228,11 @@ class DatasetSelector:
         if self.kind is DatasetSelectorKind.LATEST:
             if self.value is not None:
                 raise ValueError("The 'latest' selector takes no value.")
+        elif self.kind is DatasetSelectorKind.HISTORY:
+            # The only selector whose value is optional: unbounded history is
+            # a meaningful request, and a bounded one is the same request with
+            # an end stated.
+            pass
         elif not self.value:
             raise ValueError(f"A {self.kind.value} selector requires a value.")
 
@@ -248,7 +267,15 @@ class DatasetSelector:
         if not separator:
             if keyword == DatasetSelectorKind.LATEST.value:
                 return cls(kind=DatasetSelectorKind.LATEST)
+            if keyword == DatasetSelectorKind.HISTORY.value:
+                return cls(kind=DatasetSelectorKind.HISTORY)
             raise cls._unreadable(raw)
+
+        if keyword == DatasetSelectorKind.HISTORY.value:
+            with _as_selector_failure(raw):
+                return cls(
+                    kind=DatasetSelectorKind.HISTORY, value=parse_period(value)
+                )
 
         if keyword == DatasetSelectorKind.PERIOD.value:
             with _as_selector_failure(raw):
@@ -266,7 +293,8 @@ class DatasetSelector:
     def _unreadable(raw: str) -> InvalidDatasetSelectorError:
         return InvalidDatasetSelectorError(
             f"{raw.strip()!r} does not name a dataset version. Use 'latest', "
-            "'period:YYYY-MM' or 'version:<version id>'.",
+            "'period:YYYY-MM', 'version:<version id>', 'history' or "
+            "'history:YYYY-MM'.",
             details={"selector": raw},
         )
 
@@ -285,6 +313,16 @@ class DatasetSelector:
         and must never be what a Run records having *used*.
         """
         return self.kind is not DatasetSelectorKind.VERSION
+
+    @property
+    def selects_many(self) -> bool:
+        """Whether this selector names a set of versions rather than one.
+
+        True only for :attr:`DatasetSelectorKind.HISTORY`. It changes how many
+        versions a Run records, never whether it records them: every version
+        read is recorded by its immutable ID either way (build plan 11C).
+        """
+        return self.kind is DatasetSelectorKind.HISTORY
 
 
 @contextmanager

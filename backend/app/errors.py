@@ -284,6 +284,33 @@ class InvalidDatasetSelectorError(InputValidationError):
     code = "INVALID_DATASET_SELECTOR"
 
 
+class InconsistentDatasetVersionsError(InputValidationError):
+    """Several versions of one dataset cannot be read as one table.
+
+    A ``history`` selector resolves to every live version of a dataset and
+    hands the Action their rows as one frame (build plan 13B). That is only
+    honest while the versions describe the same thing: two months whose
+    exports carry different columns are two shapes, and merging them would
+    mean either inventing values for a column one month never had or dropping
+    a column the other month did — both of which build plan section 3.3
+    forbids.
+
+    So the months are reported rather than reconciled, with the differing
+    column names and the periods that carry them. Build plan 13H lists an
+    unexplained source-schema change among the conditions that make a report
+    unreliable; this is that condition detected at the point where it would
+    otherwise be papered over.
+
+    Differing *types* are not this error. A month stored as CSV and a month
+    stored as a workbook can report the same column as an integer and as a
+    float, which is a widening that changes no value; those are merged, and a
+    column that genuinely does not hold numbers is caught by the report's own
+    strict measure check instead.
+    """
+
+    code = "INCONSISTENT_DATASET_VERSIONS"
+
+
 class IssueReportingError(WorkbenchError):
     """Base for an error that carries a list of :class:`ValidationIssue`.
 
