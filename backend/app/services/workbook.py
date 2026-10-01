@@ -59,6 +59,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from app.services.export import (
     GENERAL_NUMBER_FORMAT,
     WORKBOOK_OPTIONS,
+    check_cell_text,
     check_fits_worksheet,
     worksheet_names,
 )
@@ -332,7 +333,17 @@ def render_workbook(sheets: Sequence[Sheet]) -> bytes:
     prepared = [(sheet, _prepare(sheet)) for sheet in entries]
 
     for sheet, frame in prepared:
-        check_fits_worksheet(frame, label=sheet.name)
+        heading_rows = int(bool(sheet.title)) + int(bool(sheet.subtitle))
+        extra_rows = (
+            heading_rows + int(heading_rows > 0) + int(sheet.total_row is not None)
+        )
+        check_fits_worksheet(frame, label=sheet.name, extra_rows=extra_rows)
+        for text in (sheet.title, sheet.subtitle):
+            check_cell_text(text, label=sheet.name)
+        if sheet.total_row is not None:
+            check_cell_text(sheet.total_label, label=sheet.name)
+            for column, value in sheet.total_row.items():
+                check_cell_text(value, label=sheet.name, column=column)
 
     names = worksheet_names(sheet.name for sheet in entries)
     table_names = _table_names(names)
@@ -344,9 +355,7 @@ def render_workbook(sheets: Sequence[Sheet]) -> bytes:
             for name, table_name, (sheet, frame) in zip(
                 names, table_names, prepared, strict=True
             ):
-                _render_sheet(
-                    workbook, styles, name, table_name, sheet, frame
-                )
+                _render_sheet(workbook, styles, name, table_name, sheet, frame)
         return buffer.getvalue()
     finally:
         buffer.close()

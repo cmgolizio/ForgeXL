@@ -652,6 +652,110 @@ def test_a_measure_is_never_read_as_zero() -> None:
         engine.build_tables(prepared)
 
 
+@pytest.mark.parametrize("column", [REVENUE, QUANTITY])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -float("inf"), "NaN", "inf", "-inf"]
+)
+@pytest.mark.parametrize("source", ["sales", "samples"])
+def test_non_finite_measures_stop_the_report(column, value, source) -> None:
+    frame = golden.sales_frame() if source == "sales" else golden.sample_frame()
+    if isinstance(value, float):
+        frame = frame.with_columns(pl.col(column).cast(pl.Float64))
+    changed = golden.replace_value(frame, column, frame.height - 1, value)
+
+    prepared = prepare(**{source: changed})
+
+    assert "NON_NUMERIC_MEASURE" in codes(prepared.errors)
+    assert not prepared.usable
+    with pytest.raises(ValueError):
+        engine.build_tables(prepared)
+
+
+@pytest.mark.parametrize("column", [REVENUE, QUANTITY])
+def test_reading_a_measure_cannot_round_an_integer(column) -> None:
+    sales = golden.sales_frame().with_columns(pl.col(column).cast(pl.Int64))
+    changed = golden.replace_value(sales, column, 0, 9_007_199_254_740_993)
+
+    prepared = prepare(sales=changed)
+
+    assert "NON_NUMERIC_MEASURE" in codes(prepared.errors)
+    assert not prepared.usable
+
+
+@pytest.mark.parametrize("column", TRANSACTION_COLUMNS.product_key)
+def test_blank_product_fields_preserve_comparisons_and_account_counts(column) -> None:
+    sales = golden.sales_frame().with_columns(pl.lit(None, pl.String).alias(column))
+
+    prepared = prepare(sales=sales)
+    assert prepared.usable, codes(prepared.errors)
+    products = engine.build_tables(prepared)["product_performance"]
+
+    assert products.height == 4
+    assert (
+        products.select(REP_COLUMN, *TRANSACTION_COLUMNS.product_key).unique().height
+        == 4
+    )
+    assert products["Accounts"].to_list() == [1, 1, 1, 1]
+    beth = products.filter(pl.col(REP_COLUMN) == BETH)
+    assert beth["Revenue"].sum() == 755.0
+    assert beth["Prior Month Revenue"].sum() == 300.0
+    assert beth["Last Year Revenue"].sum() == 500.0
+
+
+def test_unexpected_columns_cannot_override_prepared_ownership() -> None:
+    sales = golden.sales_frame().with_columns(pl.lit(KEVIN).alias(engine.OWNER))
+
+    tables = engine.build_tables(prepare(sales=sales))
+
+    assert dict(tables["rep_summary"].select(REP_COLUMN, "Revenue").iter_rows()) == {
+        BETH: 755.0,
+        KEVIN: 240.0,
+        JENNIFER: 0.0,
+    }
+    assert sales[engine.OWNER].to_list() == [KEVIN] * sales.height
+
+
+@pytest.mark.parametrize(
+    "sales_dtype,ownership_dtype",
+    [(pl.Int64, pl.Int64), (pl.Int64, pl.String), (pl.String, pl.Int64)],
+)
+def test_typed_account_identifiers_match_the_ownership_map(
+    sales_dtype, ownership_dtype
+) -> None:
+    identifiers = {ACME: 1, BISTRO: 2, CORNER: 3, HARBOUR: 4}
+    sales = golden.sales_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(sales_dtype)
+    )
+    samples = golden.sample_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(sales_dtype)
+    )
+    assignments = golden.assignment_frame().with_columns(
+        pl.col(CUSTOMER).replace_strict(identifiers).cast(ownership_dtype)
+    )
+
+    prepared = prepare(sales=sales, samples=samples, assignments=assignments)
+    assert prepared.usable, codes(prepared.errors)
+    summary = engine.build_tables(prepared)["rep_summary"]
+    assert summary.filter(pl.col(REP_COLUMN) == BETH)["Revenue"][0] == 755.0
+    assert sales.schema[CUSTOMER] == sales_dtype
+    assert assignments.schema[CUSTOMER] == ownership_dtype
+
+
+def test_a_blank_supplier_keeps_rep_revenue_in_the_company_comparison() -> None:
+    sales = golden.sales_frame().with_columns(
+        pl.lit(None, pl.String).alias(TRANSACTION_COLUMNS.supplier)
+    )
+    comparison = engine.build_tables(prepare(sales=sales))["supplier_comparison"]
+
+    assert comparison.height == 3
+    assert dict(comparison.select(REP_COLUMN, "Rep Revenue").iter_rows()) == {
+        BETH: 755.0,
+        KEVIN: 240.0,
+        JENNIFER: 0.0,
+    }
+    assert comparison["Company Revenue"].to_list() == [995.0] * 3
+
+
 def test_an_unreadable_invoice_date_stops_the_report() -> None:
     broken = golden.replace_value(
         golden.sales_frame(), DATE_COLUMN, 8, "not a date"

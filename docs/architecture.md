@@ -1,10 +1,14 @@
 # ForgeXL — Architecture
 
-**Status:** current as of Phase 12 — the fourth phase of the post-POC
-expansion. Phases 0–8 built and validated the proof of concept; Phase 9 added
+**Status:** audited through the Phase 13 implementation on 2026-10-01.
+Phase 13 business acceptance remains pending; Phase 14 is blocked on the
+report-specification decision documented in the
+[readiness audit](phase-14-readiness-audit.md).
+Phases 0–8 built and validated the proof of concept; Phase 9 added
 the persistent Data Library described in §5a, Phase 10 the monthly ingestion
 layer in §5b, Phase 11 the library-backed Action inputs in §5c, and Phase 12
-the rich artifact output framework in §5d.
+the rich artifact output framework in §5d, and Phase 13 the provisional
+monthly report engine in §5e.
 **Authority:** `docs/build-plan.md` remains the architectural source of truth.
 This document records what was _built_, not what may be built later.
 
@@ -337,9 +341,12 @@ already offered.
   monthly cycle are validated first, so "September sales committed but the
   September ownership snapshot silently failed" cannot happen by a file being
   wrong. A refusal leaves the library exactly as it was.
-- **The stored frame is the uploaded frame.** No column renamed, added,
-  reordered, coerced or dropped. The month, the date range, the parser engine
-  and the source hash are metadata _on the version_, never written into rows.
+- **The stored frame is the parsed source frame.** No column renamed, added,
+  reordered, repaired or dropped after parsing. CSV columns declared as text
+  in the source schema bypass numeric inference to preserve identifiers such
+  as `000123`; typed spreadsheet cells retain their original parser behavior.
+  The month, date range, parser engine, source hash and chosen date
+  interpretation are metadata _on the version_, never written into rows.
 
 ### Two entry points
 
@@ -359,6 +366,12 @@ snapshot is legitimately byte-identical from one month to the next.
 Correcting a committed month is deliberate and separate: commit a replacement
 naming the version it supersedes and why (9D). The old version stays readable,
 so the report built from it can still be reproduced.
+
+New versions record optional `date_column` / `date_format` metadata as a pair;
+older JSON records remain readable without them. An explicit replacement can
+record a missing or corrected interpretation of the same source bytes, with a
+reason. An unchanged interpretation is still a duplicate. No existing version
+is rewritten or guessed into a new format.
 
 The accepted schemas, every refusal and every warning are documented in
 [`monthly-source-schemas.md`](monthly-source-schemas.md). The
@@ -404,17 +417,19 @@ POST /api/runs
 
 **Which dataset is read is declared by the Action; which version is chosen per
 Run.** The client never names a dataset, so no client-supplied string decides
-what gets opened. It names a version, in one of three forms:
+what gets opened. It names versions using these forms:
 
 | reference              | means                                              |
 | ---------------------- | -------------------------------------------------- |
 | `latest`               | the live version with the greatest reporting month |
 | `period:2026-09`       | the live version for that month                    |
 | `version:<version id>` | that exact version, superseded or not              |
+| `versions:<id>,<id>,...` | that exact set, including superseded versions     |
 | `history`              | every live version, oldest month first             |
 | `history:2026-09`      | every live version through that month              |
 
-The last two were added in Phase 13 and are the only forms that name a **set**.
+`history` was added in Phase 13; `versions:` was added in the audit to replay
+its recorded input sets after corrections. Both name a **set**.
 Build plan 13B requires a report Action's inputs to "include the historical
 information required by the report specification", and the year-over-year and
 year-to-date windows of 13C span more months than one version holds — the
@@ -430,7 +445,18 @@ Months whose exports carry different columns are refused with
 `INCONSISTENT_DATASET_VERSIONS` rather than reconciled — merging them would
 mean inventing values for one month or dropping a column from the other. Months
 that differ only in *type*, which a CSV month and a workbook month can, are
-merged: the widening changes no value.
+merged when the types are compatible. Integer-to-float widening is checked
+for a loss of precision; boolean-to-number coercion is also refused with
+`INCONSISTENT_DATASET_VERSIONS`. An exact set contains at most one version per month; snapshot
+datasets cannot combine multiple versions.
+
+An input slot may declare `interpret_dates=True`. Resolution applies each
+version's recorded format to its own working frame before concatenation,
+allowing CSV text dates and spreadsheet date cells in the same report. The
+raw loaded frames and stored versions remain unchanged. A slot may also name
+another slot with `period_matches`: the runner compares their newest resolved
+periods before invoking Action validation. The monthly report requires its
+sample history and ownership snapshot to end at the selected sales month.
 
 `latest` is the greatest **month**, not the most recent commit. The two differ
 exactly when an old month is corrected: restating March after June was imported
@@ -438,7 +464,7 @@ commits a March version last, and answering "latest" with March would be wrong.
 
 ### Reproducible Runs
 
-Only `version:` is fixed; every other form moves. Build plan 11D allows a
+`version:` and `versions:` are fixed; every other form moves. Build plan 11D allows a
 moving form at selection and forbids one at execution, so resolution happens
 once, before the Action runs, and the Run records **both**: `requested`
 (`latest`) and `version_id` (what that resolved to). A Run therefore says what
@@ -452,8 +478,9 @@ later Run would have to name back is written down.
 The consequence is the reason the phase exists. Committing a newer version, or
 superseding the one a Run used, cannot change what that Run says it used — the
 record is a resolved ID, not a question. Re-running with
-`version:<recorded id>` reproduces the original result against the original
-source state, and a superseded version stays loadable by ID forever.
+`version:<recorded id>` for a snapshot and
+`versions:<recorded id>,<recorded id>,...` for each history slot reproduces the
+original source state, and a superseded version stays loadable by ID forever.
 
 ### What did not change
 
@@ -567,7 +594,7 @@ that name through RFC 6266's `filename*` parameter.
 
 `app.services.archive` bundles a Run's artifacts into one ZIP, in memory.
 Entry names are re-checked against the flat-filename rule on the way in — the
-model already refused a separator, a `..` or a control character when the
+model already refused a separator, a traversal name or a control character when the
 artifact was built, and the archive writer does not rely on someone else having
 checked (build plan 12F). Entries are stamped with the Run's own completion
 time rather than with "now", so re-downloading a bundle returns the same bytes.
@@ -734,16 +761,19 @@ claiming, now demonstrated rather than asserted.
   `UNKNOWN_DATASET` / `UNKNOWN_DATASET_VERSION` / 404 rather than a directory
   lookup.
 - **A dataset reference is refused, not interpreted** (`INVALID_DATASET_SELECTOR`
-  / 422, added in Phase 11). `latest`, `period:YYYY-MM` and
-  `version:<version id>` are the three accepted forms; `current`, `newest` or
+  / 422, added in Phase 11). `latest`, `period:YYYY-MM`,
+  `version:<version id>`, `versions:<id>,<id>,...` and `history[:YYYY-MM]`
+  are accepted forms; `current`, `newest` or
   a bare month is reported rather than matched to a near neighbour, the same
   way an unrecognised Action ID is. A reference also never names the dataset —
   the Action declares that — so no client string chooses what gets opened.
 - **An artifact filename is a flat name, never a path** (build plan 12F,
-  added in Phase 12). Separators, `..`, a leading dot, control characters,
+  added in Phase 12). Separators, traversal names, a leading dot, control characters,
   reserved Windows device names and trailing dots or spaces are all refused
   when the artifact is constructed, and checked again when it is written into
-  the ZIP. A filename reaches a `Content-Disposition` header and a ZIP entry
+  the ZIP. Names are capped at 150 characters and 255 UTF-8 bytes, including
+  the extension; the filename helper preserves accents while fitting both.
+  A filename reaches a `Content-Disposition` header and a ZIP entry
   name, so it cannot be allowed to name a location in either.
 - **A reporting month is read from data, never from a filename** (build plan
   10B). An uploaded file's name is metadata here too: it supplies the extension
@@ -779,8 +809,11 @@ claiming, now demonstrated rather than asserted.
   (`EXPORT_TOO_LARGE` / 422, added in Phase 7). The XLSX format holds
   1,048,575 data rows, 16,384 columns and 32,767 characters in a cell; past any
   of those, xlsxwriter silently shortens the value or Polars raises an error
-  nothing caught. `export.check_fits_worksheet` measures the result first and
-  says which limit was exceeded, where, and that CSV has none of them.
+  nothing caught. `export.check_fits_worksheet` measures the result first,
+  including header text. Rich rendering also reserves rows for titles,
+  subtitles, spacing and supplied totals, and checks presentation text before
+  writing. These checks prevent a polished workbook from silently losing its
+  last rows or shortening a heading.
 - **CORS is an exact allowlist** — `http://127.0.0.1:3000` and
   `http://localhost:3000`. Never a wildcard.
 - **Errors are structured**: `{"error": {"code", "message", "details"}}`. A

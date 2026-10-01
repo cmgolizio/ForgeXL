@@ -105,12 +105,16 @@ class ParsedFile:
         return tuple(self.frame.columns)
 
 
-def parse_tabular_bytes(payload: bytes, extension: str) -> ParsedFile:
+def parse_tabular_bytes(
+    payload: bytes, extension: str, *, text_columns: tuple[str, ...] = ()
+) -> ParsedFile:
     """Read `payload` as tabular data, dispatching on `extension`.
 
     Args:
         payload: The uploaded bytes, held in memory (build plan 6C.3).
         extension: Lowercase extension including the leading dot.
+        text_columns: Explicit CSV text columns. Ordinary uploads leave this
+            empty; monthly ingestion supplies its declared source schema.
 
     The extension chooses the reader; it does not decide the outcome. A file
     named ``.csv`` that is not a CSV fails here rather than being accepted on
@@ -124,7 +128,7 @@ def parse_tabular_bytes(payload: bytes, extension: str) -> ParsedFile:
     """
     normalised = extension.lower()
     if normalised == CSV_EXTENSION:
-        return _parse_csv(payload)
+        return _parse_csv(payload, text_columns=text_columns)
     if normalised == XLSX_EXTENSION:
         return _parse_xlsx(payload)
     raise UnsupportedExtensionError(
@@ -142,22 +146,30 @@ def parse_tabular_bytes(payload: bytes, extension: str) -> ParsedFile:
 # ---------------------------------------------------------------------------
 
 
-def _parse_csv(payload: bytes) -> ParsedFile:
+def _parse_csv(payload: bytes, *, text_columns: tuple[str, ...] = ()) -> ParsedFile:
     """Read CSV bytes with Polars.
 
     Polars reads the buffer directly (build plan 6C.6). Its own delimiter and
-    type inference is used as-is. Date parsing is deliberately left off: a
-    column of date-shaped text stays text unless an Action asks for something
+    type inference applies except for explicitly declared text columns.
+    Date parsing is deliberately left off: a column of date-shaped text stays
+    text unless an Action asks for something
     else, so no value is silently retyped.
     """
     try:
-        frame = pl.read_csv(payload)
-        # Read the header a second time as *data*, which is the only way to
-        # see the names the file actually carries: `read_csv` has already
-        # renamed any repeat to `<name>_duplicated_0` by the time it returns,
-        # and the rename is not recoverable from the result. Only the first
+        # Read the header separately as *data* to see the names the file
+        # actually carries. The ordinary table reader renames repeats to
+        # `<name>_duplicated_0`, which is not recoverable from its result.
+        # Only the first
         # record is read, so the cost does not grow with the number of rows.
-        header = pl.read_csv(payload, has_header=False, n_rows=1).row(0)
+        header = pl.read_csv(
+            payload, has_header=False, n_rows=1, infer_schema=False
+        ).row(0)
+        frame = pl.read_csv(
+            payload,
+            schema_overrides={
+                name: pl.String for name in text_columns if name in header
+            },
+        )
     except pl.exceptions.NoDataError as exc:
         raise FileParseError(
             "The uploaded CSV file is empty.", details={"reason": str(exc)}

@@ -131,7 +131,7 @@ rep, beside the company's own figures.
 | | |
 | --- | --- |
 | Action ID | `monthly_sales_rep_report` |
-| Version | `0.1.0` |
+| Version | `0.1.1` |
 | Inputs | `sales_history`, `sample_history`, `account_assignments` — all stored data |
 | Outputs | twelve tables, each holding every rep's rows, keyed by `Sales Rep` |
 
@@ -149,10 +149,21 @@ than producing a plausible-looking report.
 > specification, and what to change to confirm a rule, is
 > [`docs/monthly-sales-rep-report-spec.md`](docs/monthly-sales-rep-report-spec.md).
 
+Phase 13 business acceptance is pending and Phase 14 is blocked on the
+missing report evidence or explicit approval of the provisional basis. The
+[readiness audit](docs/phase-14-readiness-audit.md) records the decision and the
+completed fixes to earlier phases.
+
 It cannot be run from the workbench screen yet: choosing a reporting period in
 the browser arrives with the Monthly Reports workflow. Until then it is driven
 in-process or by naming the stored versions in the `POST /api/runs` form —
-`sales_history=history:2026-09`, `account_assignments=period:2026-09`.
+`sales_history=history:2026-09`, `sample_history=history:2026-09`,
+`account_assignments=period:2026-09`.
+
+To replay an earlier Run after a correction, group the recorded
+`library_inputs` by slot. Submit `versions:<id>,<id>,...` for each history slot
+and `version:<id>` for the assignment snapshot, preserving every recorded
+version. Period selectors intentionally use the current corrected data.
 
 ### Supported file formats
 

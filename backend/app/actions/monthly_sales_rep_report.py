@@ -62,8 +62,13 @@ ASSIGNMENTS_SLOT = "account_assignments"
 
 
 def _library_slot(
-    slot_id: str, label: str, dataset_id: str, columns: tuple[str, ...],
+    slot_id: str,
+    label: str,
+    dataset_id: str,
+    columns: tuple[str, ...],
     description: str,
+    period_matches: str | None = None,
+    interpret_dates: bool = False,
 ) -> ActionInput:
     """Declare one library-backed slot, with its required columns.
 
@@ -80,6 +85,8 @@ def _library_slot(
         source=ActionInputSource.LIBRARY,
         dataset_id=dataset_id,
         required_columns=columns,
+        period_matches=period_matches,
+        interpret_dates=interpret_dates,
     )
 
 
@@ -103,6 +110,7 @@ class MonthlySalesRepReportAction(Action):
             "Sales History",
             SALES_DATASET_ID,
             SALES_SCHEMA.column_names,
+            interpret_dates=True,
             description=(
                 "The committed sales months the report covers. Name them "
                 "with 'history:YYYY-MM' to report on that month, which reads "
@@ -114,6 +122,8 @@ class MonthlySalesRepReportAction(Action):
             "Sample History",
             SAMPLES_DATASET_ID,
             SAMPLES_SCHEMA.column_names,
+            interpret_dates=True,
+            period_matches=SALES_SLOT,
             description=(
                 "The committed sample months, over the same span as the "
                 "sales history. Samples are counted separately and are never "
@@ -125,6 +135,7 @@ class MonthlySalesRepReportAction(Action):
             "Account Assignments",
             ASSIGNMENTS_DATASET_ID,
             ASSIGNMENTS_SCHEMA.column_names,
+            period_matches=SALES_SLOT,
             description=(
                 "The account-ownership snapshot for the reporting month, "
                 "named with 'period:YYYY-MM'. Every figure is attributed by "

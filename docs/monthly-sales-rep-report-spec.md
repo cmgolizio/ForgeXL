@@ -1,8 +1,9 @@
 # Monthly Sales Rep Report — Specification
 
-**The authoritative definition of the Monthly Sales Rep Report** (build plan
-13A). The calculation engine is checked against this document, not the other
-way round.
+**The current implementation specification for the Monthly Sales Rep Report.**
+Business acceptance under build plan 13A remains pending. The calculation
+engine is checked against this document; passing those checks does not confirm
+that its provisional rules match the existing monthly reporting process.
 
 The declarations live in
 [`backend/app/models/report_spec.py`](../backend/app/models/report_spec.py).
@@ -13,7 +14,7 @@ rule appears in this repository **once**, in that module — the engine
 | | |
 | --- | --- |
 | Action ID | `monthly_sales_rep_report` |
-| Action version | `0.1.0` — see [Version](#version) |
+| Action version | `0.1.1` — see [Version](#version) |
 | Specification status | **PARTLY PROVISIONAL** — see [Status](#status) |
 | Sources | `sales_history`, `sample_history`, `account_assignments` |
 
@@ -42,6 +43,14 @@ in code rather than in a comment:
 
 This is the same treatment Phase 10A gave the account-assignment schema, which
 is marked `confirmed=False` for the same reason and is still marked that way.
+
+**Phase 13 is implemented but has not satisfied 13A or 13I business
+acceptance. Phase 14 is blocked on that decision.** Its workbook sections must
+also come from the accepted process (14A). A warning in a synthetic report
+does not resolve these prerequisites. See the
+[readiness audit](phase-14-readiness-audit.md) for the missing evidence and the
+execution sequence after it is supplied or the provisional basis is explicitly
+approved.
 
 The provisional rules today:
 
@@ -78,7 +87,10 @@ half-done.
 
 ### Version
 
-`0.1.0`, and deliberately so. The two proof Actions are `1.0.0` because build
+`0.1.1`, and deliberately below 1.0.0. The audit patch fixes blank-dimension
+joins, unsafe measures and internal-column collisions without confirming a
+business rule. It distinguishes corrected calculations from the original
+`0.1.0` implementation. The two proof Actions are `1.0.0` because build
 plan sections 26 and 27 specify their behaviour completely. This Action's
 arithmetic is specified by this document, part of which is provisional, so
 `1.0.0` would assert a stability the definitions do not have. Every Run records
@@ -107,6 +119,20 @@ specification", and the year-over-year and year-to-date windows of build plan
 `history` selector added in Phase 13 resolves a set, concatenates them in
 period order and records every version it read. See
 [`docs/architecture.md`](architecture.md) §5c.
+
+For an exact replay, use `versions:<id>,<id>,...` for each history slot, naming
+all its recorded IDs from `library_inputs`; use `version:<id>` for the
+assignment snapshot. These selectors read superseded versions too. A history
+set may contain at most one version per month, and an ownership slot may not
+combine snapshots. The runner rejects assignment or sample versions whose
+newest period differs from the selected sales period with
+`MISMATCHED_REPORTING_PERIODS` before the Action runs.
+
+Transaction slots opt into the date interpretation recorded at ingestion.
+Dates are parsed in a working copy before months are combined; stored source
+frames remain unchanged. Legacy versions without that metadata retain the
+previous behavior and may require an explicit corrected import. The audit
+describes that procedure.
 
 Accepted schemas are the ones Phase 10A froze — see
 [`docs/monthly-source-schemas.md`](monthly-source-schemas.md). Column names are
@@ -161,6 +187,13 @@ Five, all inclusive of both ends (rule `comparison_windows`):
 A window that contains no rows is reported as `MISSING_COMPARISON_PERIOD`
 (warning) and its growth figures are reported as absent, never as zero.
 
+**Coverage remains unresolved:** a window with some rows but missing interior
+months is currently summed without a missing-month warning. The four-month
+synthetic fixture exercises YTD arithmetic but cannot establish that a real
+year is complete. The accepted report must determine how to distinguish
+missing imports from zero-activity months and whether incomplete comparisons
+are refused, suppressed or explicitly labeled.
+
 ---
 
 ## Measures
@@ -201,6 +234,7 @@ value is altered, and quantities and percentages are not rounded at all.
 | --- | --- |
 | `Quantity` or `Total Price` blank | `MISSING_MEASURE` — **fails the report**. |
 | `Quantity` or `Total Price` not a number (`$1,234.56`, `(45.00)`) | `NON_NUMERIC_MEASURE` — **fails the report**. |
+| A measure is NaN/infinite, or an integer loses precision when read as a report number | `NON_NUMERIC_MEASURE` — **fails the report**. |
 | `Quantity` or `Total Price` exactly zero | A number. Counted as zero. |
 | `Invoice Date` blank or unreadable | `MALFORMED_INVOICE_DATE` — **fails the report**. |
 | A share whose whole is zero or absent | No share. Never `0`. |

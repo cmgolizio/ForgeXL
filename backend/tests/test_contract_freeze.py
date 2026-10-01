@@ -24,7 +24,8 @@ current implementation in depth, and several of them are expected to be
 rewritten as the runtime changes. This module is the part that must not need
 rewriting.
 
-**Amended five times.** The freeze passed unchanged through 6B, 6C and 6D.
+**Amendments are recorded below.** The freeze passed unchanged through 6B,
+6C and 6D.
 
 *Phase 6E* is the phase build plan Phase 6 always intended to change the
 manifest: 6E.1 requires result metadata and 6E.5 requires an audit summary,
@@ -141,11 +142,22 @@ states that as an assertion so it cannot be read as a gap.
 `FROZEN_ROUTES` is byte-identical for the third phase running: a report is a
 Run like any other, served by the endpoints that already exist.
 
-Everything else in this module — the metric keys, the preview limits, the
-determinism checks, the Action inventory's identities and outputs — is
-untouched across every one of those amendments and still passing. Each amended entry says
-below exactly what changed and why, so the change stays a recorded decision
-rather than a quiet edit.
+*2026-10-01 audit* makes two explicit amendments to fix Phase 13 defects:
+
+* ``ActionInput`` gains optional ``period_matches`` and ``interpret_dates``
+  declarations. They default to null/false, preserving both proof Actions.
+  The report opts in so the generic runner can enforce period provenance
+  (13H) and apply an ingestion-confirmed date format (10B/11C) before frames
+  reach an Action. All original fields keep their order and meaning.
+* Only the report's version changes to ``0.1.1``: corrected calculations must
+  be distinguishable from the original ``0.1.0`` in a Run's manifest. Its
+  business definitions remain provisional. The input policies are pinned
+  beside the existing slot metadata and over HTTP below.
+
+Routes, error codes, metric keys, preview limits, deterministic proof-Action
+behavior, tabular outputs and manifest version remain pinned. No assertion
+was removed to make an audit defect pass. See
+``docs/phase-14-readiness-audit.md`` for reproductions and the business gate.
 """
 
 from __future__ import annotations
@@ -264,6 +276,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "required_columns": (),
                 "source": ActionInputSource.UPLOAD,
                 "dataset_id": None,
+                "period_matches": None,
+                "interpret_dates": False,
             },
         ),
         "outputs": (
@@ -297,6 +311,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 ),
                 "source": ActionInputSource.UPLOAD,
                 "dataset_id": None,
+                "period_matches": None,
+                "interpret_dates": False,
             },
         ),
         "outputs": (
@@ -317,7 +333,7 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
     # the specification rather than about the code (build plan 13A).
     {
         "id": "monthly_sales_rep_report",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "name": "Monthly Sales Rep Report",
         "inputs": (
             {
@@ -328,6 +344,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "required_columns": TRANSACTION_COLUMN_NAMES,
                 "source": ActionInputSource.LIBRARY,
                 "dataset_id": "sales_history",
+                "period_matches": None,
+                "interpret_dates": True,
             },
             {
                 "id": "sample_history",
@@ -337,6 +355,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "required_columns": TRANSACTION_COLUMN_NAMES,
                 "source": ActionInputSource.LIBRARY,
                 "dataset_id": "sample_history",
+                "period_matches": "sales_history",
+                "interpret_dates": True,
             },
             {
                 "id": "account_assignments",
@@ -346,6 +366,8 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "required_columns": ("Customer", "Sales Person"),
                 "source": ActionInputSource.LIBRARY,
                 "dataset_id": "account_assignments",
+                "period_matches": "sales_history",
+                "interpret_dates": False,
             },
         ),
         "outputs": tuple(
@@ -512,6 +534,8 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "required_columns",
             "source",
             "dataset_id",
+            "period_matches",
+            "interpret_dates",
         ),
     ),
     (ActionOutput, ("id", "label", "description", "formats")),
@@ -825,6 +849,8 @@ def test_each_action_declares_its_frozen_input_slots(entry) -> None:
         # catch a later phase quietly converting one.
         assert slot.source is expected["source"]
         assert slot.dataset_id == expected["dataset_id"]
+        assert slot.period_matches == expected["period_matches"]
+        assert slot.interpret_dates is expected["interpret_dates"]
 
 
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
@@ -1356,6 +1382,8 @@ def test_get_actions_serves_the_frozen_inventory(api_client) -> None:
             )
             assert slot["source"] == expected_slot["source"].value
             assert slot["dataset_id"] == expected_slot["dataset_id"]
+            assert slot["period_matches"] == expected_slot["period_matches"]
+            assert slot["interpret_dates"] is expected_slot["interpret_dates"]
         assert [output["id"] for output in entry["outputs"]] == [
             output["id"] for output in expected["outputs"]
         ]

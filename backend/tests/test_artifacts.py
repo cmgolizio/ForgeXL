@@ -45,6 +45,8 @@ from app.models.artifact import (
     artifact_ids,
     check_artifact_filename,
 )
+
+
 from app.models.run import RunResult
 from app.models.schemas import (
     ActionInput,
@@ -56,6 +58,20 @@ from app.services import run_store
 from app.services.runner import execute_run
 
 from tests.helpers import csv_bytes, upload
+
+@pytest.mark.parametrize("character", ["é", "界", "😀"])
+def test_artifact_filenames_fit_the_filesystem_byte_limit(character) -> None:
+    filename = artifact_filename(character * 150, "xlsx")
+
+    assert len(filename.encode("utf-8")) <= 255
+    assert filename.endswith(".xlsx")
+    assert check_artifact_filename(filename) == filename
+
+
+def test_a_flat_filename_can_still_be_too_many_bytes() -> None:
+    with pytest.raises(UnsafeArtifactFilenameError, match="bytes"):
+        check_artifact_filename("界" * 100 + ".xlsx")
+
 
 HEADER = ("Rep", "Cases")
 ROWS = (("Beth Comeaux", 120), ("Kevin Wardell", 88), ("Jennifer Jones", 205))

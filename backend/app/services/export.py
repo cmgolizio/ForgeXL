@@ -252,13 +252,19 @@ def to_workbook_bytes(sheets: Iterable[tuple[str, pl.DataFrame]]) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def check_fits_worksheet(frame: pl.DataFrame, *, label: str) -> None:
+def check_fits_worksheet(
+    frame: pl.DataFrame, *, label: str, extra_rows: int = 0
+) -> None:
     """Refuse `frame` if the XLSX format cannot hold it without losing data.
 
     Three limits belong to the file format itself, not to this application:
     a worksheet holds :data:`MAX_WORKSHEET_ROWS` rows of data beneath its
     header row and :data:`MAX_WORKSHEET_COLUMNS` columns, and one cell holds
     :data:`MAX_CELL_CHARACTERS` characters.
+
+    ``extra_rows`` reserves titles, subtitles, spacing and a supplied total
+    row for rich rendering. The column header is already excluded from the
+    data-row maximum. Header text is checked as well as source cells.
 
     The cell check measures characters, not bytes, because that is what Excel
     counts — an accented name is one character per letter however many bytes it
@@ -268,16 +274,21 @@ def check_fits_worksheet(frame: pl.DataFrame, *, label: str) -> None:
     Raises:
         ExportTooLargeError: naming the limit that was exceeded, and where.
     """
-    if frame.height > MAX_WORKSHEET_ROWS:
+    if extra_rows < 0:
+        raise ValueError("A worksheet cannot reserve a negative number of rows.")
+    used_rows = frame.height + extra_rows
+    if used_rows > MAX_WORKSHEET_ROWS:
         raise ExportTooLargeError(
-            f"{label} has {frame.height:,} rows. An Excel worksheet holds "
-            f"{MAX_WORKSHEET_ROWS:,}, so this result cannot be saved as a "
+            f"{label} uses {used_rows:,} data and presentation rows. An Excel "
+            f"worksheet holds {MAX_WORKSHEET_ROWS:,} rows plus its column "
+            "header, so this result cannot be saved as a "
             "workbook. Download it as CSV instead — CSV has no row limit.",
             details={
                 "output_label": label,
                 "limit": "rows",
                 "maximum": MAX_WORKSHEET_ROWS,
-                "actual": frame.height,
+                "actual": used_rows,
+                "extra_rows": extra_rows,
             },
         )
 
@@ -294,9 +305,10 @@ def check_fits_worksheet(frame: pl.DataFrame, *, label: str) -> None:
             },
         )
 
-    text_columns = [
-        name for name, dtype in frame.schema.items() if dtype == pl.String
-    ]
+    for name in frame.columns:
+        check_cell_text(name, label=label, column=name)
+
+    text_columns = [name for name, dtype in frame.schema.items() if dtype == pl.String]
     if not text_columns:
         return
 
@@ -320,6 +332,26 @@ def check_fits_worksheet(frame: pl.DataFrame, *, label: str) -> None:
                     "column": name,
                 },
             )
+
+
+def check_cell_text(value: object, *, label: str, column: str | None = None) -> None:
+    """Refuse text Excel would silently shorten, including presentation cells."""
+    if not isinstance(value, str) or len(value) <= MAX_CELL_CHARACTERS:
+        return
+    details: dict[str, object] = {
+        "output_label": label,
+        "limit": "cell_characters",
+        "maximum": MAX_CELL_CHARACTERS,
+        "actual": len(value),
+    }
+    if column is not None:
+        details["column"] = column
+    raise ExportTooLargeError(
+        f"A text cell in {label} is {len(value):,} characters long. An Excel "
+        f"cell holds {MAX_CELL_CHARACTERS:,}; saving it would silently shorten "
+        "the text.",
+        details=details,
+    )
 
 
 # ---------------------------------------------------------------------------

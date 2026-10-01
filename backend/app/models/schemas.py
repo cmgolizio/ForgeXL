@@ -131,6 +131,20 @@ class ActionInput(BaseModel):
             "*version* is read is chosen per Run, not declared here."
         ),
     )
+    period_matches: str | None = Field(
+        default=None,
+        description=(
+            "Library slot whose newest reporting period this slot must match. "
+            "Validated against resolved versions before the Action sees frames."
+        ),
+    )
+    interpret_dates: bool = Field(
+        default=False,
+        description=(
+            "Read date text in a working copy using the interpretation "
+            "recorded on each library version."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_source(self) -> ActionInput:
@@ -153,6 +167,11 @@ class ActionInput(BaseModel):
                     "extensions."
                 )
         else:
+            if self.period_matches is not None or self.interpret_dates:
+                raise ValueError(
+                    "Period matching and date interpretation require a "
+                    "library-backed slot."
+                )
             if self.dataset_id is not None:
                 raise ValueError(
                     "dataset_id is only meaningful on a library-backed input "
@@ -163,6 +182,10 @@ class ActionInput(BaseModel):
                     "An upload input slot must accept at least one file "
                     "extension."
                 )
+        if self.period_matches is not None and (
+            not self.period_matches.strip() or self.period_matches == self.id
+        ):
+            raise ValueError("period_matches must name a different input slot.")
         return self
 
 

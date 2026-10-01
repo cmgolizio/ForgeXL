@@ -1,5 +1,58 @@
 Implementation Status
-Last Updated: 2026-09-19 Current Phase: None Last Completed Phase: Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine. Phase 13 is complete. It is the fifth phase of the post-POC expansion. Phase 14 is not started; nothing for it has been scaffolded, stubbed or prepared — no Action renders a workbook, no registered Action produces an artifact, and there is no batch archive of anything.
+Last Updated: 2026-10-01. Current work: Phases 0–13 audit and fixes. Latest implemented phase: Phase 13 — Monthly Sales Rep Report Specification and Calculation Engine. Phase 13 business acceptance is incomplete under 13A and 13I. Phase 14 is blocked on the report-specification decision; no report workbook generation has been implemented.
+
+## 2026-10-01 audit — current state
+
+The audit started from main at bea1905a3b907797cc4bd751ab189cd826019e64. The baseline genuinely passes 2,150 tests, pyright, ESLint and the Next.js production build. Earlier phase work is present on main, including the Phase 13 repairs to the Phase 12 file naming and missing artifact-download tests.
+
+Independent defects are repaired: null-key report joins, blank supplier comparisons, unsafe measures and numeric/boolean widening, typed account matching, internal source-column collisions, validation-hook ordering, mismatched period/snapshot inputs, exact history replay, lost date interpretation, CSV leading zeroes and literal headers, partial-import storage-error reporting, workbook presentation limits and Unicode filename byte limits. The report Action is now 0.1.1; its business rules remain provisional. Routes, the two proof Actions, the twelve report outputs and the in-memory Run contract remain unchanged. Two optional ActionInput declarations are additive and explicitly pinned in the contract tests.
+
+Final verification: npm test reports **2,226 passed**, zero failures/skips/xfails, and one upstream Starlette/httpx deprecation warning (39.82 seconds). Pyright reports 0 errors/0 warnings; npm run lint and npm run build pass. Microsoft Excel on Mac was not available and no manual Excel acceptance is claimed.
+
+The authoritative audit and handoff is [docs/phase-14-readiness-audit.md](phase-14-readiness-audit.md). It records the architecture, reproduced defects, compatibility behavior, business evidence required, a proposed twelve-sheet layout and the 14A–14F execution sequence. Its required decision is grounded in build-plan 13A: "document the ambiguity and resolve it before implementation." No verified Excel report, Power Query definitions or previously accepted completed month exists in the repository. Seven report rules and the account-assignment schema remain unconfirmed. The four-month synthetic fixture proves declared arithmetic, not 13I business acceptance. Missing interior comparison months also need an accepted coverage policy.
+
+Required next input: the verified report and its matching sources/history, queries and independently checked figures, or explicit authorization to use the current provisional rules and the proposed layout for Phase 14. A provisional authorization must retain the warnings and outstanding real-month acceptance; it must not mark the rules confirmed without evidence.
+
+Changed-file inventory: one new audit document and thirty-one modified files.
+
+```text
+README.md
+backend/app/actions/monthly_sales_rep_report.py
+backend/app/models/artifact.py
+backend/app/models/library.py
+backend/app/models/report_spec.py
+backend/app/models/schemas.py
+backend/app/models/source_schemas.py
+backend/app/services/data_library.py
+backend/app/services/export.py
+backend/app/services/ingestion.py
+backend/app/services/input_resolution.py
+backend/app/services/monthly_report.py
+backend/app/services/parser.py
+backend/app/services/reporting_period.py
+backend/app/services/runner.py
+backend/app/services/workbook.py
+backend/tests/test_api.py
+backend/tests/test_artifacts.py
+backend/tests/test_contract_freeze.py
+backend/tests/test_export.py
+backend/tests/test_golden_month.py
+backend/tests/test_ingestion.py
+backend/tests/test_library_history.py
+backend/tests/test_monthly_report.py
+backend/tests/test_parser.py
+backend/tests/test_runner.py
+backend/tests/test_workbook.py
+docs/architecture.md
+docs/implementation-status.md
+docs/monthly-sales-rep-report-spec.md
+docs/monthly-source-schemas.md
+docs/phase-14-readiness-audit.md
+```
+
+## Historical phase records
+
+The entries below describe their original phase implementations and check results. Their Phase 13 completion claims are superseded by the current audit: 13A and 13I business acceptance remains pending.
 
 Architecture document. docs/architecture.md was created in Phase 6I (6I.6–6I.8) and is the place to read the finished V1 architecture, the V1 persistence behaviour and the extension point for future persistence. Phase 9 added §5a, the persistent Data Library, Phase 10 added §5b, the monthly ingestion layer above it, Phase 11 added §5c, library-backed Action inputs, Phase 12 added §5d, the rich artifact output framework, and Phase 13 added §5e, the monthly report engine. This file remains the phase-by-phase record.
 
@@ -4905,28 +4958,28 @@ Phase 5 added no runtime dependency: the whole frontend is React, Tailwind and n
 Next Phase
 Phase 14 — Batch Sales Rep Workbook Generation.
 
-Not started. Nothing for it has been scaffolded, stubbed or prepared: no Action renders a workbook, no registered Action returns an artifact, there is no ZIP of anything a user can reach, and the report Action's outputs are twelve DataFrames and nothing else. `test_no_registered_action_produces_artifacts` covers all three registered Actions and would fail the moment that changed.
+Blocked on the report-specification decision. The report Action still returns twelve DataFrames and no workbooks; no registered Action returns an artifact. `test_no_registered_action_produces_artifacts` covers all three registered Actions and would fail the moment that changed.
 
-Phase 14 is the phase where everything built so far becomes a file a person receives. It reads the tables Phase 13 produces, slices each by `Sales Rep`, renders one workbook per rep with `app.services.workbook`, and bundles them with `app.services.archive`. Both were built and tested in Phase 12 and neither needs extending to be used. Read build plan 14A–14F in full before starting.
+Phase 14 reads the tables Phase 13 produces, slices each by `Sales Rep`, renders one workbook per rep with `app.services.workbook`, and bundles them with `app.services.archive`. Reuse the Phase 12 infrastructure; define the accepted layout and purpose-named bundle in Phase 14. Read build plan 14A–14F and the readiness audit before starting.
 
-Phase 13 is complete
-Every exit criterion build plan Phase 13 lists, checked against what is actually in the repository:
+Phase 13 implementation inventory — business acceptance pending
+Implementation evidence and outstanding acceptance, checked against the build plan:
 
 Criterion Evidence
-13A the report specification docs/monthly-sales-rep-report-spec.md and app/models/report_spec.py: 25 rules, each with its confidence and its basis; 7 provisional, listed and reported on every Run
-13B the registered Action monthly_sales_rep_report 0.1.0, three library-backed slots, twelve outputs; the `history` selector that makes its history readable
+13A incomplete: docs/monthly-sales-rep-report-spec.md and app/models/report_spec.py declare 25 rules, but 7 are provisional and have not been reconciled with the verified report, queries or business definitions
+13B the registered Action monthly_sales_rep_report 0.1.1, three library-backed slots, twelve outputs; `history` for live history and `versions:` for an exact recorded replay
 13C reporting-period resolution one ReportPeriod per Run, derived once from the data; five windows, every table asks it and none computes a date
 13D dynamic rep roster read from the account-assignment snapshot; three tests prove a rep added, a rep dropped, and transactions unable to change it
 13E shared prepared data model one prepared model per Run, not per rep; a test asserts all three input frames are unchanged, schema included
 13F report calculation tables twelve tables; every 13F category answered by a declared section, asserted both ways
 13G company and rep calculations company_figures() once per Run; a test asserts every rep sees the same company revenue and share for a supplier
 13H validation before generation sixteen declared conditions, eight failing the Run from validate() before any table is built, seven qualifying the report in data_quality
-13I golden-month accuracy tests 54 tests asserting hand-worked values — rep totals, company totals, account metrics, supplier metrics, percentages, placements, sample counts and representative detail rows
-exit criterion, as one sentence the Action produces correct report tables for every applicable rep and the calculations are proved by tests, with no attention paid to workbook appearance
+13I incomplete: hand-worked synthetic tests assert values, but no previously completed and manually verified business report underlies their fixture
+exit criterion remains pending business evidence: declared arithmetic is tested, but correct business calculations for an accepted real month have not been established
 docs/implementation-status.md updated this entry
 What a Phase 14 session inherits
 A clean container is the normal starting condition. backend/.venv/ and node_modules/ will not exist. README.md documents the four commands that rebuild them; they were followed exactly this session and needed nothing else.
-The suite must report 2,150 passed, zero failures, zero skips, zero xfails.
+Use the current audit's final verification result at the top of this file; 2,150 tests was the original Phase 13 baseline.
 **Read Known Issue 109 before trusting a number.** Seven of the report's business definitions are provisional. Phase 14 renders what Phase 13 calculates and must not adjust a figure to make a workbook look right — build plan 12D forbids the formatting layer from calculating anything, and a total arriving from the engine is the whole point.
 Render with app.services.workbook, never with xlsxwriter directly. The contract freeze fails an Action that imports the engine. The renderer takes Sheet and Column objects and calculates nothing: a totals row's values are supplied by the caller. `monthly_report.py` is where those figures come from, and adding a per-rep total there is a one-function change.
 Name files with artifact_ids() and artifact_filename(). Do not hand-roll either. A hand-rolled ID is what failed the first live Run of Phase 12; an ID is a URL token and a filename is a name.
@@ -4960,7 +5013,7 @@ md5sum backend/tests/_.py backend/app/_.py backend/app/_/_.py | awk '{print $1}'
 wc -l docs/implementation-status.md # is this document duplicated? (Known Issue 108)
 npx pyright
 npm run lint
-The suite must report 2150 passed, zero xfails, and pyright 0 errors. The build must succeed and this document must be about 4,900 lines, not twice that. Every other line must produce no output.
+Use the current audit's final test count at the top of this file, with zero failures/skips/xfails and pyright 0 errors. The build must succeed; this document is roughly 5,000 lines and must not be duplicated. Interpret each inventory check against the actual commit rather than requiring every command to produce no output.
 
 `npm run build` moved up the list deliberately. It was in the Phase 12 list too, and the Phase 12 commit does not build; a check that is run but not acted on is no check at all.
 

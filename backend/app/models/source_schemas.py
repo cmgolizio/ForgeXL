@@ -88,16 +88,18 @@ DATETIME_FORMATS: frozenset[str] = frozenset({ISO_DATETIME})
 class SourceColumnKind(str, Enum):
     """What a source column is expected to hold.
 
-    Deliberately coarse, and it drives exactly two behaviours and nothing else:
+    Deliberately coarse, with three explicit parsing/validation uses:
 
+    * :attr:`TEXT` keeps CSV identifiers as text during parsing, preserving
+      leading zeroes. It does not retype stored spreadsheet cells.
     * :attr:`DATE` marks the column a reporting period is derived from.
     * :attr:`NUMBER` marks a column whose arrival as text is worth reporting —
       a ``Total Price`` that parsed as text usually means the export wrote
       ``$1,234.56`` or ``(45.00)``, which a report cannot add up.
 
-    It is never used to *convert* anything. Ingestion stores the frame as the
-    parser produced it; a kind that does not match is reported, not repaired
-    (build plan section 3.3).
+    It never repairs a value. Ingestion stores the frame as the parser
+    produced it; a kind that does not match is reported, not repaired (build
+    plan section 3.3).
     """
 
     TEXT = "text"

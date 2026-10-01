@@ -95,14 +95,21 @@ Fifteen columns, in the order the export produces them:
 
 ### What "kind" does and does not do
 
-`kind` drives exactly two behaviours and never converts anything:
+`kind` has three explicit parsing/validation uses:
 
+- **text** declares CSV identifier columns as strings before type inference,
+  so `000123` stays `000123`. It does not retype existing spreadsheet cells.
 - **date** marks the column a reporting period is read from.
 - **number** marks a column whose arrival as _text_ is worth reporting
   (`NON_NUMERIC_SOURCE_COLUMN`). A `Total Price` that parsed as text usually
   means the export wrote `$1,234.56` or `(45.00)`. The value is stored exactly
   as it arrived — a parser that turned `(45.00)` into `-45` would have decided
   what the file meant.
+
+The parsed frame is stored without repairs. A selected or detected text date
+format is recorded separately as `date_column` and `date_format` on each
+committed version. Report slots can opt into applying that interpretation in a
+working copy; the source values remain unchanged.
 
 Ownership for a report comes from the account-assignment snapshot for the
 month, **not** from `Sales Person` on the invoice. That is the point of
@@ -272,6 +279,11 @@ the more specific `DUPLICATE_SOURCE_FILE` is the one reported.
 Correcting a month that is already committed is deliberate and separate: commit
 a replacement naming the version it supersedes and why (build plan 9D). The old
 version stays readable, so the report built from it can still be reproduced.
+
+One narrow exception permits identical source bytes during a correction: the
+caller explicitly replaces the matching version and records a different or
+previously missing date interpretation. A reason is still required. Repeating
+the same bytes and the same interpretation is still `DUPLICATE_SOURCE_FILE`.
 
 ---
 

@@ -328,7 +328,7 @@ def read_dates(
 
     viable: list[tuple[str, pl.Series]] = []
     for candidate in candidates:
-        parsed = _parse_with(series, candidate)
+        parsed = parse_date_values(series, candidate)
         # Every populated cell must be read, not most of them.
         if parsed.null_count() == series.null_count():
             viable.append((candidate, parsed))
@@ -399,8 +399,10 @@ def read_dates(
     return chosen, chosen_format, ()
 
 
-def _parse_with(series: pl.Series, fmt: str) -> pl.Series:
-    """Read `series` with one format, leaving unreadable values null.
+def parse_date_values(series: pl.Series, fmt: str) -> pl.Series:
+    """Read date text with one specified format, leaving unreadable values null.
+
+    The caller supplies the format; this function does not choose or guess.
 
     ``strict=False`` is what makes a format testable: a format that cannot read
     a value produces a null there rather than an exception, so the caller can

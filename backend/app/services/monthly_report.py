@@ -70,8 +70,8 @@ from app.services.reporting_period import period_of, read_dates
 # ---------------------------------------------------------------------------
 # Internal column names
 #
-# Prefixed so they can never collide with a source column, however the export
-# changes. They exist only inside the prepared frames and never reach a report
+# Reserved in the prepared copy so an unexpected source column cannot override
+# a derived value. They exist only inside prepared frames and never reach a report
 # table (build plan 6E.6: audit and working data stay out of the user's data).
 # ---------------------------------------------------------------------------
 
@@ -460,14 +460,17 @@ def _prepare_transactions(
     report fails. The frame handed in is never modified (build plan 13E).
     """
     columns = TRANSACTION_COLUMNS
-    if not {columns.date, columns.quantity, columns.revenue} <= set(
-        frame.columns
-    ):
+    frame = frame.drop(
+        [
+            name
+            for name in (DATE, MONTH, REVENUE, QUANTITY, OWNER)
+            if name in frame.columns
+        ]
+    )
+    if not {columns.date, columns.quantity, columns.revenue} <= set(frame.columns):
         return _empty_transactions(frame)
 
-    dates, _format, issues = read_dates(
-        frame, schema, columns.date, slot_id=slot_id
-    )
+    dates, _format, issues = read_dates(frame, schema, columns.date, slot_id=slot_id)
     if issues:
         collected.add(
             "MALFORMED_INVOICE_DATE",
@@ -476,8 +479,7 @@ def _prepare_transactions(
             details={
                 "column": columns.date,
                 "issues": [
-                    {"code": item.code, "message": item.message}
-                    for item in issues
+                    {"code": item.code, "message": item.message} for item in issues
                 ],
             },
             slot_id=slot_id,
@@ -504,9 +506,7 @@ def _prepare_transactions(
             prepared, source, target, schema, collected, slot_id=slot_id
         )
 
-    return prepared.with_columns(
-        pl.col(DATE).dt.strftime("%Y-%m").alias(MONTH)
-    )
+    return prepared.with_columns(pl.col(DATE).dt.strftime("%Y-%m").alias(MONTH))
 
 
 def _with_measure(
@@ -536,7 +536,7 @@ def _with_measure(
 
     if series.dtype == pl.String:
         numeric = pl.col(source).cast(pl.Float64, strict=False)
-    elif series.dtype.is_numeric():
+    elif series.dtype.is_numeric() or series.dtype == pl.Null:
         numeric = pl.col(source).cast(pl.Float64)
     else:
         collected.add(
@@ -565,12 +565,16 @@ def _with_measure(
             slot_id=slot_id,
         )
 
-    unreadable = prepared.filter(~blank & pl.col(target).is_null())
+    unsafe = pl.col(target).is_null() | ~pl.col(target).is_finite()
+    if series.dtype.is_integer():
+        restored = pl.col(target).cast(series.dtype, strict=False)
+        unsafe = unsafe | restored.is_null() | (restored != pl.col(source))
+    unreadable = prepared.filter(~blank & unsafe)
     if unreadable.height:
         collected.add(
             "NON_NUMERIC_MEASURE",
             f"{unreadable.height} row(s) of {schema.label} have a {source} "
-            "that is not a number.",
+            "that cannot be read as a finite number without losing precision.",
             details={
                 "column": source,
                 "row_count": unreadable.height,
@@ -582,9 +586,7 @@ def _with_measure(
     return prepared
 
 
-def _attach_owner(
-    frame: pl.DataFrame, ownership: pl.DataFrame
-) -> pl.DataFrame:
+def _attach_owner(frame: pl.DataFrame, ownership: pl.DataFrame) -> pl.DataFrame:
     """Join each transaction to the rep who owns its account.
 
     A left join, matched exactly on `Customer` (rule ``ownership_matching``).
@@ -597,7 +599,9 @@ def _attach_owner(
     if customer not in frame.columns or frame.height == 0:
         return frame.with_columns(pl.lit(None, pl.String).alias(OWNER))
 
-    return frame.join(
+    # Account identifiers are declared text. Read typed spreadsheet identifiers
+    # consistently with the ownership map, without changing either source frame.
+    return frame.with_columns(pl.col(customer).cast(pl.String)).join(
         ownership.rename({ASSIGNMENTS_CUSTOMER_COLUMN: customer}).rename(
             {REP_COLUMN: OWNER}
         ),
@@ -1154,7 +1158,7 @@ def _supplier_comparison(
     ).join(company_figures_, how="cross")
 
     table = (
-        grid.join(rep_figures, on=[REP_COLUMN, supplier], how="left")
+        grid.join(rep_figures, on=[REP_COLUMN, supplier], how="left", nulls_equal=True)
         .with_columns(pl.col("Rep Revenue").fill_null(0.0))
         .with_columns(
             _share(
@@ -1163,12 +1167,9 @@ def _supplier_comparison(
             ).alias("Rep Share")
         )
         .with_columns(
-            (pl.col("Rep Share") - pl.col("Company Share")).alias(
-                "Share Difference"
-            ),
+            (pl.col("Rep Share") - pl.col("Company Share")).alias("Share Difference"),
             pl.when(
-                pl.col("Company Share").is_not_null()
-                & (pl.col("Company Share") != 0)
+                pl.col("Company Share").is_not_null() & (pl.col("Company Share") != 0)
             )
             .then(pl.col("Rep Share") / pl.col("Company Share"))
             .otherwise(None)
@@ -1197,9 +1198,9 @@ def _product_performance(prepared: PreparedReport) -> pl.DataFrame:
     period = prepared.require_period()
     key = list(TRANSACTION_COLUMNS.product_key)
 
-    table = _windowed(
-        prepared.sales, period, group_by=(OWNER, *key)
-    ).rename({OWNER: REP_COLUMN})
+    table = _windowed(prepared.sales, period, group_by=(OWNER, *key)).rename(
+        {OWNER: REP_COLUMN}
+    )
     table = table.filter(pl.col(REP_COLUMN).is_not_null())
 
     accounts = (
@@ -1212,14 +1213,12 @@ def _product_performance(prepared: PreparedReport) -> pl.DataFrame:
         .rename({OWNER: REP_COLUMN})
     )
 
-    table = table.join(accounts, on=[REP_COLUMN, *key], how="left")
+    table = table.join(accounts, on=[REP_COLUMN, *key], how="left", nulls_equal=True)
     table = _fill_counts(table, ["Accounts"])
 
-    return table.select(
-        REP_COLUMN, *key, *_measure_column_order(), "Accounts"
-    ).sort(
-        [REP_COLUMN, "Revenue", TRANSACTION_COLUMNS.sku],
-        descending=[False, True, False],
+    return table.select(REP_COLUMN, *key, *_measure_column_order(), "Accounts").sort(
+        [REP_COLUMN, "Revenue", *key],
+        descending=[False, True, *([False] * len(key))],
         nulls_last=True,
     )
 
@@ -1437,7 +1436,7 @@ def _windowed(
         # are stacked side by side; `hstack` is the operation that says both
         # of those things and checks the second.
         table = (
-            table.join(part, on=keys, how="full", coalesce=True)
+            table.join(part, on=keys, how="full", coalesce=True, nulls_equal=True)
             if keys
             else table.hstack(part)
         )
