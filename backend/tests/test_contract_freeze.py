@@ -458,10 +458,20 @@ FROZEN_ROUTES: dict[str, list[str]] = {
     "/api/actions": ["get"],
     "/api/runs": ["post"],
     "/api/runs/{run_id}": ["get"],
+    # V1 explicit memory cleanup; all existing routes and shapes stay frozen.
+    "/api/runs/{run_id}/discard": ["post"],
     "/api/runs/{run_id}/outputs/{output_id}/preview": ["get"],
     "/api/runs/{run_id}/outputs/{output_id}/download/csv": ["get"],
     "/api/runs/{run_id}/outputs/{output_id}/download/xlsx": ["get"],
     "/api/runs/{run_id}/download/xlsx": ["get"],
+    # Added in Phase 15; Runs and downloads retain their existing contract.
+    "/api/monthly/catalog": ["get"],
+    "/api/monthly/validate": ["post"],
+    "/api/monthly/validate-saved": ["post"],
+    "/api/monthly/generate": ["post"],
+    "/api/monthly/discard": ["post"],
+    "/api/monthly/history/validate": ["post"],
+    "/api/monthly/history/commit": ["post"],
     # Added in Phase 12.
     "/api/runs/{run_id}/artifacts/{artifact_id}/download": ["get"],
     "/api/runs/{run_id}/artifacts/download/zip": ["get"],

@@ -160,9 +160,8 @@ class MonthlySalesRepReportAction(Action):
         enforced at the only point where failing costs nothing.
 
         Warnings are not returned: an Action's validation hook has no warning
-        channel, and everything it returns fails the Run. They travel in the
-        Data Quality result table instead, which is also where a reader wants
-        them — beside the report they qualify.
+        channel, and everything it returns fails the Run. They travel through ActionResult into the
+        Run warning summary and the Data Quality result table.
         """
         return list(self._prepare(inputs).errors)
 
@@ -177,6 +176,7 @@ class MonthlySalesRepReportAction(Action):
             # them — so it states no affected-row count rather than inventing
             # one from two totals that mean different things (build plan 6E.5).
             rows_affected=None,
+            warnings=prepared.warnings,
             artifacts=render_rep_workbooks(prepared, tables),
             artifact_bundle_filename=artifact_filename(
                 f"{prepared.require_period().label} Sales Rep Reports", "zip"

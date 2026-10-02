@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import config
-from app.api import actions, runs
+from app.api import actions, runs, monthly
+from app.api.request_guard import BrowserWriteGuard
 from app.errors import WorkbenchError
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.add_middleware(BrowserWriteGuard)
 
 app.include_router(actions.router)
 app.include_router(runs.router)
+app.include_router(monthly.router)
 
 
 @app.exception_handler(WorkbenchError)
@@ -69,13 +72,18 @@ def main() -> None:
     as ``python -m app.main`` from the ``backend`` directory.
     """
     import uvicorn
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the local ForgeXL backend.")
+    parser.add_argument("--no-reload", action="store_true", help="Stable normal-use server without the development reload worker.")
+    options = parser.parse_args()
 
     uvicorn.run(
         "app.main:app",
         host=config.HOST,
         port=config.PORT,
-        reload=True,
-        reload_dirs=[str(config.PROJECT_ROOT / "backend" / "app")],
+        reload=not options.no_reload,
+        reload_dirs=[str(config.PROJECT_ROOT / "backend" / "app")] if not options.no_reload else None,
     )
 
 

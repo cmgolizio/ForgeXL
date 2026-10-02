@@ -378,7 +378,7 @@ class LocalDataLibrary(DataLibrary):
             except OSError as error:
                 raise DataLibraryError(
                     f"The {definition.id} dataset could not be created.",
-                    details={"dataset_id": definition.id, "reason": str(error)},
+                    details={"dataset_id": definition.id, "reason": type(error).__name__},
                 ) from error
         return dataset
 
@@ -450,7 +450,7 @@ class LocalDataLibrary(DataLibrary):
                     details={
                         "dataset_id": dataset.id,
                         "version_id": version.version_id,
-                        "reason": str(error),
+                        "reason": type(error).__name__,
                     },
                 ) from error
             finally:
@@ -530,7 +530,7 @@ class LocalDataLibrary(DataLibrary):
                 details={
                     "dataset_id": dataset_id,
                     "version_id": version.version_id,
-                    "reason": str(error),
+                    "reason": type(error).__name__,
                 },
             ) from error
 
@@ -751,7 +751,7 @@ def _read_record(path: Path, model: type[RecordT], *, what: str) -> RecordT:
     except OSError as error:
         raise DataLibraryError(
             f"The Data Library record for {what} could not be read.",
-            details={"reason": str(error)},
+            details={"reason": type(error).__name__},
         ) from error
 
     try:

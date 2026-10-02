@@ -86,6 +86,8 @@ class ActionResult:
 
     #: Optional purpose-specific name for the generic artifact ZIP download.
     artifact_bundle_filename: str | None = None
+    #: Warnings discovered while calculating; carried into the Run summary.
+    warnings: tuple[ValidationIssue, ...] = ()
 
     def __post_init__(self) -> None:
         """Freeze the artifact list and refuse a collision inside it.

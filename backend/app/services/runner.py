@@ -230,6 +230,7 @@ def execute_run(
             raise RunValidationError(issues)
 
         result = _execute_action(action, frames)
+        warnings += tuple(result.warnings)
         outputs, tables = _collect_outputs(
             action, result, input_records, library_records
         )

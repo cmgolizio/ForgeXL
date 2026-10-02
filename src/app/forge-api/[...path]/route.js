@@ -1,4 +1,5 @@
 import { backendOrigin } from "@/lib/backend-origin";
+import { sameOriginWrite } from "@/lib/request-origin";
 
 /**
  * The same-origin transport to FastAPI (build plan 6G.2-6G.5).
@@ -88,6 +89,9 @@ export async function GET(request, context) {
 }
 
 export async function POST(request, context) {
+  if (!sameOriginWrite(request)) {
+    return Response.json({ error: { code: "CROSS_ORIGIN_REQUEST", message: "Open ForgeXL directly before changing local data.", details: {} } }, { status: 403 });
+  }
   return forward(request, context);
 }
 
@@ -167,10 +171,17 @@ function upstreamUrl(request, path) {
 function forwardedRequestHeaders(headers) {
   const forwarded = new Headers();
   for (const [name, value] of headers) {
-    if (!CONNECTION_HEADERS.has(name.toLowerCase()))
+    // Browser writes were checked against the public Next.js origin above.
+    // Do not present that LAN origin as a direct browser request to loopback.
+    if (!CONNECTION_HEADERS.has(name.toLowerCase()) &&
+        !(requestIsBrowserWriteHeader(name)))
       forwarded.append(name, value);
   }
   return forwarded;
+}
+
+function requestIsBrowserWriteHeader(name) {
+  return ["origin", "sec-fetch-site"].includes(name.toLowerCase());
 }
 
 /** The upstream response's headers, less the ones that described its connection. */

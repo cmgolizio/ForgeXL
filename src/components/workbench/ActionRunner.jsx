@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionDescription from "@/components/workbench/ActionDescription";
@@ -12,6 +14,7 @@ import FileUploadSlot from "@/components/workbench/FileUploadSlot";
 import LibraryInputSlot from "@/components/workbench/LibraryInputSlot";
 import OutputSelector from "@/components/workbench/OutputSelector";
 import ResultsSummary from "@/components/workbench/ResultsSummary";
+import ReleaseRun from "@/components/workbench/ReleaseRun";
 import RunButton from "@/components/workbench/RunButton";
 import RunStatus from "@/components/workbench/RunStatus";
 import { ApiError, createRun, fetchActions } from "@/lib/api";
@@ -100,10 +103,8 @@ export default function ActionRunner() {
   // selected, when a required file is missing, or while a Run is executing.
   //
   // And, since Phase 13, when the Action reads stored data. Choosing which
-  // stored version to read is build plan 15A's Monthly Reports workflow; until
-  // it exists the browser has no way to say, and offering a Run that could
-  // only fail would be worse than saying so. Driven by the slot's declared
-  // source, not by which Action it belongs to.
+  // stored version to read is the Monthly Reports workflow. Driven by the
+  // slot's declared source, not by which Action it belongs to.
   const canRun =
     selectedAction !== null &&
     missingRequiredSlots.length === 0 &&
@@ -301,8 +302,7 @@ export default function ActionRunner() {
           {librarySlots.length > 0 ? (
             <p className='text-xs text-zinc-600 dark:text-zinc-400'>
               This Action reads saved data, so choosing a reporting period
-              happens in the Monthly Reports workflow rather than here. It
-              cannot be run from this screen yet.
+              happens in the <Link href="/monthly-reports" className="underline">Monthly Reports workflow</Link>.
             </p>
           ) : null}
         </section>
@@ -349,6 +349,7 @@ export default function ActionRunner() {
           />
 
           <AuditSummary manifest={manifest} />
+          <ReleaseRun runId={manifest.run_id} onReleased={clearRunResult} disabled={running} />
         </div>
       ) : null}
     </div>

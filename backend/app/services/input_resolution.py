@@ -57,7 +57,7 @@ Nothing about build plan 11's guarantees changed to make that work:
 
 The merge itself is a plain vertical concatenation in period order, and it
 refuses rather than reconciles when two months disagree about their columns —
-see :func:`_merge_versions`.
+see :func:`merge_versions`.
 
 Nothing here writes. The Data Library is read, and a Run remains something
 that persists nothing at all — reading stored history does not make a Run a
@@ -270,9 +270,9 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibrarySlot:
         dataset_label=label,
         selector=selector,
         versions=resolved,
-        frame=_merge_versions(
+        frame=merge_versions(
             (
-                tuple(replace(item, frame=_interpret_dates(item)) for item in resolved)
+                tuple(replace(item, frame=interpret_dates(item)) for item in resolved)
                 if slot.interpret_dates
                 else resolved
             ),
@@ -281,7 +281,7 @@ def resolve_slot(slot: ActionInput, reference: str) -> ResolvedLibrarySlot:
     )
 
 
-def _interpret_dates(item: ResolvedLibraryInput) -> pl.DataFrame:
+def interpret_dates(item: ResolvedLibraryInput) -> pl.DataFrame:
     """Use stored date provenance in a working copy; preserve the source frame."""
     column = item.version.date_column
     fmt = item.version.date_format
@@ -415,7 +415,7 @@ def history_versions(
     )
 
 
-def _merge_versions(
+def merge_versions(
     resolved: tuple[ResolvedLibraryInput, ...], *, label: str
 ) -> pl.DataFrame:
     """Read several versions of one dataset as one table.

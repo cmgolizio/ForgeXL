@@ -38,5 +38,6 @@ export function backendOrigin() {
 
   // 0.0.0.0 is an address to listen on, not one to dial; a backend bound to it
   // is still reached over loopback.
-  return `http://${host === "0.0.0.0" ? DEFAULT_BACKEND_HOST : host}:${port}`;
+  const address = host === "0.0.0.0" ? DEFAULT_BACKEND_HOST : host;
+  return `http://${address.includes(":") && !address.startsWith("[") ? `[${address}]` : address}:${port}`;
 }

@@ -316,6 +316,12 @@ def validate_source(
             errors=tuple(errors),
         )
 
+    if parsed.mixed_columns:
+        warnings.append(ValidationIssue(
+            code="MIXED_COLUMN_TYPES",
+            message="Excel columns with mixed cell types were preserved as text: " + ", ".join(parsed.mixed_columns) + ".",
+            details={"columns": list(parsed.mixed_columns)}, slot_id=schema.dataset_id,
+        ))
     columns = parsed.columns
     errors.extend(_schema_errors(schema, columns))
     warnings.extend(_schema_warnings(schema, columns))
@@ -652,7 +658,7 @@ def import_reporting_cycle(
 
     for validation in outcome.validations:
         try:
-            version = _commit_validated(validation)
+            version = commit_validated_source(validation)
         except (
             DataLibraryError, InvalidDatasetCommitError, UnknownDatasetError
         ) as error:
@@ -839,10 +845,10 @@ def _commit_month(
         replaces=replaces,
     )
     validation.raise_if_failed()
-    return _commit_validated(validation, replaces=replaces, reason=reason)
+    return commit_validated_source(validation, replaces=replaces, reason=reason)
 
 
-def _commit_validated(
+def commit_validated_source(
     validation: SourceValidation,
     *,
     replaces: str | None = None,
@@ -1161,10 +1167,10 @@ def _blank_identity_warnings(
 ) -> list[ValidationIssue]:
     """Report blank account or rep values on transaction rows, without refusing.
 
-    A transaction with no rep is normal — ownership comes from the month's
-    snapshot, not from the invoice — and a transaction with no account is worth
-    knowing about but does not make the month unusable. Both are recorded so
-    build plan 13H's report-time validation has something to build on.
+    Preserve source rows and warn here; report-time preparation applies the
+    stricter reporting rules. Performance follows the invoice salesperson,
+    never the snapshot owner. Missing identities must not be silently filled
+    from ownership or guessed during storage.
     """
     issues: list[ValidationIssue] = []
     for column in (schema.customer_column, schema.rep_column):

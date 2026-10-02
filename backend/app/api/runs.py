@@ -54,7 +54,7 @@ from app.errors import (
 )
 from app.models.artifact import Artifact
 from app.models.run import Run
-from app.models.schemas import OutputMetadata, PreviewResponse, RunManifest
+from app.models.schemas import OutputMetadata, PreviewResponse, RunManifest, RunStatus
 from app.services import archive, export, preview, run_store
 from app.services.runner import PendingUpload, execute_run
 
@@ -143,6 +143,21 @@ def get_run(run_id: str) -> RunManifest:
     paths, only logical IDs (build plan section 11).
     """
     return run_store.get_run(run_id).to_manifest()
+
+
+@router.post("/runs/{run_id}/discard")
+def discard_run(run_id: str) -> dict[str, str | bool]:
+    """Release a finished Run's in-memory tables and downloads, not library data.
+
+    This is explicit user cleanup, not automatic eviction. Recorded monthly
+    source versions and cycle receipts belong to the persistent library and
+    are untouched; saved cycles can regenerate their reports afterwards.
+    """
+    run = run_store.get_run(run_id)
+    if run.status == RunStatus.RUNNING:
+        raise InvalidRequestError("A running Action cannot be released.")
+    run_store.delete_run(run.run_id)
+    return {"run_id": run.run_id, "discarded": True}
 
 
 @router.get(

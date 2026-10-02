@@ -2,6 +2,7 @@
   "name": "forge-xl",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "concurrently --names web,api --prefix-colors cyan,magenta --kill-others-on-fail \"npm:dev:web\" \"npm:dev:api\"",
     "dev:web": "NEXT_TELEMETRY_DISABLED=1 next dev --hostname 127.0.0.1 --port 3000",
@@ -9,9 +10,19 @@
     "dev:lan": "concurrently --names web,api --prefix-colors cyan,magenta --kill-others-on-fail \"npm:dev:web:lan\" \"npm:dev:api\"",
     "dev:web:lan": "node scripts/lan-address.mjs 3000 && NEXT_TELEMETRY_DISABLED=1 next dev --hostname 0.0.0.0 --port 3000",
     "build": "NEXT_TELEMETRY_DISABLED=1 next build",
-    "start": "NEXT_TELEMETRY_DISABLED=1 next start --hostname 127.0.0.1 --port 3000",
+    "start": "node scripts/start.mjs",
+    "start:open": "node scripts/start.mjs --open",
+    "doctor": "node scripts/check-setup.mjs",
     "lint": "eslint",
-    "test": "(cd backend && .venv/bin/python -m pytest)"
+    "test": "npm run test:backend && npm run test:frontend && npm run test:scripts",
+    "test:scripts": "node --test tests/scripts/*.test.mjs",
+    "verify:http": "cd backend && .venv/bin/python -m tests.benchmarks.workflow_http",
+    "verify:startup": "cd backend && .venv/bin/python -m tests.benchmarks.startup_http",
+    "verify:v1": "npm test && npm run typecheck && npm run lint && npm run build && npm run verify:http && npm run verify:startup",
+    "typecheck": "pyright",
+    "test:backend": "(cd backend && .venv/bin/python -m pytest)",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "benchmark:monthly": "cd backend && .venv/bin/python -m tests.benchmarks.monthly --repeats 3"
   },
   "dependencies": {
     "next": "16.3.2",
@@ -22,8 +33,11 @@
     "@tailwindcss/postcss": "^4",
     "babel-plugin-react-compiler": "1.0.0",
     "concurrently": "^10.0.5",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.2",
+    "happy-dom": "^20.14.5",
+    "pyright": "1.1.414",
     "tailwindcss": "^4"
   }
 }

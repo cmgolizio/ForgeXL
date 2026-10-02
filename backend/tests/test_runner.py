@@ -888,7 +888,8 @@ def test_the_backend_has_no_data_directory_setting_left() -> None:
     """
     assert not hasattr(config, "DATA_DIRECTORY")
     assert not hasattr(config, "RUNS_DIRECTORY")
-    assert not (config.PROJECT_ROOT / "data").exists()
+    # The persistent Data Library introduced in Phase 9 may already exist.
+    # These assertions concern removed Run-storage settings only.
 
 
 def test_a_successful_run_writes_nothing_anywhere(quarantine: Path) -> None:

@@ -1,13 +1,13 @@
 # Local Data Workbench — backend dependencies
 #
-# Direct dependencies only, pinned to the versions resolved at implementation
-# time (Phase 1.3). Transitive dependencies are resolved by pip.
+# Direct dependency intent, pinned at implementation time (Phase 1.3).
+# Normal setup uses requirements.lock.txt, which also pins transitive packages.
 #
 # Install into the project virtual environment:
 #
 #     python3 -m venv backend/.venv
 #     backend/.venv/bin/python -m pip install --upgrade pip
-#     backend/.venv/bin/python -m pip install -r backend/requirements.txt
+#     backend/.venv/bin/python -m pip install -r backend/requirements.lock.txt
 
 # HTTP API
 fastapi==0.141.1

@@ -115,7 +115,12 @@ def test_only_the_lan_script_binds_the_frontend_to_every_interface() -> None:
 
     assert exposed == ["dev:web:lan"]
     assert "--hostname 127.0.0.1" in scripts["dev:web"]
-    assert "--hostname 127.0.0.1" in scripts["start"]
+    assert scripts["start"] == "node scripts/start.mjs"
+    launcher = (REPOSITORY_ROOT / "scripts" / "start.mjs").read_text()
+    assert '"--hostname", "127.0.0.1"' in launcher
+    assert "0.0.0.0" not in launcher
+    preflight = (REPOSITORY_ROOT / "scripts" / "check-setup.mjs").read_text()
+    assert '["127.0.0.1", "localhost", "::1"].includes(backend.host)' in preflight
 
 
 def test_the_lan_script_still_leaves_the_backend_on_loopback() -> None:
@@ -397,6 +402,13 @@ def test_no_uploaded_bytes_are_written_anywhere_by_a_run(
     from tests.fixtures import spreadsheets as fx
     from tests.helpers import upload_file
 
+    # Phase 9 permits existing business data. A proof Action must leave it
+    # unchanged, rather than requiring a fresh repository with no library.
+    data_root = REPOSITORY_ROOT / "data"
+    def state():
+        return (data_root.exists(), sorted((str(path.relative_to(data_root)),
+            path.stat().st_size, path.stat().st_mtime_ns) for path in data_root.rglob("*") if path.is_file()))
+    before = state()
     response = client.post(
         "/api/runs",
         data={"action_id": "exact_duplicate_remover"},
@@ -407,4 +419,4 @@ def test_no_uploaded_bytes_are_written_anywhere_by_a_run(
 
     assert response.status_code == 200, response.text
     assert list(quarantine.rglob("*")) == []
-    assert not (REPOSITORY_ROOT / "data").exists()
+    assert state() == before

@@ -144,7 +144,7 @@ def parse_period(raw: str) -> str:
     Raises:
         InvalidDatasetCommitError: the value is not a ``YYYY-MM`` month.
     """
-    if not isinstance(raw, str) or not PERIOD_PATTERN.fullmatch(raw):
+    if not isinstance(raw, str) or not PERIOD_PATTERN.fullmatch(raw) or raw.startswith("0000-"):
         raise InvalidDatasetCommitError(
             "A reporting period must be a calendar month written as YYYY-MM, "
             f"for example 2026-09. Received {raw!r}.",
