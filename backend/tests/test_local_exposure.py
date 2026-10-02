@@ -115,7 +115,12 @@ def test_only_the_lan_script_binds_the_frontend_to_every_interface() -> None:
 
     assert exposed == ["dev:web:lan"]
     assert "--hostname 127.0.0.1" in scripts["dev:web"]
-    assert "--hostname 127.0.0.1" in scripts["start"]
+    assert scripts["start"] == "node scripts/start.mjs"
+    launcher = (REPOSITORY_ROOT / "scripts" / "start.mjs").read_text()
+    assert '"--hostname", "127.0.0.1"' in launcher
+    assert "0.0.0.0" not in launcher
+    preflight = (REPOSITORY_ROOT / "scripts" / "check-setup.mjs").read_text()
+    assert '["127.0.0.1", "localhost", "::1"].includes(backend.host)' in preflight
 
 
 def test_the_lan_script_still_leaves_the_backend_on_loopback() -> None:

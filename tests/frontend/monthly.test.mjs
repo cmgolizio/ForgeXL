@@ -45,7 +45,7 @@ beforeEach(() => {
   calls = []; handler = () => null;
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
-    const custom = handler(url, options);
+    const custom = await handler(url, options);
     const payload = custom ?? (url.endsWith("/catalog") ? catalog : url.includes("/preview") ?
       { columns: ["Revenue"], rows: [[995]], total_rows: 1, offset: 0 } : { discarded: true });
     return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
@@ -84,12 +84,16 @@ test("monthly uploads require validation and warning consent before generation",
   for (const id of ids) assert.equal(request.options.body.get(id).name, id + ".csv");
   assert.match(document.body.textContent, /Ready with warnings/);
   assert.equal(button("Generate reports").disabled, true);
-  await click(document.querySelector('input[type="checkbox"]'));
+  await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]'));
   await click(button("Generate reports"));
   assert.deepEqual(JSON.parse(calls.find((item) => item.url.endsWith("/generate")).options.body), { validation_id: "review-1", acknowledge_warnings: true });
   assert.match(document.body.textContent, /Sources saved · Reports generated/);
   assert.ok(document.querySelector('a[href="/forge-api/api/runs/run-1/artifacts/download/zip"]'));
   assert.match(document.body.textContent, /995/);
+  await click(button("Release preview and downloads"));
+  assert.ok(calls.some((item) => item.url === "/forge-api/api/runs/run-1/discard" && item.options.method === "POST"));
+  assert.equal(document.querySelector('a[href*="artifacts/download/zip"]'), null);
+  assert.equal(button("Rerun saved reports").disabled, false);
 });
 
 test("saved cycles select exact sources without uploading again", async () => {
@@ -103,7 +107,7 @@ test("saved cycles select exact sources without uploading again", async () => {
 test("failed generation displays saved sources and retries the recorded cycle", async () => {
   handler = (url) => url.endsWith("/validate") || url.endsWith("/validate-saved") ? review : url.endsWith("/generate") ?
     { ...generated, status: "generation_failed", manifest: null, error: { code: "ACTION_FAILED", message: "Workbook rendering failed." } } : null;
-  await mount(); await click(button("Validate sources")); await click(document.querySelector('input[type="checkbox"]')); await click(button("Generate reports"));
+  await mount(); await click(button("Validate sources")); await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]')); await click(button("Generate reports"));
   assert.match(document.body.textContent, /Sources saved · Reports not generated/);
   assert.match(document.body.textContent, /Workbook rendering failed/);
   assert.equal(document.querySelectorAll('a[href*="artifacts"]').length, 0);
@@ -114,7 +118,7 @@ test("failed generation displays saved sources and retries the recorded cycle", 
 test("corrections name the saved version and changes discard an earlier review", async () => {
   handler = (url) => url.endsWith("/catalog") ? { ...catalog, datasets: catalog.datasets.map((item) => ({ ...item, versions: [{ period: "2026-09", version_id: item.id + "-old", source_filename: "saved.csv", row_count: 5 }] })) } : url.endsWith("/validate") ? { ...review, warnings: [] } : null;
   await mount(); await upload(0, "corrected.csv");
-  await click(document.querySelector('input[type="checkbox"]'));
+  await click([...document.querySelectorAll("label")].find((label) => label.textContent.includes("Correct this saved month")).querySelector("input"));
   // React tracks textarea values through its native setter.
   const textarea = document.querySelector("textarea");
   await act(async () => { Object.getOwnPropertyDescriptor(dom.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Missing invoice included"); textarea.dispatchEvent(new dom.Event("input", { bubbles: true })); });
@@ -156,4 +160,56 @@ test("validation errors and failed revalidation remove permission to generate", 
   assert.match(document.body.textContent, /Validation needs attention/);
   assert.match(document.body.textContent, /Required sales columns are missing/);
   assert.equal([...document.querySelectorAll("button")].some((item) => item.textContent === "Generate reports"), false);
+});
+
+test("history overlap selection is explicit and review shows exact skipped months", async () => {
+  handler = (url) => url.endsWith("/history/validate") ? { ready: true, validation_id: "history-2",
+    row_count: 30, imported_row_count: 20, periods: ["2026-07", "2026-08"], skipped_periods: ["2026-06"],
+    errors: [], warnings: [{ code: "HISTORY_MONTHS_SKIPPED", message: "Existing months are unchanged." }] } :
+    url.endsWith("/history/commit") ? { status: "saved", committed_versions: ["july", "august"],
+      committed_periods: { "2026-07": "july", "2026-08": "august" } } : null;
+  await mount();
+  await click([...document.querySelectorAll("summary")].find((item) => item.textContent.includes("Initial history setup")));
+  const element = document.querySelector('input[type="file"]');
+  Object.defineProperty(element, "files", { configurable: true, value: [new File(["history"], "chunk.csv")] });
+  await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
+  await click([...document.querySelectorAll("label")].find((label) => label.textContent.includes("Import missing months only")).querySelector("input"));
+  await click(button("Validate history"));
+  assert.equal(calls.find((item) => item.url.endsWith("/history/validate")).options.body.get("skip_existing"), "true");
+  assert.match(document.body.textContent, /Skipped unchanged: 2026-06/);
+  assert.match(document.body.textContent, /Rows to save: 20/);
+  assert.equal(button("Save history").disabled, true);
+  await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]'));
+  await click(button("Save history"));
+  assert.match(document.body.textContent, /Saved months: 2026-07, 2026-08/);
+});
+
+test("history processing locks the monthly controls until it completes", async () => {
+  let release;
+  handler = (url) => url.endsWith("/history/validate") ? new Promise((resolve) => { release = resolve; }) : null;
+  await mount();
+  const element = document.querySelector('input[type="file"]');
+  Object.defineProperty(element, "files", { configurable: true, value: [new File(["history"], "chunk.csv")] });
+  await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
+  await click(button("Validate history"));
+  assert.equal(button("Validate sources").disabled, true);
+  assert.equal(button("Rerun saved reports").disabled, true);
+  await act(async () => release({ ready: false, row_count: 0, periods: [], errors: [], warnings: [] }));
+  await settle();
+  assert.equal(button("Validate sources").disabled, false);
+});
+
+test("a transient preview failure can retry without regenerating the reports", async () => {
+  let previewAttempts = 0;
+  handler = (url) => {
+    if (url.endsWith("/validate")) return { ...review, warnings: [] };
+    if (url.endsWith("/generate")) return generated;
+    if (url.includes("/preview") && previewAttempts++ === 0) throw new TypeError("Temporary connection drop");
+    return null;
+  };
+  await mount(); await click(button("Validate sources")); await click(button("Generate reports"));
+  assert.ok(button("Retry preview"));
+  await click(button("Retry preview"));
+  assert.match(document.body.textContent, /995/);
+  assert.equal(calls.filter((item) => item.url.endsWith("/generate")).length, 1);
 });

@@ -104,13 +104,16 @@ def discard(payload: GenerateRequest) -> dict:
 @router.post("/history/validate", response_model=HistoryReview)
 async def validate_history(request: Request) -> HistoryReview:
     async with read_run_form(request) as form:
-        _fields(form, {"dataset_id", "source_file", "date_format"})
+        _fields(form, {"dataset_id", "source_file", "date_format", "skip_existing"})
         files = await run_in_threadpool(_files, form, ("source_file",))
         if "source_file" not in files:
             raise InvalidRequestError("Choose the historical source file.")
+        skip_existing = _text(form, "skip_existing")
+        if skip_existing not in ("", "true", "false"):
+            raise InvalidRequestError("skip_existing must be true or false.")
         return await run_in_threadpool(history_workflow.HISTORY_WORKFLOW.validate,
             _text(form, "dataset_id", required=True), files["source_file"],
-            date_format=_text(form, "date_format") or None)
+            date_format=_text(form, "date_format") or None, skip_existing=skip_existing == "true")
 
 
 @router.post("/history/commit", response_model=HistoryOutcome)

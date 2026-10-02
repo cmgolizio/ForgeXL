@@ -27,6 +27,7 @@ export default function DataPreview({ runId, outputId, label }) {
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!runId || !outputId) return undefined;
@@ -35,6 +36,7 @@ export default function DataPreview({ runId, outputId, label }) {
 
     async function load() {
       setStatus("loading");
+      setError(null);
       try {
         const loaded = await fetchPreview({
           runId,
@@ -58,7 +60,7 @@ export default function DataPreview({ runId, outputId, label }) {
 
     load();
     return () => controller.abort();
-  }, [runId, outputId, offset]);
+  }, [runId, outputId, offset, attempt]);
 
   if (status === "error") {
     return (
@@ -69,6 +71,9 @@ export default function DataPreview({ runId, outputId, label }) {
         <p className='text-sm text-red-800 dark:text-red-300'>
           {error?.message}
         </p>
+        <PageButton onClick={() => setAttempt((value) => value + 1)} disabled={false}>
+          Retry preview
+        </PageButton>
       </section>
     );
   }

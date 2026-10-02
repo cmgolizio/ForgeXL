@@ -204,10 +204,13 @@ workbook. The frontend renders that as a readable message; it does not crash,
 show a traceback, or print `[object Object]`. A page already showing a result
 keeps showing it, because that result is in the browser, not on the server.
 
-**What this costs.** A Run's result frames stay in memory for the life of the
-process, and nothing evicts them (Known Issue 40). For a local single-user
-proof of concept that is acceptable; a retention policy is Phase 7J's decision,
-and the capability to release a Run already exists.
+**Memory cleanup.** A Run's result frames and artifacts remain in memory until
+explicit release or restart; there is no automatic eviction policy. Both result
+screens expose **Release preview and downloads**, calling additive
+`POST /api/runs/{run_id}/discard`. Running Actions cannot be released. The route
+removes only that finished Run from `RunStore`, never persistent versions or
+cycle receipts. Its links subsequently return 404. Monthly saved cycles can
+regenerate results; generic proof Actions need their original uploads again.
 
 ---
 
@@ -356,8 +359,11 @@ already offered.
 | Historical bootstrap | one file, many months → one version per month | One-time, into an empty dataset (10G)           |
 | Recurring monthly    | three files, one month                        | Validate all three, then commit all three (10F) |
 
-After the bootstrap the ordinary workflow adds one reporting period at a time
-and the history is reused — the user never re-uploads it.
+After bootstrap the ordinary recurring cycle adds one reporting period at a
+time and reuses stored history. The Phase 15 UI also supports later historical
+chunks of complete months; this is an orchestration extension, not a change to
+the one-time Phase 10 bootstrap entry point. Explicit overlap skipping never
+updates an existing month (§5f).
 
 A duplicate is the same bytes committed for the same month. The period is part
 of that match because identical bytes mean different things for the two dataset
@@ -700,14 +706,17 @@ completed-month validation remain outstanding.
 
 `src/app/monthly-reports/page.jsx` exposes two paths: validate/import a reporting
 month, or rerun saved sources. An initial history panel uses the same ingestion
-rules to partition a multi-month file only when the dataset is empty.
+rules to partition complete months from a multi-month file, including later
+historical chunks. Overlap is refused unless the user deliberately chooses
+missing months only and acknowledges the exact skipped months. Stored months
+are never row-merged or implicitly corrected by that selection.
 
 | Boundary | Owner | Responsibility |
 | --- | --- | --- |
 | Browser | `components/monthly/`, `lib/api.js` | File/period controls, review, explicit warning consent and correction intent, downloads and previews. No business arithmetic. |
 | HTTP | `api/monthly.py` | Bounded memory multipart intake, structured request errors, metadata catalog and service calls in the thread pool. |
 | Review | `services/monthly_workflow.py` | Existing ingestion checks, lossless date/merge policy and pure report preparation; one pending review with a 15-minute token. |
-| History setup | `services/history_workflow.py` | Reviewed bootstrap partitions or one new history month; no implicit correction. |
+| History setup | `services/history_workflow.py` | Reviewed whole-month chunks; explicit overlap skipping, exact partial-save month IDs, no implicit correction. |
 | Durable selection | `services/cycle_receipts.py` | Small JSON receipts under `data/library/.reporting-cycles/<period>/<cycle-id>.json`; exact immutable source IDs and Action version. |
 | Generation | Existing runner / report Action | Resolve receipt selectors, calculate existing report tables, publish the complete in-memory workbook batch. |
 
@@ -847,6 +856,13 @@ claiming, now demonstrated rather than asserted.
   last rows or shortening a heading.
 - **CORS is an exact allowlist** — `http://127.0.0.1:3000` and
   `http://localhost:3000`. Never a wildcard.
+- **Browser writes are origin-checked before uploads are read.** The Next.js
+  POST boundary rejects cross-site fetch metadata and mismatched Origin/Host;
+  after checking it removes those browser-origin headers from the loopback hop.
+  FastAPI independently rejects direct writes from browser origins outside its
+  allowlist. Origin-less local CLI calls remain supported. This is defense
+  against cross-origin browser writes, not authentication, authorization or
+  general protection for a public/multi-user deployment.
 - **Errors are structured**: `{"error": {"code", "message", "details"}}`. A
   Python traceback never reaches the browser.
 
@@ -862,6 +878,15 @@ claiming, now demonstrated rather than asserted.
 `npm run dev` starts both on loopback. `npm run dev:lan` binds **only** Next.js
 to `0.0.0.0` so a second laptop can reach it; FastAPI takes its host from
 `config.HOST` in every script and stays on loopback.
+
+Normal use is `npm run build` followed by `npm start`. `scripts/start.mjs`
+checks dependencies/build/ports, starts both production servers, waits for
+health through the proxy, and stops its owned children on exit or server failure.
+It refuses occupied ports and non-loopback backend settings without stopping
+other processes. `npm run doctor` checks setup without reading business data.
+Mac `ForgeXL.command` invokes `npm run start:open`; it is not a native packaged
+app. The default production web port is 3000, overridable with
+`FORGEXL_WEB_PORT`. No background daemon, queue or cloud runtime is introduced.
 
 No uploaded data is transmitted to any external service, and no source file
 names one — Phase 7K sweeps for it in `tests/test_local_exposure.py`, along

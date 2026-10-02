@@ -305,6 +305,7 @@ export const validateMonthlyUploads = (formData) => request("/api/monthly/valida
 export const validateSavedReports = (payload) => monthlyJson("validate-saved", payload);
 export const generateMonthlyReports = (payload) => monthlyJson("generate", payload);
 export const discardMonthlyValidation = (validationId) => monthlyJson("discard", { validation_id: validationId });
+export const discardRun = (runId) => request(`/api/runs/${encodeURIComponent(runId)}/discard`, { method: "POST" });
 export const validateHistory = (formData) => request("/api/monthly/history/validate", { method: "POST", body: formData });
 export const commitHistory = (payload) => monthlyJson("history/commit", payload);
 

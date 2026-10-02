@@ -260,7 +260,7 @@ def test_changed_live_sources_invalidate_review_but_exact_cycle_survives(client)
     assert preview(client, generate(client, exact))[0]["Revenue"] == 995.0
 
 
-def test_history_bootstrap_partitions_once_then_refuses_multi_month_append(client):
+def test_history_bootstrap_refuses_duplicate_months_and_accepts_a_missing_month(client):
     rows = [*golden.SALES_ROWS["2025-08"], *golden.SALES_ROWS["2025-09"]]
     review, result = history(client, "sales_history", rows)
     assert review["operation"] == "bootstrap" and len(result["committed_versions"]) == 2

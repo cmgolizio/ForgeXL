@@ -119,8 +119,10 @@ class HistoryReview(BaseModel):
     dataset_id: str
     filename: str
     row_count: int
+    imported_row_count: int = 0
     periods: tuple[str, ...]
-    operation: Literal["bootstrap", "monthly"]
+    skipped_periods: tuple[str, ...] = ()
+    operation: Literal["bootstrap", "monthly", "history"]
     errors: tuple[ValidationIssue, ...] = ()
     warnings: tuple[ValidationIssue, ...] = ()
 
@@ -129,4 +131,5 @@ class HistoryOutcome(BaseModel):
     status: Literal["saved", "save_failed"]
     dataset_id: str
     committed_versions: tuple[str, ...] = ()
+    committed_periods: dict[str, str] = Field(default_factory=dict)
     error: RunError | None = None

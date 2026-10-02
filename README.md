@@ -6,7 +6,7 @@ A local web application for running reusable, deterministic data-processing
 Pick an Action, upload the CSV or XLSX files it asks for, run it, review the
 result in the browser, and download it as CSV or Excel. Everything happens on
 the machine running ForgeXL: no cloud service, no database, no account, and no
-uploaded data leaves the computer.
+business data is sent to an external service.
 
 Adding a new Action means writing one backend module, registering it, and
 adding tests. **No frontend file changes** — the Action selector, the upload
@@ -17,6 +17,8 @@ backend's own Action metadata.
 - How it is actually built: [`docs/architecture.md`](docs/architecture.md)
 - Phase-by-phase record, known issues, deviations:
   [`docs/implementation-status.md`](docs/implementation-status.md)
+- V1 completion evidence, remaining gates and operating checklist:
+  [`docs/v1-finalization.md`](docs/v1-finalization.md)
 - The monthly sales-rep report's business definitions:
   [`docs/monthly-sales-rep-report-spec.md`](docs/monthly-sales-rep-report-spec.md)
 
@@ -26,9 +28,9 @@ backend's own Action metadata.
 
 | Tool    | Version            | Notes                                    |
 | ------- | ------------------ | ---------------------------------------- |
-| Node.js | 20.9 or newer      | Next.js 16 requires it. Verified on 22.x |
-| npm     | ships with Node    | Verified on 10.9                         |
-| Python  | 3.10 or newer      | Verified on 3.11                         |
+| Node.js | 20.9 or newer      | Current verification: 24.19.0          |
+| npm     | ships with Node    | Use `npm ci` for the locked dependency tree. |
+| Python  | 3.10 or newer      | Current locked environment: 3.12.14    |
 | Git     | any recent version |                                          |
 
 Nothing else. No Docker, no database server, no Excel installation, and no
@@ -48,7 +50,7 @@ npm ci
 # 2. Backend virtual environment and dependencies
 python3 -m venv backend/.venv
 backend/.venv/bin/python -m pip install --upgrade pip
-backend/.venv/bin/python -m pip install -r backend/requirements.txt
+backend/.venv/bin/python -m pip install -r backend/requirements.lock.txt
 ```
 
 That is the whole setup. There is no database to create, no migration to run,
@@ -63,10 +65,18 @@ On Windows the virtual environment's interpreter is
 ## Starting the application
 
 ```bash
-npm run dev
+npm run doctor      # checks setup without reading/writing business data
+npm run build       # once after setup, and after updating code
+npm start           # starts BOTH production servers
 ```
 
-One command starts both halves and streams their logs together. Then open:
+For normal use, `npm start` supervises both servers without a development reload
+worker, waits for the backend through the web proxy, and streams their logs.
+An occupied port is refused without killing its owner. Control-C stops both.
+On Mac, `npm run start:open` also opens your default browser after readiness;
+after setup, `ForgeXL.command` offers the same launcher from Finder. Finder
+double-click behavior still needs verification on a Mac. This is a shell
+launcher, not a signed native application. Then open:
 
 | Service                | URL                        |
 | ---------------------- | -------------------------- |
@@ -79,7 +89,9 @@ same-origin path `/forge-api/...`, which Next.js forwards to FastAPI, so the
 browser never learns FastAPI's address at all.
 
 Both servers bind to `127.0.0.1` — the application is deliberately not reachable
-from other machines.
+from other machines. `FORGEXL_WEB_PORT` can change the normal web port.
+For development with live reloading, use `npm run dev` instead. Do not run
+development and production servers on the same ports simultaneously.
 
 ### Testing from a second computer on the same network
 
@@ -149,7 +161,13 @@ checks and the remaining company-data and manual Excel for Mac acceptance.
 
 Open **Monthly Reports** from the home page (`/monthly-reports`). For a new
 installation, expand initial history setup, validate company sales/sample
-history, then save the reviewed monthly partitions. For the recurring cycle:
+history, then save the reviewed monthly partitions. Large history can arrive
+in several files spanning complete months. Already-stored months are refused
+by default. **Import missing months only** explicitly skips whole stored
+months after review and warning consent; it never merges missing rows into an
+existing month. Correct an incomplete stored month using monthly replacement.
+After a partial history save, revalidate the same file with that option to save
+only the remaining months. For the recurring cycle:
 
 1. Choose the report month and upload its sales, samples and assignment snapshot.
    An already-saved source can be reused by leaving that slot empty.
@@ -211,6 +229,12 @@ behaviour, not a fault — see [`docs/architecture.md`](docs/architecture.md) §
 A result already open in the browser keeps displaying, because it is in the
 browser rather than on the server.
 
+After downloading, **Release preview and downloads** forgets that finished
+Run and releases its result tables and workbook bytes. It never deletes stored
+source versions or cycle receipts. Download links then return 404; rerun a saved
+monthly cycle to recreate them. There is no automatic eviction of older Runs:
+release finished results as you go, or restart the backend between sessions.
+
 Nothing uploaded is sent anywhere. There is no telemetry, no analytics and no
 outbound HTTP client in the running backend.
 
@@ -228,7 +252,12 @@ There is no database.
 
 Change the location with `FORGEXL_LIBRARY_DIRECTORY`. The directory is created
 when the first version is committed, not at startup, and it is safe to back up
-by copying. See [`docs/architecture.md`](docs/architecture.md) §5a.
+by copying **after stopping both servers**. Include the entire directory,
+including `.reporting-cycles`, to preserve exact replay. Do not copy only the
+Parquet files or the current versions. Restore to a separate directory first
+and point `FORGEXL_LIBRARY_DIRECTORY` there; verify catalog and a saved cycle
+before replacing a working copy. No automatic backup, cloud sync or encryption
+is provided. See [`docs/architecture.md`](docs/architecture.md) §5a.
 
 **What fills it** is the monthly ingestion layer (build plan Phase 10): the
 three recurring exports — sales, samples and the account-assignment list — are
@@ -239,9 +268,8 @@ means nothing is written at all, and re-uploading a month's export is refused
 rather than counted twice.
 
 The accepted columns and every refusal are documented in
-[`docs/monthly-source-schemas.md`](docs/monthly-source-schemas.md). Ingestion is
-reachable in-process; the monthly reporting screen that drives it is a later
-phase, so there is no button for it in the UI yet.
+[`docs/monthly-source-schemas.md`](docs/monthly-source-schemas.md). The implemented
+Monthly Reports screen exposes both history ingestion and the recurring cycle.
 
 **What reads it** is an Action input slot that declares itself library-backed
 (build plan Phase 11). Such a slot names the dataset it reads; the Run names
@@ -263,11 +291,15 @@ and the two systems stay separate.
 ## Development commands
 
 ```bash
-npm run dev          # start both servers on 127.0.0.1 (the normal command)
+npm run dev          # start both development servers on 127.0.0.1
 npm run dev:lan      # same, with Next.js reachable from the local network
 npm run lint         # ESLint over the frontend
 npm run build        # Next.js production build
-npm start            # serve the production build on 127.0.0.1:3000
+npm start            # supervise both local production servers
+npm run doctor       # dependency/runtime preflight; no business-data access
+npm test             # backend + frontend DOM + startup/transport helper tests
+npm run typecheck    # pinned Pyright; Python analysis, not TypeScript conversion
+npm run verify:v1    # tests, typecheck, lint, build, production HTTP and startup
 ```
 
 ### Backend tests
@@ -305,7 +337,7 @@ backend/app/services/    Parsing, the Run pipeline, results, preview, export,
                          its ingestion and input resolution
 backend/tests/           The test suite and its synthetic fixture system
 docs/                    Build plan, architecture, implementation status
-scripts/                 Backend launcher and the LAN address helper
+scripts/                 Setup check, production/development launchers, LAN helper
 ```
 
 ## Adding an Action

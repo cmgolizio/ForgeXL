@@ -3,6 +3,9 @@
 Date: 2026-10-01. Base: merged Phase 14, `f472266`. The build plan remains
 the source of truth. Phase 15 engineering is implemented; production business
 acceptance, Excel for Mac opening and a live-browser check remain open.
+V1 follow-through on 2026-10-02 adds chunked history, stable two-server startup,
+explicit result release and transport guards. Its complete fix/blocker record
+and current test evidence are in [v1-finalization.md](v1-finalization.md).
 
 ## Delivery against the build plan
 
@@ -47,15 +50,22 @@ JSON request failures use the structured workbench error envelope.
 | POST | `/api/monthly/validate-saved` | JSON `period`, optional `cycle_id`; returns exact-cycle or current-source review. |
 | POST | `/api/monthly/generate` | JSON `validation_id`, `acknowledge_warnings`; returns commit/generation state, receipt and successful Run manifest. |
 | POST | `/api/monthly/discard` | JSON `validation_id`; releases that pending monthly or history upload review. |
-| POST | `/api/monthly/history/validate` | Multipart `dataset_id`, `source_file`, optional `date_format`; sales/sample history only. |
+| POST | `/api/monthly/history/validate` | Multipart `dataset_id`, `source_file`, optional `date_format`, explicit `skip_existing=true`/`false`; sales/sample history only. |
 | POST | `/api/monthly/history/commit` | JSON review token and warning consent; committed IDs or explicit partial failure. |
+| POST | `/api/runs/{run_id}/discard` | Release finished Run tables/downloads only; saved source versions and cycle receipts remain. |
 
 One pending review per workflow service supports this local, single-user scope.
 Tokens expire after 15 minutes and are single-use; new review replaces the old
 one. Wrong/obsolete tokens do not destroy a newer review. Restarting loses
 pending review data and Runs, while committed sources and receipts persist.
-Bootstrap partitions are saved individually; after a partial bootstrap failure,
-import missing months individually. The workflow does not promise rollback.
+Historical chunks save selected whole months individually. Overlapping stored
+months block validation by default. Explicit missing-month selection returns
+`skipped_periods` and `imported_row_count`, adds a warning requiring consent,
+and never changes stored months. After a partial save, `committed_periods`
+identifies exactly what succeeded; revalidate the same file with missing-month
+selection to resume safely. All-covered files cannot create empty imports.
+Schema/date errors are not bypassed by skipping. The workflow does not promise
+rollback or infer completeness of a month from its presence.
 
 ## Automated verification
 
@@ -66,10 +76,12 @@ refusal, date interpretation, ownership errors, stale/expired/discarded tokens,
 Action-version warnings, corrupted receipt identity, render failure, partial
 commit/receipt failure, and sanitized filesystem errors.
 
-`tests/frontend/monthly.test.mjs` uses React with a DOM model for six interaction
+`tests/frontend/monthly.test.mjs` uses React with a DOM model for nine interaction
 stories: upload and review/consent, saved-cycle choice, failed render retry,
-explicit correction/discard, history setup and failed revalidation. The DOM
-tests do not establish real browser layout, native file chooser or download
+explicit correction/discard, history setup, failed revalidation, overlap
+review/consent, history/monthly busy coordination and preview retry. The generated
+result story also checks explicit release. These tests do not establish real
+browser layout, native file chooser or download
 behavior. `esbuild` and `happy-dom` are development-only dependencies.
 
 The separate production HTTP harness starts actual Next.js and FastAPI against
@@ -77,7 +89,9 @@ an isolated temporary library. It verifies page/navigation responses, multipart
 history and monthly requests through the streaming proxy, JSON generation,
 ZIP response headers/content, golden company revenue, and byte-identical
 workbook replay after restarting FastAPI. Three workbooks/eighteen sheets reopen
-with openpyxl. Only synthetic inputs enter that harness.
+with openpyxl. V1 follow-through extends it with proof-Action CSV/XLSX download
+controls, origin checks, chunk overlap review and exact replay from a restored
+full-library backup in a separate directory. Only synthetic inputs enter it.
 
 Commands:
 
@@ -137,8 +151,10 @@ for Mac and verify no repair prompt, six readable tabs, numeric amounts/ratios,
 filters and frozen headers. Existing provisional placement and true-zero sample
 month policies remain explicitly qualified.
 
-Live-browser verification was attempted but blocked here: local Chrome fails
+The original Phase 15 live-browser verification was blocked: local Chrome failed
 its required socket operation (`Operation not permitted`); the cloud browser
 refuses the loopback URL (`ERR_BLOCKED_BY_CLIENT`). No visual browser acceptance
 or Mac Excel acceptance is marked passed. These checks need a normal browser
 and Excel on the operating machine; no public deployment was made.
+The fresh 2026-10-02 retry and current verification evidence are documented in
+[v1-finalization.md](v1-finalization.md); it also remains unverified.

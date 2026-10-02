@@ -6,6 +6,7 @@ import FileUploadSlot from "@/components/workbench/FileUploadSlot";
 import ArtifactDownloads from "@/components/workbench/ArtifactDownloads";
 import AuditSummary from "@/components/workbench/AuditSummary";
 import DataPreview from "@/components/workbench/DataPreview";
+import ReleaseRun from "@/components/workbench/ReleaseRun";
 import HistoryImporter from "./HistoryImporter";
 import Review, { buttonClass, controlClass, DateFormat, ErrorNotice, panelClass, WarningConsent } from "./Review";
 
@@ -35,7 +36,7 @@ export default function MonthlyReports() {
 
   return <main className="flex flex-col gap-6">
     <ErrorNotice error={error} />
-    <HistoryImporter onSaved={refresh} disabled={busy} />
+    <HistoryImporter onSaved={refresh} disabled={busy} onBusy={setBusy} />
     <section className={panelClass} aria-label="Choose reporting cycle">
       <div className="flex flex-wrap gap-2">
         <button className={buttonClass} aria-pressed={mode === "uploads"} disabled={busy} onClick={() => setMode("uploads")}>Upload monthly sources</button>
@@ -52,12 +53,12 @@ export default function MonthlyReports() {
       </label> : null}
       <button className={`${buttonClass} self-start`} onClick={refresh} disabled={busy}>Refresh stored periods</button>
     </section>
-    <Cycle key={`${mode}-${period}`} catalog={catalog} period={period} mode={mode} onSaved={refresh} onBusy={setBusy} />
+    <Cycle key={`${mode}-${period}`} catalog={catalog} period={period} mode={mode} onSaved={refresh} onBusy={setBusy} disabled={busy} />
     <p className="text-xs text-zinc-500">Source versions and cycle records survive a backend restart. Downloads and previews are held in memory; rerun a saved cycle to recreate them. Calendar coverage does not prove that every invoice or credit was supplied.</p>
   </main>;
 }
 
-function Cycle({ catalog, period, mode, onSaved, onBusy }) {
+function Cycle({ catalog, period, mode, onSaved, onBusy, disabled }) {
   const [files, setFiles] = useState({});
   const [dates, setDates] = useState({});
   const [replacing, setReplacing] = useState({});
@@ -72,6 +73,7 @@ function Cycle({ catalog, period, mode, onSaved, onBusy }) {
   const [outputId, setOutputId] = useState("company_summary");
   const working = useRef(false);
   const validation = useRef(null);
+  const blocked = Boolean(busy) || disabled;
 
   useEffect(() => () => {
     if (validation.current) discardMonthlyValidation(validation.current).catch(() => {});
@@ -127,35 +129,35 @@ function Cycle({ catalog, period, mode, onSaved, onBusy }) {
           const saved = dataset.versions.find((item) => item.period === period);
           return <div key={dataset.id} className="flex flex-col gap-3 border-b border-zinc-100 pb-4 last:border-0 dark:border-zinc-800">
             {saved ? <p className="text-xs text-zinc-500">Saved: {saved.source_filename} · {saved.row_count.toLocaleString()} rows. Leave this slot empty to reuse it.</p> : null}
-            <FileUploadSlot input={{ label: dataset.label, accepted_extensions: [".csv", ".xlsx"], required: !saved }} file={files[dataset.id]} disabled={Boolean(busy)} onSelect={(file) => change(() => setFiles((previous) => ({ ...previous, [dataset.id]: file })))} onRemove={() => change(() => { setFiles((previous) => ({ ...previous, [dataset.id]: null })); setReplacing((previous) => ({ ...previous, [dataset.id]: null })); })} />
-            {files[dataset.id] && dataset.id !== "account_assignments" ? <DateFormat value={dates[dataset.id] ?? ""} onChange={(value) => change(() => setDates((previous) => ({ ...previous, [dataset.id]: value })))} disabled={Boolean(busy)} label={`${dataset.label} date format`} /> : null}
+            <FileUploadSlot input={{ label: dataset.label, accepted_extensions: [".csv", ".xlsx"], required: !saved }} file={files[dataset.id]} disabled={blocked} onSelect={(file) => change(() => setFiles((previous) => ({ ...previous, [dataset.id]: file })))} onRemove={() => change(() => { setFiles((previous) => ({ ...previous, [dataset.id]: null })); setReplacing((previous) => ({ ...previous, [dataset.id]: null })); })} />
+            {files[dataset.id] && dataset.id !== "account_assignments" ? <DateFormat value={dates[dataset.id] ?? ""} onChange={(value) => change(() => setDates((previous) => ({ ...previous, [dataset.id]: value })))} disabled={blocked} label={`${dataset.label} date format`} /> : null}
             {files[dataset.id] && saved ? <label className="flex items-start gap-2 text-sm">
-              <input type="checkbox" checked={Boolean(replacing[dataset.id])} disabled={Boolean(busy)} onChange={(event) => { const selected = event.target.checked; change(() => setReplacing((previous) => ({ ...previous, [dataset.id]: selected ? saved.version_id : null }))); }} />
+              <input type="checkbox" checked={Boolean(replacing[dataset.id])} disabled={blocked} onChange={(event) => { const selected = event.target.checked; change(() => setReplacing((previous) => ({ ...previous, [dataset.id]: selected ? saved.version_id : null }))); }} />
               <span>Correct this saved month by replacing version <span className="break-all font-mono text-xs">{saved.version_id}</span></span>
             </label> : null}
             <details className="text-xs text-zinc-500"><summary className="cursor-pointer">Required columns</summary><p className="mt-2">{dataset.required_columns.join(", ")}</p></details>
           </div>;
         })}
         {Object.values(replacing).some(Boolean) ? <label className="flex flex-col gap-2 text-sm">Correction reason
-          <textarea className={controlClass} value={reason} onChange={(event) => change(() => setReason(event.target.value))} disabled={Boolean(busy)} placeholder="Explain what changed in the replacement source." />
+          <textarea className={controlClass} value={reason} onChange={(event) => change(() => setReason(event.target.value))} disabled={blocked} placeholder="Explain what changed in the replacement source." />
         </label> : null}
       </> : <>
         <p className="text-sm text-zinc-500">No uploads needed. Choose the exact sources from a previous cycle, or deliberately capture the current stored versions.</p>
         <label className="flex flex-col gap-2 text-sm">Source selection
-          <select className={controlClass} value={cycleId} disabled={Boolean(busy)} onChange={(event) => change(() => setCycleId(event.target.value))}>
+          <select className={controlClass} value={cycleId} disabled={blocked} onChange={(event) => change(() => setCycleId(event.target.value))}>
             {(savedPeriod?.cycles ?? []).map((cycle) => <option key={cycle.cycle_id} value={cycle.cycle_id}>{new Date(cycle.created_at).toLocaleString()} · exact recorded sources · Action {cycle.action.version}</option>)}
             <option value="">Current stored versions · record a new cycle</option>
           </select>
         </label>
         {!savedPeriod?.ready ? <p className="text-sm text-amber-700 dark:text-amber-300">This period is missing one or more saved sources. Validation will list what is needed.</p> : null}
       </>}
-      <button className={`${buttonClass} self-start`} disabled={Boolean(busy) || !period} onClick={() => perform("validate")}>{busy === "validate" ? "Validating…" : "Validate sources"}</button>
+      <button className={`${buttonClass} self-start`} disabled={blocked || !period} onClick={() => perform("validate")}>{busy === "validate" ? "Validating…" : "Validate sources"}</button>
     </section>
     <ErrorNotice error={error} />
     {review ? <Review review={review} /> : null}
     {review?.ready ? <div className="flex flex-col items-start gap-3">
-      {review.warnings.length ? <WarningConsent checked={acknowledged} onChange={setAcknowledged} disabled={Boolean(busy)} /> : null}
-      <button className={buttonClass} disabled={Boolean(busy) || (review.warnings.length > 0 && !acknowledged)} onClick={() => perform("generate")}>{busy === "generate" ? "Saving sources and generating…" : "Generate reports"}</button>
+      {review.warnings.length ? <WarningConsent checked={acknowledged} onChange={setAcknowledged} disabled={blocked} /> : null}
+      <button className={buttonClass} disabled={blocked || (review.warnings.length > 0 && !acknowledged)} onClick={() => perform("generate")}>{busy === "generate" ? "Saving sources and generating…" : "Generate reports"}</button>
     </div> : null}
     {outcome ? <section className={panelClass} aria-label="Reporting result">
       <div role="status" className="space-y-2">
@@ -166,7 +168,7 @@ function Cycle({ catalog, period, mode, onSaved, onBusy }) {
       {outcome.receipt ? <details className="text-xs text-zinc-500"><summary className="cursor-pointer">Recorded source versions</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(outcome.receipt, null, 2)}</pre></details> : null}
       {outcome.status !== "reports_generated" ? <>
         <p className="text-sm">Committed sources remain available. {outcome.receipt ? "Review the exact saved sources, then retry generation." : "Refresh stored periods, supply any missing source, and validate again."}</p>
-        {outcome.receipt ? <button className={`${buttonClass} self-start`} disabled={Boolean(busy)} onClick={() => perform("validate", outcome.receipt)}>Review saved sources to retry</button> : null}
+        {outcome.receipt ? <button className={`${buttonClass} self-start`} disabled={blocked} onClick={() => perform("validate", outcome.receipt)}>Review saved sources to retry</button> : null}
       </> : <>
         <a className={`${buttonClass} self-start`} href={runArtifactsZipUrl({ runId: outcome.manifest.run_id })}>Download {period} reports ZIP</a>
         <ArtifactDownloads runId={outcome.manifest.run_id} artifacts={outcome.manifest.artifacts} />
@@ -177,6 +179,7 @@ function Cycle({ catalog, period, mode, onSaved, onBusy }) {
         </label>
         <DataPreview key={`${outcome.manifest.run_id}-${outputId}`} runId={outcome.manifest.run_id} outputId={outputId} />
         <AuditSummary manifest={outcome.manifest} />
+        <ReleaseRun runId={outcome.manifest.run_id} onReleased={() => setOutcome(null)} disabled={blocked} />
       </>}
     </section> : null}
   </div>;

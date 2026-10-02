@@ -1167,10 +1167,10 @@ def _blank_identity_warnings(
 ) -> list[ValidationIssue]:
     """Report blank account or rep values on transaction rows, without refusing.
 
-    A transaction with no rep is normal — ownership comes from the month's
-    snapshot, not from the invoice — and a transaction with no account is worth
-    knowing about but does not make the month unusable. Both are recorded so
-    build plan 13H's report-time validation has something to build on.
+    Preserve source rows and warn here; report-time preparation applies the
+    stricter reporting rules. Performance follows the invoice salesperson,
+    never the snapshot owner. Missing identities must not be silently filled
+    from ownership or guessed during storage.
     """
     issues: list[ValidationIssue] = []
     for column in (schema.customer_column, schema.rep_column):

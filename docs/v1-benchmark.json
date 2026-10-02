@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "period": "2026-08",
+  "format": "CSV",
+  "sales_rows": 72000,
+  "sample_rows": 6000,
+  "accounts": 900,
+  "products": 1500,
+  "suppliers": 50,
+  "reps": 15,
+  "history_months": 24,
+  "repeats": 3,
+  "python": "3.12.14",
+  "polars": "1.43.2",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+  "monthly_upload_bytes": 606559,
+  "zip_bytes": [
+    850099,
+    850099,
+    850099
+  ],
+  "timings_ms": {
+    "parsing": {
+      "median": 4.625,
+      "min": 4.178,
+      "max": 4.8
+    },
+    "validation": {
+      "median": 254.01,
+      "min": 225.474,
+      "max": 306.202
+    },
+    "historical_loading": {
+      "median": 100.353,
+      "min": 98.609,
+      "max": 102.027
+    },
+    "persistent_commit": {
+      "median": 12.198,
+      "min": 11.547,
+      "max": 17.77
+    },
+    "report_calculation": {
+      "median": 657.553,
+      "min": 597.01,
+      "max": 696.077
+    },
+    "xlsx_generation": {
+      "median": 1561.778,
+      "min": 1516.894,
+      "max": 1798.113
+    },
+    "zip_generation": {
+      "median": 24.452,
+      "min": 24.144,
+      "max": 24.566
+    },
+    "total_cycle": {
+      "median": 2778.325,
+      "min": 2610.953,
+      "max": 3089.751
+    },
+    "initial_history_setup": {
+      "median": 324.715,
+      "min": 309.321,
+      "max": 344.041
+    }
+  },
+  "runs_ms": [
+    {
+      "parsing": 4.799807999461336,
+      "validation": 225.47376000147779,
+      "historical_loading": 102.02725900035148,
+      "persistent_commit": 11.54743100005362,
+      "report_calculation": 597.0103370000288,
+      "xlsx_generation": 1516.8939629998022,
+      "zip_generation": 24.451575000057346,
+      "total_cycle": 2610.953456000061,
+      "initial_history_setup": 344.0411699998549
+    },
+    {
+      "parsing": 4.178313000011258,
+      "validation": 254.00970300051995,
+      "historical_loading": 98.60890599793493,
+      "persistent_commit": 12.197610000384884,
+      "report_calculation": 657.5533989998803,
+      "xlsx_generation": 1561.777789000189,
+      "zip_generation": 24.143862000073568,
+      "total_cycle": 2778.325268000117,
+      "initial_history_setup": 309.321116999854
+    },
+    {
+      "parsing": 4.6250839995991555,
+      "validation": 306.2018770006034,
+      "historical_loading": 100.35321799932717,
+      "persistent_commit": 17.769623000276624,
+      "report_calculation": 696.0771730000488,
+      "xlsx_generation": 1798.1131310002638,
+      "zip_generation": 24.565626999901724,
+      "total_cycle": 3089.750562000063,
+      "initial_history_setup": 324.71516200030237
+    }
+  ],
+  "measured_at": "2026-10-02",
+  "scope": "V1 follow-through working tree on codex/phase-15-monthly-workflow",
+  "transport": "In-process FastAPI TestClient; actual Next.js production transport verified separately"
+}

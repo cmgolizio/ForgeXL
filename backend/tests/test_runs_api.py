@@ -15,6 +15,7 @@ import pytest
 
 from app import config
 from app.models.run import new_run_id
+from app.models.schemas import RunStatus
 from app.services import export, run_store
 
 from tests.helpers import csv_bytes, make_action, upload_file, xlsx_bytes
@@ -180,6 +181,33 @@ def test_a_failed_run_is_retrievable_afterwards(run_client) -> None:
 # ---------------------------------------------------------------------------
 # 3.13 GET /api/runs/{run_id}
 # ---------------------------------------------------------------------------
+
+
+def test_explicit_release_removes_results_but_not_library_files(run_client, data_library):
+    run_id = _start_run(run_client).json()["run_id"]
+    data_library.root.mkdir(parents=True, exist_ok=True)
+    marker = data_library.root / "preserved-source.parquet"
+    marker.write_bytes(b"synthetic persistent source")
+    response = run_client.post(f"/api/runs/{run_id}/discard")
+    assert response.status_code == 200
+    assert response.json() == {"run_id": run_id, "discarded": True}
+    assert run_client.get(f"/api/runs/{run_id}").status_code == 404
+    assert run_client.get(f"/api/runs/{run_id}/outputs/result/download/xlsx").status_code == 404
+    assert marker.read_bytes() == b"synthetic persistent source"
+
+
+def test_running_run_cannot_be_released(run_client):
+    run_id = _start_run(run_client).json()["run_id"]
+    run_store.update_run(run_store.get_run(run_id).with_changes(status=RunStatus.RUNNING))
+    assert run_client.post(f"/api/runs/{run_id}/discard").status_code == 400
+    assert run_store.get_run(run_id).status == RunStatus.RUNNING
+
+
+@pytest.mark.parametrize("run_id", ["not-a-uuid", new_run_id()])
+def test_release_of_unknown_run_is_a_structured_404(run_client, run_id):
+    response = run_client.post(f"/api/runs/{run_id}/discard")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "UNKNOWN_RUN"
 
 
 def test_a_run_can_be_retrieved_by_id(run_client) -> None:

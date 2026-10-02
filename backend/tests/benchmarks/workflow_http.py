@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -23,6 +24,39 @@ from openpyxl import load_workbook
 
 from tests.fixtures import report_months as golden
 from tests.fixtures.monthly_sources import transactions
+from tests.helpers import csv_bytes, xlsx_bytes
+
+
+def verify_proof_actions(client):
+    """Real production transport, both formats, independent literal controls."""
+    headers = ["SKU", "Vintage", "Supplier", "Producer", "Selection", "Volume", "Invoice"]
+    rows = [["A1", 2024, "Supplier", "Pród", "Cuvée", "750mL", "I1"],
+        ["A1", 2024, "Supplier", "Pród", "Cuvée", "750mL", "I1"],
+        ["A1", 2024, "Supplier", "Pród", "Cuvée", "750mL", "I2"]]
+    for extension, payload in (("csv", csv_bytes(headers, rows)),
+        ("xlsx", xlsx_bytes({"Sales": [headers, *rows]}))):
+        for action, slot, output, expected in (
+            ("exact_duplicate_remover", "source_file", "deduplicated_data", [rows[0], rows[2]]),
+            ("product_master_builder", "sales_file", "product_master", [rows[0][:6]])):
+            manifest = checked(client.post("/forge-api/api/runs", data={"action_id": action},
+                files={slot: (f"proof.{extension}", payload)}))
+            base = f'/forge-api/api/runs/{manifest["run_id"]}'
+            page = checked(client.get(f"{base}/outputs/{output}/preview"))
+            assert page["rows"] == expected
+            csv = client.get(f"{base}/outputs/{output}/download/csv")
+            assert csv.status_code == 200 and "Pród" in csv.text
+            workbook_response = client.get(f"{base}/outputs/{output}/download/xlsx")
+            assert workbook_response.status_code == 200
+            workbook = load_workbook(BytesIO(workbook_response.content), data_only=True)
+            sheet = workbook.active
+            assert sheet is not None
+            assert [list(row) for row in sheet.iter_rows(min_row=2, values_only=True)] == expected
+            workbook.close()
+            assert checked(client.post(base + "/discard"))["discarded"]
+            assert client.get(base).status_code == 404
+    invalid = client.post("/forge-api/api/runs", data={"action_id": "product_master_builder"},
+        files={"sales_file": ("invalid.csv", b"SKU\nA1\n")})
+    assert invalid.status_code == 422 and invalid.json()["error"]["code"] == "MISSING_COLUMNS"
 
 
 def port():
@@ -73,13 +107,28 @@ def main():
                     page = client.get("/monthly-reports")
                     assert page.status_code == 200 and "Monthly Reports" in page.text
                     assert "/monthly-reports" in client.get("/").text
+                    verify_proof_actions(client)
                     base = "/forge-api/api/monthly"
-                    for dataset_id, rows in (
-                        ("sales_history", [row for month, lines in golden.SALES_ROWS.items() if month != golden.GOLDEN_MONTH for row in lines]),
-                        ("sample_history", list(golden.SAMPLE_ROWS["2026-08"]))):
-                        review = checked(client.post(base + "/history/validate", data={"dataset_id": dataset_id},
+                    denied = client.post(base + "/validate", headers={"Origin": "https://untrusted.example"}, data={"period": golden.GOLDEN_MONTH})
+                    assert denied.status_code == 403 and denied.json()["error"]["code"] == "CROSS_ORIGIN_REQUEST"
+                    assert not (Path(temporary) / "library").exists()
+                    # Legitimate browser Origin is the web server's random port,
+                    # not the backend allowlist: the proxy validates then strips it.
+                    client.headers["Origin"] = f"http://127.0.0.1:{web_port}"
+                    historical = sorted(month for month in golden.SALES_ROWS if month != golden.GOLDEN_MONTH)
+                    split = len(historical) // 2
+                    for dataset_id, rows, skip in (
+                        ("sales_history", [row for month in historical[:split] for row in golden.SALES_ROWS[month]], False),
+                        ("sales_history", [row for month in historical[split - 1:] for row in golden.SALES_ROWS[month]], True),
+                        ("sample_history", list(golden.SAMPLE_ROWS["2026-08"]), False)):
+                        if skip:
+                            blocked = checked(client.post(base + "/history/validate", data={"dataset_id": dataset_id},
+                                files={"source_file": ("history.csv", transactions(rows).as_csv())}))
+                            assert not blocked["ready"] and blocked["validation_id"] is None
+                        review = checked(client.post(base + "/history/validate", data={"dataset_id": dataset_id, "skip_existing": str(skip).lower()},
                             files={"source_file": ("history.csv", transactions(rows).as_csv())}))
                         assert review["ready"], review
+                        if skip: assert review["skipped_periods"] == [historical[split - 1]]
                         saved = checked(client.post(base + "/history/commit", json={"validation_id": review["validation_id"], "acknowledge_warnings": True}))
                         assert saved["status"] == "saved"
                     review = checked(client.post(base + "/validate", data={"period": golden.GOLDEN_MONTH}, files={
@@ -98,16 +147,28 @@ def main():
                         workbook.close()
                     summary = checked(client.get(f"/forge-api/api/runs/{run_id}/outputs/company_summary/preview"))
                     assert summary["rows"][0][summary["columns"].index("Revenue")] == 995.0
+                    assert checked(client.post(f"/forge-api/api/runs/{run_id}/discard"))["discarded"]
+                    assert client.get(f"/forge-api/api/runs/{run_id}").status_code == 404
+                    assert checked(client.get(base + "/catalog"))["periods"]
                     backend.terminate(); backend.wait(timeout=5)
+                    unavailable = client.get("/forge-api/health")
+                    assert unavailable.status_code == 502
+                    # Restore a stopped full-library backup, including receipts.
+                    restored = Path(temporary) / "restored-library"
+                    shutil.copytree(Path(temporary) / "library", restored)
+                    environment["FORGEXL_LIBRARY_DIRECTORY"] = str(restored)
                     start_api(); wait_ready()
                     assert client.get(f"/forge-api/api/runs/{run_id}").status_code == 404
                     replay = checked(client.post(base + "/validate-saved", json={"period": golden.GOLDEN_MONTH, "cycle_id": result["receipt"]["cycle_id"]}))
                     repeated = checked(client.post(base + "/generate", json={"validation_id": replay["validation_id"], "acknowledge_warnings": True}))
                     assert repeated["status"] == "reports_generated"
                     assert unpack(client.get(f'/forge-api/api/runs/{repeated["manifest"]["run_id"]}/artifacts/download/zip')) == original
-                    print(json.dumps({"http_proxy": "passed", "history_import": "passed", "monthly_cycle": "passed",
+                    print(json.dumps({"http_proxy": "passed", "proof_actions_csv_xlsx": "passed",
+                        "cross_origin_write_refused": "passed", "same_origin_browser_write": "passed",
+                        "disconnected_backend_502": "passed", "explicit_run_release_preserves_saved_cycle": "passed",
+                        "history_chunks_overlap_consent": "passed", "monthly_cycle": "passed",
                         "workbooks": 3, "worksheets": 18, "company_revenue_control": 995.0,
-                        "restart_exact_workbook_replay": "passed", "live_browser": "not exercised"}, indent=2))
+                        "restart_and_backup_restore_exact_workbook_replay": "passed", "live_browser": "not exercised"}, indent=2))
             finally:
                 for process in processes:
                     if process.poll() is None:

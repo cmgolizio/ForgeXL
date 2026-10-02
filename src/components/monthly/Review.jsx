@@ -29,7 +29,7 @@ export function ErrorNotice({ error }) {
 
 export function WarningConsent({ checked, onChange, disabled }) {
   return <label className="flex items-start gap-2 text-sm">
-    <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} className="mt-1" />
+    <input type="checkbox" aria-label="Acknowledge validation warnings" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} className="mt-1" />
     <span>I reviewed the warnings and accept the stated limits of these reports.</span>
   </label>;
 }

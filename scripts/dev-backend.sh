@@ -15,7 +15,7 @@ if [ ! -x "$VENV_PYTHON" ]; then
   echo "Create it with:" >&2
   echo "  python3 -m venv backend/.venv" >&2
   echo "  backend/.venv/bin/python -m pip install --upgrade pip" >&2
-  echo "  backend/.venv/bin/python -m pip install -r backend/requirements.txt" >&2
+  echo "  backend/.venv/bin/python -m pip install -r backend/requirements.lock.txt" >&2
   exit 1
 fi
 
