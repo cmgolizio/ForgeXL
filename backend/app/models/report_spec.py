@@ -37,7 +37,7 @@ REPORT_ACTION_ID = "monthly_sales_rep_report"
 #: is specified by :data:`REPORT_RULES`, part of which is still provisional, so
 #: claiming 1.0.0 would assert a stability the definitions do not yet have.
 #: Raise it to 1.0.0 in the same change that clears :data:`PROVISIONAL_RULES`.
-REPORT_ACTION_VERSION = "0.2.0"
+REPORT_ACTION_VERSION = "0.3.0"
 
 
 # ---------------------------------------------------------------------------
@@ -79,27 +79,24 @@ REPORT_RULES: tuple[Rule, ...] = (
     Rule(
         key="sources",
         statement=(
-            "The report is built from three Data Library datasets and nothing "
-            "else: sales history, sample history, and the account-assignment "
-            "snapshot for the reporting month."
+            "The report is built from sales history and sample history. "
+            "Account assignment files are not report inputs."
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
-            "Build plan 13B names exactly these three. No other persistent "
-            "dataset exists, and 13B permits more only if the specification "
-            "proves them required."
+            "User direction on 2026-10-02 removes assignment inputs and "
+            "requires invoice-based reports from sales and samples."
         ),
     ),
     Rule(
         key="source_schemas",
         statement=(
             "Sales and samples carry the fifteen confirmed transaction "
-            "columns; the assignment snapshot carries Customer and Sales "
-            "Person. Column names are matched exactly, with no aliasing."
+            "columns. Column names are matched exactly, with no aliasing."
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
-            'The canonical schema declarations define required identities and measures. Optional snapshot totals remain context rather than replacements for transaction aggregates.'
+            'The canonical transaction schemas define required identities and measures. Account context is derived from those transactions.'
         ),
     ),
     # -- Reporting period -------------------------------------------------
@@ -182,15 +179,15 @@ REPORT_RULES: tuple[Rule, ...] = (
     # -- Ownership --------------------------------------------------------
     Rule(
         key='ownership',
-        statement='Revenue and sample activity follow Sales Person on each transaction. The reporting-month assignment snapshot supplies roster and account-list context only, and never reattributes historical activity.',
+        statement='Revenue and sample activity follow Sales Person on each transaction. Account context comes from distinct customer/rep pairs in current R12 activity.',
         confidence=Confidence.CONFIRMED,
-        basis='Invoice salesperson is the configured performance identity. Snapshot ownership is a separate contextual fact and never replaces that identity on historical transactions.',
+        basis='User direction keeps transaction attribution and removes external ownership context.',
     ),
     Rule(
         key="ownership_matching",
         statement=(
-            "Customer is matched between the transactions and the snapshot "
-            "exactly: no trimming, no case folding, no near match."
+            "Customer identities are grouped exactly as supplied on transactions: "
+            "no trimming, case folding or near match."
         ),
         confidence=Confidence.CONFIRMED,
         basis=(
@@ -207,22 +204,22 @@ REPORT_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         key='duplicate_ownership',
-        statement='Conflicting owners in the snapshot are reported, but never multiply or reassign invoice-attributed revenue.',
+        statement='Distinct customer/rep context pairs are counted once. Repeated transaction rows remain present and explicitly warned about.',
         confidence=Confidence.CONFIRMED,
-        basis='Performance does not join through the ownership map. Conflicting context can therefore be qualified without multiplying revenue, while snapshot ingestion retains strict ownership checks.',
+        basis='Account context is derived from transactions and never joined to an external ownership map.',
     ),
     # -- Rep roster -------------------------------------------------------
     Rule(
         key='rep_roster',
-        statement='Every nonblank rep in the reporting-month snapshot or with sales/sample activity in current R12 receives a workbook, including snapshot reps with no activity.',
+        statement='Every nonblank rep with sales/sample activity in current R12 receives a workbook. A separate assignment list is never consulted.',
         confidence=Confidence.CONFIRMED,
-        basis='A dynamic roster combines snapshot members with current-R12 transaction activity. This retains idle assigned reps and active invoice reps without a hard-coded name list.',
+        basis='The roster is dynamically derived from current-R12 invoice activity without an external assignment list or hard-coded names.',
     ),
     Rule(
         key='unrecognised_reps',
-        statement='Transaction reps absent from the snapshot are reported as a warning. Their transactions keep their invoice rep, and reps active in current R12 are included in the roster.',
+        statement='Every nonblank transaction rep is accepted as supplied; reps active in current R12 are included without verification against an assignment list.',
         confidence=Confidence.CONFIRMED,
-        basis='A current assignment list cannot establish who performed every historical sale. Retaining the invoice identity avoids silently reassigning or dropping that activity.',
+        basis='Invoice identity defines performance and the roster; no external assignment input is available.',
     ),
     # -- Placements -------------------------------------------------------
     Rule(

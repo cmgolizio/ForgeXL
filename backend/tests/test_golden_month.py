@@ -143,7 +143,7 @@ def test_the_company_revenue_includes_the_credit_at_its_signed_value(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("rep", [BETH, KEVIN, JENNIFER])
+@pytest.mark.parametrize("rep", [BETH, KEVIN])
 def test_each_reps_totals_are_exact(tables, rep) -> None:
     assert_values(
         row(tables["rep_summary"], **{REP_COLUMN: rep}),
@@ -162,7 +162,6 @@ def test_the_summary_is_ordered_by_revenue(tables) -> None:
     assert tables["rep_summary"][REP_COLUMN].to_list() == [
         BETH,
         KEVIN,
-        JENNIFER,
     ]
 
 
@@ -173,7 +172,7 @@ def test_the_summary_is_ordered_by_revenue(tables) -> None:
 
 @pytest.mark.parametrize(
     "rep,account",
-    [(BETH, ACME), (BETH, CORNER), (KEVIN, BISTRO), (JENNIFER, HARBOUR)],
+    [(BETH, ACME), (BETH, CORNER), (KEVIN, BISTRO)],
 )
 def test_each_accounts_metrics_are_exact(tables, rep, account) -> None:
     assert_values(
@@ -185,9 +184,9 @@ def test_each_accounts_metrics_are_exact(tables, rep, account) -> None:
 def test_every_owned_account_appears_once(tables) -> None:
     accounts = tables["account_performance"]
 
-    assert accounts.height == len(golden.OWNERSHIP)
+    assert accounts.height == len(EXPECTED["accounts"])
     assert accounts.select(REP_COLUMN, CUSTOMER).unique().height == len(
-        golden.OWNERSHIP
+        EXPECTED["accounts"]
     )
 
 
@@ -397,7 +396,6 @@ def test_the_action_is_registered_and_reads_the_library() -> None:
     assert [slot.id for slot in action.inputs] == [
         SALES_SLOT,
         SAMPLES_SLOT,
-        ASSIGNMENTS_SLOT,
     ]
     assert all(slot.source.value == "library" for slot in action.inputs)
     assert all(slot.accepted_extensions == () for slot in action.inputs)
@@ -427,7 +425,7 @@ def test_the_action_produces_one_workbook_per_rep() -> None:
     assert action is not None
     result = action.run(_action_inputs())
     assert {artifact.filename for artifact in result.artifacts} == {
-        "Beth Comeaux - September 2026.xlsx", "Kevin Wardell - September 2026.xlsx", "Jennifer Jones - September 2026.xlsx"}
+        "Beth Comeaux - September 2026.xlsx", "Kevin Wardell - September 2026.xlsx"}
     assert all(artifact.payload.startswith(b"PK") for artifact in result.artifacts)
     assert result.artifact_bundle_filename == "September 2026 Sales Rep Reports.zip"
 
@@ -528,7 +526,6 @@ def _run_the_report(**references: str):
         dataset_references={
             SALES_SLOT: f"history:{GOLDEN_MONTH}",
             SAMPLES_SLOT: f"history:{GOLDEN_MONTH}",
-            ASSIGNMENTS_SLOT: f"period:{GOLDEN_MONTH}",
             **references,
         },
     )
@@ -580,14 +577,10 @@ def test_naming_the_recorded_versions_reproduces_the_report(
 ) -> None:
     """Build plan 11D: a Run is reproducible from what it recorded."""
     first = _run_the_report()
-    september = next(
-        record
-        for record in first.manifest.library_inputs
-        if record.slot_id == ASSIGNMENTS_SLOT
-    )
+    september = next(record for record in first.manifest.library_inputs if record.slot_id == SALES_SLOT and record.period == GOLDEN_MONTH)
 
     second = _run_the_report(
-        **{ASSIGNMENTS_SLOT: f"version:{september.version_id}"}
+        **{SALES_SLOT: "versions:" + ",".join(record.version_id for record in first.manifest.library_inputs if record.slot_id == SALES_SLOT)}
     )
 
     assert first.result is not None
@@ -611,22 +604,12 @@ def test_a_month_that_was_never_imported_fails_clearly(stocked_library) -> None:
 
 
 @pytest.mark.parametrize("period", ["2026-08", "2026-10"])
-def test_ownership_must_be_for_the_sales_reporting_month(
-    stocked_library, period
-) -> None:
-    from app.errors import RunValidationError
-
-    commit_account_assignments(
-        SourceFile(
-            filename="assignments.csv", payload=golden.assignment_table().as_csv()
-        ),
-        period=period,
-    )
-    with pytest.raises(RunValidationError) as failure:
-        _run_the_report(**{ASSIGNMENTS_SLOT: f"period:{period}"})
-
-    assert failure.value.code == "MISMATCHED_REPORTING_PERIODS"
-    assert failure.value.issues[0].slot_id == ASSIGNMENTS_SLOT
+def test_ownership_snapshots_do_not_affect_the_report(stocked_library, period) -> None:
+    commit_account_assignments(SourceFile(filename="assignments.csv", payload=golden.assignment_table().as_csv()), period=period)
+    result = _run_the_report().result
+    assert result is not None
+    company = result.table("company_summary")
+    assert company is not None and company["Revenue"][0] == 995.0
 
 
 def test_sample_versions_must_reach_the_reporting_month(stocked_library) -> None:
@@ -671,20 +654,10 @@ def test_the_report_uses_explicitly_chosen_dates_from_ingestion(data_library) ->
     )
 
 
-def test_a_report_cannot_merge_two_ownership_snapshots(stocked_library) -> None:
-    from app.errors import RunValidationError
-
-    commit_account_assignments(
-        SourceFile(
-            filename="assignments.csv", payload=golden.assignment_table().as_csv()
-        ),
-        period="2026-08",
-    )
-    with pytest.raises(RunValidationError) as failure:
-        _run_the_report(**{ASSIGNMENTS_SLOT: "history"})
-
-    assert failure.value.code == "INVALID_DATASET_SELECTOR"
-
+def test_report_metadata_contains_no_assignment_input(stocked_library) -> None:
+    action = registry.get_action(REPORT_ACTION_ID)
+    assert action is not None
+    assert [slot.id for slot in action.inputs] == [SALES_SLOT, SAMPLES_SLOT]
 
 def test_bounding_the_history_moves_the_reporting_period(
     stocked_library,
@@ -699,7 +672,6 @@ def test_bounding_the_history_moves_the_reporting_period(
         **{
             SALES_SLOT: "history:2026-08",
             SAMPLES_SLOT: "history:2026-08",
-            ASSIGNMENTS_SLOT: "period:2026-08",
         }
     )
     result = outcome.result
@@ -746,8 +718,8 @@ def test_the_manifest_carries_the_reports_metrics(stocked_library) -> None:
     manifest = _run_the_report().manifest
 
     assert manifest.metrics == {
-        "sales_reps": 3,
-        "accounts": 4,
+        "sales_reps": 2,
+        "accounts": 3,
         "history_months": 4,
         "sales_rows": 5,
         "sample_rows": 2,

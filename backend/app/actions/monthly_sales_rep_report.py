@@ -1,6 +1,6 @@
 """Action 3 — Monthly Sales Rep Report (build plan Phases 13 and 14).
 
-The first Action that reads the persistent Data Library. It declares three
+The first Action that reads the persistent Data Library. It declares two
 library-backed input slots (build plan 11A), receives their rows as DataFrames
 like every other Action, and returns calculation tables and every rep workbook.
 
@@ -31,8 +31,6 @@ import polars as pl
 from app.actions.base import Action, ActionResult
 from app.models.artifact import artifact_filename
 from app.models.report_spec import (
-    ASSIGNMENTS_DATASET_ID,
-    ASSIGNMENTS_SCHEMA,
     REPORT_ACTION_ID,
     REPORT_ACTION_VERSION,
     REPORT_SECTIONS,
@@ -93,15 +91,13 @@ def _library_slot(
 class MonthlySalesRepReportAction(Action):
     """Calculate the monthly sales-rep report from stored company data."""
 
+    workflow_path = "/monthly-reports"
     id = REPORT_ACTION_ID
     version = REPORT_ACTION_VERSION
     name = "Monthly Sales Rep Report"
     description = (
-        "Calculate the monthly sales-rep report from the Data Library: one "
-        "set of tables per rep covering accounts, suppliers, products, "
-        "samples and R12 comparisons, with one finished workbook per rep and "
-        "a monthly ZIP download. Performance follows the invoice salesperson; "
-        "the month is read from the committed sales data."
+        "Create one Excel workbook per sales rep, with monthly sales, samples, "
+        "supplier performance and rolling-year comparisons. Download all reports together."
     )
     inputs = (
         _library_slot(
@@ -129,18 +125,7 @@ class MonthlySalesRepReportAction(Action):
                 "added to sales."
             ),
         ),
-        _library_slot(
-            ASSIGNMENTS_SLOT,
-            "Account Assignments",
-            ASSIGNMENTS_DATASET_ID,
-            ASSIGNMENTS_SCHEMA.column_names,
-            period_matches=SALES_SLOT,
-            description=(
-                "The account-ownership snapshot for the reporting month, "
-                "named with 'period:YYYY-MM'. Supplies roster and account-list "
-                "context. Performance stays attributed to the invoice salesperson."
-            ),
-        ),
+
     )
     outputs = tuple(
         ActionOutput(
@@ -198,8 +183,6 @@ class MonthlySalesRepReportAction(Action):
         return prepare(
             inputs[SALES_SLOT],
             inputs[SAMPLES_SLOT],
-            inputs[ASSIGNMENTS_SLOT],
             sales_slot=SALES_SLOT,
             samples_slot=SAMPLES_SLOT,
-            assignments_slot=ASSIGNMENTS_SLOT,
         )

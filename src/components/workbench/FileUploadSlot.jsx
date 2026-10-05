@@ -76,6 +76,7 @@ export default function FileUploadSlot({
       <input
         id={inputId}
         type='file'
+        aria-label={input.label}
         accept={accepted.join(",")}
         disabled={disabled}
         onChange={handleChange}
@@ -92,7 +93,7 @@ export default function FileUploadSlot({
         }`}
       >
         <span className='text-sm text-zinc-700 dark:text-zinc-300'>
-          Drop file here or click to choose
+          {file ? "Choose a different file" : "Choose file or drop it here"}
         </span>
         <span className='text-xs text-zinc-500 dark:text-zinc-500'>
           {joinWithOr(accepted)}
@@ -100,9 +101,7 @@ export default function FileUploadSlot({
       </label>
 
       {requiredColumns.length > 0 ? (
-        <p className='text-xs text-zinc-500 dark:text-zinc-500'>
-          Required columns: {requiredColumns.join(", ")}
-        </p>
+        <details className='text-xs text-zinc-500 dark:text-zinc-500'><summary>Required columns</summary><p className='mt-2'>{requiredColumns.join(", ")}</p></details>
       ) : null}
 
       {file ? (

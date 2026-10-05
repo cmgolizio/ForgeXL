@@ -43,7 +43,7 @@ export default function RunStatus({ state, error, manifest }) {
           className='flex flex-col gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 dark:border-emerald-900 dark:bg-emerald-950/40'
         >
           <h3 className='text-sm font-semibold text-emerald-900 dark:text-emerald-200'>
-            Run Successful
+            Your report is ready
           </h3>
           <p className='text-sm text-emerald-800 dark:text-emerald-300'>
             {manifest.action?.name} read {formatCount(audit?.rows_received)}{" "}
@@ -62,7 +62,7 @@ export default function RunStatus({ state, error, manifest }) {
         className='flex flex-col gap-2 rounded-lg border border-red-300 bg-red-50 px-4 py-3 dark:border-red-900 dark:bg-red-950/40'
       >
         <h3 className='text-sm font-semibold text-red-900 dark:text-red-200'>
-          {state === "validation_error" ? "Validation Failed" : "Run Failed"}
+          {state === "validation_error" ? "Check your file" : "Could not generate your report"}
         </h3>
         <ul className='flex flex-col gap-2'>
           {error.issues.map((issue, index) => (

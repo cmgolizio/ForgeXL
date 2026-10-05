@@ -5,7 +5,7 @@ remain the authorities. A receipt persists only the selected immutable sources.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 import threading
 import time
@@ -26,7 +26,7 @@ from app.models.schemas import ActionReference, ValidationIssue
 from app.services import cycle_receipts, data_library, ingestion, input_resolution, results
 from app.services.ingestion import SourceFile, SourceValidation
 from app.services.input_resolution import ResolvedLibraryInput
-from app.services.monthly_report import PreparedReport, missing_months, prepare
+from app.services.monthly_report import PreparedReport, missing_months, prepare, validate_transaction_source
 from app.services.runner import execute_run
 
 VALIDATION_LIFETIME = timedelta(minutes=15)
@@ -35,7 +35,7 @@ VALIDATION_LIFETIME = timedelta(minutes=15)
 @dataclass
 class PendingCycle:
     summary: WorkflowValidation
-    imports: dict[str, SourceValidation]
+    imports: dict[str, tuple[SourceValidation, ...]]
     replacements: dict[str, str]
     reason: str | None
     versions: dict[str, tuple[str, ...]]
@@ -69,7 +69,7 @@ class MonthlyWorkflow:
             action = _action()
             errors: list[ValidationIssue] = []
             warnings: list[ValidationIssue] = []
-            imports: dict[str, SourceValidation] = {}
+            imports: dict[str, tuple[SourceValidation, ...]] = {}
             reviews: list[SourceReview] = []
             versions: dict[str, tuple[str, ...]] = {}
             baseline = _baseline(period)
@@ -84,35 +84,80 @@ class MonthlyWorkflow:
                         continue
                     reviews.append(_review_version(current))
                 else:
-                    check = ingestion.validate_source(dataset_id, file, expected_period=period,
-                        date_format=dates.get(dataset_id), replaces=replacing.get(dataset_id))
-                    imports[dataset_id] = check
-                    errors.extend(check.errors)
+                    check = ingestion.validate_source(dataset_id, file,
+                        date_format=dates.get(dataset_id), allow_multiple_periods=True,
+                        replaces=replacing.get(dataset_id))
+                    # Monthly partition conflicts are checked against exact rows below.
+                    source_errors = [issue for issue in check.errors if issue.code not in
+                        ("PERIOD_ALREADY_COMMITTED", "DUPLICATE_SOURCE_FILE")]
+                    values: pl.Series | None = None
+                    if not source_errors and check.frame is not None:
+                        values, _, _ = ingestion.reporting_period.read_dates(check.frame,
+                            check.schema, check.schema.period_column or "", date_format=check.date_format)
+                        # Validate a working copy with the user's chosen date interpretation.
+                        interpreted = check.frame.with_columns(values.alias(check.schema.period_column or "Invoice Date"))
+                        row_errors, row_warnings = validate_transaction_source(interpreted, dataset_id)
+                        source_errors.extend(row_errors)
+                        warnings.extend(row_warnings)
+                    errors.extend(source_errors)
                     warnings.extend(check.warnings)
-                    operation = "replace" if dataset_id in replacing else "import"
+                    chunks: list[SourceValidation] = []
+                    reused: list[str] = []
+                    if not source_errors:
+                        assert check.frame is not None and check.parsed is not None
+                        assert values is not None
+                        month_values = values.dt.strftime("%Y-%m")
+                        for month in check.periods:
+                            mask = month_values == month
+                            frame = check.frame.filter(mask)
+                            month_dates = values.filter(mask).drop_nulls()
+                            existing = _current_month(dataset_id, month)
+                            correcting = month == period and dataset_id in replacing
+                            if existing and not correcting:
+                                stored = data_library.load_version(dataset_id, existing.version_id)
+                                if _same_rows(frame, stored) and (existing.date_column, existing.date_format) == (
+                                    check.schema.period_column if check.date_format else None, check.date_format):
+                                    reused.append(month)
+                                    continue
+                                errors.append(_issue("HISTORY_MONTH_CONFLICT",
+                                    f"{_label(dataset_id)} for {month} differs from the saved data. "
+                                    "Use the saved data, or upload a corrected single-month file and select Replace saved month. Nothing was overwritten.",
+                                    dataset_id, {"period": month, "existing_version_id": existing.version_id}))
+                                continue
+                            chunks.append(replace(check, parsed=replace(check.parsed, frame=frame),
+                                period=month, periods=(month,), min_date=month_dates.min(), max_date=month_dates.max(),
+                                duplicate_of=None, errors=()))
+                    imports[dataset_id] = tuple(chunks)
+                    operation = "replace" if dataset_id in replacing else "import" if chunks else "reuse"
                     reviews.append(SourceReview(dataset_id=dataset_id, label=_label(dataset_id),
-                        filename=check.filename, row_count=check.row_count, period=check.period,
+                        filename=check.filename, row_count=check.row_count, period=period,
                         version_id=current.version_id if current else None,
-                        operation=operation, errors=check.errors, warnings=check.warnings))
+                        imported_periods=tuple(chunk.period for chunk in chunks if chunk.period),
+                        reused_periods=tuple(reused), operation=operation,
+                        errors=tuple(issue for issue in errors if issue.slot_id == dataset_id), warnings=check.warnings))
+                    if period not in check.periods and current is None:
+                        errors.append(_issue("REPORT_MONTH_MISSING", f"{_label(dataset_id)} does not include {period}. Choose a month in your files or upload that month’s data.", dataset_id))
                     if dataset_id in replacing:
+                        if check.periods != (period,):
+                            errors.append(_issue("CORRECTION_SINGLE_MONTH_REQUIRED", "A correction must contain only the selected reporting month. Multi-year history can be uploaded without replacing saved months.", dataset_id))
                         if current is None or current.version_id != replacing[dataset_id]:
-                            errors.append(_issue("STALE_CORRECTION", "The correction must name the current version for this reporting month. Refresh stored periods and validate again.", dataset_id))
+                            errors.append(_issue("STALE_CORRECTION", "The correction must name the current version for this reporting month. Refresh saved data and try again.", dataset_id))
                         if not (reason or "").strip():
                             errors.append(_issue("CORRECTION_REASON_REQUIRED", "Explain why the saved monthly data is being replaced.", dataset_id))
-            supplied_hashes = [check.source_sha256 for check in imports.values()]
+            supplied_hashes = [file.sha256 for file in files.values()]
             if len(supplied_hashes) != len(set(supplied_hashes)):
-                errors.append(_issue("SAME_FILE_FOR_SEVERAL_DATASETS", "Sales, samples and assignments need separate source files."))
+                errors.append(_issue("SAME_FILE_FOR_SEVERAL_DATASETS", "Sales and samples need separate source files."))
             parsing_ms = _ms(started)
             loading_started = time.perf_counter()
             if not errors:
                 for dataset_id in SOURCE_IDS:
                     selected = _selected_versions(dataset_id, period)
-                    check = imports.get(dataset_id)
-                    if check is not None:
-                        selected = tuple(v for v in selected if v.period != period)
+                    incoming = tuple(chunk for chunk in imports.get(dataset_id, ()) if chunk.period and chunk.period <= period)
+                    incoming_periods = {chunk.period for chunk in incoming}
+                    selected = tuple(v for v in selected if v.period not in incoming_periods)
                     versions[dataset_id] = tuple(v.version_id for v in selected)
                     try:
-                        frames[dataset_id] = _frames(dataset_id, selected, check)
+                        frames[dataset_id] = _frames(dataset_id, selected, incoming)
                     except WorkbenchError as error:
                         errors.append(error.as_validation_issue(dataset_id))
             loading_ms = _ms(loading_started)
@@ -161,7 +206,7 @@ class MonthlyWorkflow:
 
     def _finish_review(self, period: str, action: Action, reviews: list[SourceReview],
                        frames: dict[str, pl.DataFrame], errors: list[ValidationIssue],
-                       warnings: list[ValidationIssue], *, imports: dict[str, SourceValidation],
+                       warnings: list[ValidationIssue], *, imports: dict[str, tuple[SourceValidation, ...]],
                        replacements: dict[str, str], reason: str | None,
                        versions: dict[str, tuple[str, ...]], baseline: dict[str, tuple[str, ...]],
                        receipt: CycleReceipt | None, source_selection: str,
@@ -176,8 +221,8 @@ class MonthlyWorkflow:
                     errors.append(_issue("MISSING_COLUMNS" if missing else "EMPTY_DATASET",
                         f"{slot.label} is missing required data.", slot.id, {"missing_columns": missing}))
         if not errors:
-            prepared = prepare(frames[SOURCE_IDS[0]], frames[SOURCE_IDS[1]], frames[SOURCE_IDS[2]],
-                sales_slot=SOURCE_IDS[0], samples_slot=SOURCE_IDS[1], assignments_slot=SOURCE_IDS[2])
+            prepared = prepare(frames[SOURCE_IDS[0]], frames[SOURCE_IDS[1]],
+                sales_slot=SOURCE_IDS[0], samples_slot=SOURCE_IDS[1])
             errors.extend(prepared.errors)
             warnings.extend(prepared.warnings)
             if prepared.period and prepared.period.month != period:
@@ -197,7 +242,7 @@ class MonthlyWorkflow:
             source = next((item for item in reviews if item.dataset_id == dataset_id), None)
             failed = any(issue.slot_id == dataset_id for issue in errors) or source is None
             checks.append(WorkflowCheck(label=_label(dataset_id), status="error" if failed else "passed",
-                detail=(f"{source.row_count:,} monthly rows · {source.operation}" if source else "Source required")))
+                detail=(f"{source.row_count:,} rows · {source.operation}" if source else "Source required")))
         checks.extend((WorkflowCheck(label="Reporting period", status="error" if errors else "passed", detail=period),
             WorkflowCheck(label="Sales reps detected", status="passed" if prepared and prepared.reps else "error",
                 detail=f"{len(prepared.reps) if prepared else 0} workbooks"),
@@ -244,13 +289,13 @@ class MonthlyWorkflow:
             refs = dict(pending.versions)
             try:
                 for dataset_id in SOURCE_IDS:
-                    validation = pending.imports.get(dataset_id)
-                    if validation is None:
-                        continue
-                    version = ingestion.commit_validated_source(validation,
-                        replaces=pending.replacements.get(dataset_id), reason=pending.reason if dataset_id in pending.replacements else None)
-                    committed[dataset_id] = version.version_id
-                    refs[dataset_id] = (*refs[dataset_id], version.version_id)
+                    for validation in pending.imports.get(dataset_id, ()):
+                        replacing = pending.replacements.get(dataset_id) if validation.period == pending.summary.period else None
+                        version = ingestion.commit_validated_source(validation,
+                            replaces=replacing, reason=pending.reason if replacing else None)
+                        committed[dataset_id if version.period == pending.summary.period else f"{dataset_id}:{version.period}"] = version.version_id
+                        if version.period and version.period <= pending.summary.period:
+                            refs[dataset_id] = (*refs[dataset_id], version.version_id)
                 receipt = pending.receipt or CycleReceipt(cycle_id=new_version_id(), period=pending.summary.period,
                     created_at=now(), action=_action_reference(action), versions=refs,
                     origin="monthly_import" if pending.imports else "stored_sources",
@@ -259,7 +304,7 @@ class MonthlyWorkflow:
                     cycle_receipts.CYCLE_RECEIPTS.save(receipt)
             except WorkbenchError as error:
                 return WorkflowOutcome(period=pending.summary.period, status="commit_failed",
-                    sources_committed=all(key in committed for key in pending.imports),
+                    sources_committed=all((key if chunk.period == pending.summary.period else f"{key}:{chunk.period}") in committed for key, chunks in pending.imports.items() for chunk in chunks),
                     committed_versions=committed, error=error.as_run_error(),
                     timings_ms={"persistent_commit": _ms(commit_started), "generation_total": _ms(started)})
             commit_ms = _ms(commit_started)
@@ -328,7 +373,14 @@ def _selected_versions(dataset_id: str, period: str) -> tuple[DatasetVersion, ..
 
 
 def _baseline(period: str) -> dict[str, tuple[str, ...]]:
-    return {dataset_id: tuple(v.version_id for v in _selected_versions(dataset_id, period)) for dataset_id in SOURCE_IDS}
+    # Include every stored month: uploads may commit dates after the report month.
+    baseline = {}
+    for dataset_id in SOURCE_IDS:
+        try:
+            baseline[dataset_id] = tuple(sorted(v.version_id for v in data_library.current_versions(dataset_id)))
+        except UnknownDatasetError:
+            baseline[dataset_id] = ()
+    return baseline
 
 
 def _review_version(version: DatasetVersion) -> SourceReview:
@@ -338,25 +390,25 @@ def _review_version(version: DatasetVersion) -> SourceReview:
 
 
 def _frames(dataset_id: str, selected: tuple[DatasetVersion, ...],
-            incoming: SourceValidation | None = None) -> pl.DataFrame:
+            incoming: tuple[SourceValidation, ...] = ()) -> pl.DataFrame:
     selector = DatasetSelector.parse("history")
     items = [ResolvedLibraryInput(slot_id=dataset_id, dataset_id=dataset_id, dataset_label=_label(dataset_id),
         selector=selector, version=version, frame=data_library.load_version(dataset_id, version.version_id)) for version in selected]
-    if incoming:
-        assert incoming.frame is not None and incoming.parsed is not None
+    for chunk in incoming:
+        assert chunk.frame is not None and chunk.parsed is not None
         definition = known_dataset(dataset_id)
         assert definition is not None
         # A transient descriptor lets preflight use the same lossless date and
         # merge policy as the runner. This identity is never saved or returned.
         descriptor = DatasetVersion(dataset_id=dataset_id, version_id=new_version_id(), dataset_kind=definition.kind,
-            period=incoming.period, created_at=now(), source_filename=incoming.filename,
-            source_byte_size=incoming.source_byte_size, source_sha256=incoming.source_sha256,
-            parser_engine=incoming.parsed.parser_engine, worksheet=incoming.parsed.worksheet,
-            date_column=incoming.schema.period_column if incoming.date_format else None,
-            date_format=incoming.date_format, row_count=incoming.row_count, column_count=incoming.column_count,
-            column_schema=results.column_schema(incoming.frame), min_date=incoming.min_date, max_date=incoming.max_date)
+            period=chunk.period, created_at=now(), source_filename=chunk.filename,
+            source_byte_size=chunk.source_byte_size, source_sha256=chunk.source_sha256,
+            parser_engine=chunk.parsed.parser_engine, worksheet=chunk.parsed.worksheet,
+            date_column=chunk.schema.period_column if chunk.date_format else None,
+            date_format=chunk.date_format, row_count=chunk.row_count, column_count=chunk.column_count,
+            column_schema=results.column_schema(chunk.frame), min_date=chunk.min_date, max_date=chunk.max_date)
         items.append(ResolvedLibraryInput(slot_id=dataset_id, dataset_id=dataset_id, dataset_label=_label(dataset_id),
-            selector=selector, version=descriptor, frame=incoming.frame))
+            selector=selector, version=descriptor, frame=chunk.frame))
     if not items:
         raise UnknownDatasetVersionError(f"No {_label(dataset_id)} is available.")
     return input_resolution.merge_versions(tuple(ResolvedLibraryInput(slot_id=item.slot_id,
@@ -385,3 +437,11 @@ def _ms(start: float) -> float:
 
 
 WORKFLOW = MonthlyWorkflow()
+
+
+def _same_rows(incoming: pl.DataFrame, stored: pl.DataFrame) -> bool:
+    """Exact values and types, ignoring row/column order; never merge rows."""
+    if incoming.height != stored.height or incoming.schema != stored.schema:
+        return False
+    columns = incoming.columns
+    return incoming.sort(columns, nulls_last=True).equals(stored.select(columns).sort(columns, nulls_last=True))

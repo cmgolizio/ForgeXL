@@ -43,6 +43,8 @@ def catalog() -> dict:
     all_periods: set[str] = set()
     available: dict[str, set[str]] = {}
     for definition in KNOWN_DATASETS:
+        if definition.id not in SOURCE_IDS:
+            continue
         try:
             versions = data_library.current_versions(definition.id)
         except UnknownDatasetError:

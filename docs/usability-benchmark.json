@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "period": "2026-08",
+  "format": "CSV",
+  "sales_rows": 72000,
+  "sample_rows": 6000,
+  "accounts": 900,
+  "products": 1500,
+  "suppliers": 50,
+  "reps": 15,
+  "history_months": 24,
+  "repeats": 3,
+  "python": "3.12.14",
+  "polars": "1.43.2",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+  "monthly_upload_bytes": 571437,
+  "zip_bytes": [
+    850099,
+    850099,
+    850099
+  ],
+  "timings_ms": {
+    "parsing": {
+      "median": 4.129,
+      "min": 3.945,
+      "max": 5.034
+    },
+    "validation": {
+      "median": 326.047,
+      "min": 317.246,
+      "max": 389.606
+    },
+    "historical_loading": {
+      "median": 176.77,
+      "min": 150.846,
+      "max": 177.436
+    },
+    "persistent_commit": {
+      "median": 14.597,
+      "min": 14.153,
+      "max": 26.724
+    },
+    "report_calculation": {
+      "median": 722.405,
+      "min": 720.122,
+      "max": 807.179
+    },
+    "xlsx_generation": {
+      "median": 1895.793,
+      "min": 1873.151,
+      "max": 1973.721
+    },
+    "zip_generation": {
+      "median": 33.651,
+      "min": 32.188,
+      "max": 34.122
+    },
+    "total_cycle": {
+      "median": 3373.987,
+      "min": 3353.924,
+      "max": 3599.053
+    },
+    "initial_history_setup": {
+      "median": 591.969,
+      "min": 446.892,
+      "max": 622.487
+    }
+  },
+  "runs_ms": [
+    {
+      "parsing": 3.9449199998671247,
+      "validation": 389.60614700090446,
+      "historical_loading": 176.76976500115416,
+      "persistent_commit": 14.597491000131413,
+      "report_calculation": 807.1785389997785,
+      "xlsx_generation": 1973.7208000001374,
+      "zip_generation": 32.18815799982622,
+      "total_cycle": 3599.0534009997646,
+      "initial_history_setup": 622.4866430002294
+    },
+    {
+      "parsing": 5.033576000187168,
+      "validation": 326.0474829994564,
+      "historical_loading": 177.43631900066248,
+      "persistent_commit": 26.723825999852124,
+      "report_calculation": 720.121767999899,
+      "xlsx_generation": 1873.1510449997586,
+      "zip_generation": 33.650732999831234,
+      "total_cycle": 3353.923904000112,
+      "initial_history_setup": 591.9685720000416
+    },
+    {
+      "parsing": 4.1291879997515935,
+      "validation": 317.24621200010006,
+      "historical_loading": 150.84627299938802,
+      "persistent_commit": 14.15342900008909,
+      "report_calculation": 722.4045299999489,
+      "xlsx_generation": 1895.7934489999388,
+      "zip_generation": 34.12210500027868,
+      "total_cycle": 3373.9866259998053,
+      "initial_history_setup": 446.8916910000189
+    }
+  ],
+  "measurement_date": "2026-10-03",
+  "action_version": "0.3.0",
+  "polars_max_threads": 4
+}

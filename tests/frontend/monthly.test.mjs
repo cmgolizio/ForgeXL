@@ -19,7 +19,7 @@ await build({ entryPoints: ["src/components/monthly/MonthlyReports.jsx"], absWor
   bundle: true, platform: "node", format: "cjs", jsx: "automatic", outfile: output,
   alias: { "@": path.join(rootPath, "src") }, external: ["react", "react/jsx-runtime"] });
 const MonthlyReports = createRequire(import.meta.url)(output).default;
-const ids = ["sales_history", "sample_history", "account_assignments"];
+const ids = ["sales_history", "sample_history"];
 const catalog = {
   default_period: "2026-09",
   datasets: ids.map((id) => ({ id, label: id, required_columns: ["Customer"], versions: [] })),
@@ -63,153 +63,145 @@ after(async () => { await initialDom.happyDOM.close(); await fs.rm(path.dirname(
 
 async function settle() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 15)); }); }
 async function mount() { await act(async () => root.render(React.createElement(MonthlyReports))); await settle(); }
-function button(text) { const found = [...document.querySelectorAll("button")].find((element) => element.textContent === text); assert.ok(found, `Missing button ${text}`); return found; }
+function button(text) { const found = [...document.querySelectorAll("button")].find((element) => element.textContent.replace(/[→↓]/g, "").trim() === text); assert.ok(found, `Missing button ${text}`); return found; }
 async function click(element) { await act(async () => element.click()); await settle(); }
 async function upload(index, filename = "monthly.csv") {
   const inputs = [...document.querySelectorAll('input[type="file"]')];
-  const element = inputs[index + 1]; // history input precedes the three monthly slots
+  const element = inputs[index]; // Monthly upload controls appear first.
   assert.ok(element);
   Object.defineProperty(element, "files", { configurable: true, value: [new File(["Customer\nSynthetic Account\n"], filename, { type: "text/csv" })] });
   await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
 }
 
-test("monthly uploads require validation and warning consent before generation", async () => {
-  handler = (url) => url.endsWith("/validate") ? review : url.endsWith("/generate") ? generated : null;
+async function uploadBoth() { for (let index = 0; index < 2; index++) await upload(index, ids[index] + ".csv"); }
+
+test("only sales and sample uploads are offered; generate explains missing files", async () => {
   await mount();
-  for (let index = 0; index < 3; index++) await upload(index, ids[index] + ".csv");
-  assert.equal([...document.querySelectorAll("button")].some((item) => item.textContent === "Generate reports"), false);
-  await click(button("Validate sources"));
+  assert.equal(button("Generate reports").disabled, true);
+  assert.match(document.body.textContent, /Add sales data and sample data/);
+  assert.equal(document.querySelector('[aria-label="Account Assignments"]'), null);
+  assert.equal(document.querySelector('[aria-label="Sales data"]').type, "file");
+  await upload(0);
+  assert.equal(button("Generate reports").disabled, true);
+  await upload(1);
+  assert.equal(button("Generate reports").disabled, false);
+});
+
+test("one generate button validates and automatically generates clean inputs", async () => {
+  handler = (url) => url.endsWith("/validate") ? { ...review, warnings: [] } : url.endsWith("/generate") ? generated : null;
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
   const request = calls.find((item) => item.url.endsWith("/validate"));
   assert.equal(request.options.body.get("period"), "2026-09");
   for (const id of ids) assert.equal(request.options.body.get(id).name, id + ".csv");
+  assert.equal(request.options.body.has("account_assignments"), false);
+  assert.equal(calls.filter((item) => item.url.endsWith("/generate")).length, 1);
+  assert.match(document.body.textContent, /Your reports are ready/);
+  assert.ok(document.querySelector('a[href="/forge-api/api/runs/run-1/artifacts/download/zip"]'));
+  await click(button("Release preview and downloads"));
+  assert.ok(calls.some((item) => item.url.endsWith("/run-1/discard")));
+});
+
+test("warnings pause generation until explicitly acknowledged", async () => {
+  handler = (url) => url.endsWith("/validate") ? review : url.endsWith("/generate") ? generated : null;
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
   assert.match(document.body.textContent, /Ready with warnings/);
   assert.equal(button("Generate reports").disabled, true);
+  assert.equal(calls.some((item) => item.url.endsWith("/generate")), false);
   await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]'));
   await click(button("Generate reports"));
   assert.deepEqual(JSON.parse(calls.find((item) => item.url.endsWith("/generate")).options.body), { validation_id: "review-1", acknowledge_warnings: true });
-  assert.match(document.body.textContent, /Sources saved · Reports generated/);
-  assert.ok(document.querySelector('a[href="/forge-api/api/runs/run-1/artifacts/download/zip"]'));
-  assert.match(document.body.textContent, /995/);
-  await click(button("Release preview and downloads"));
-  assert.ok(calls.some((item) => item.url === "/forge-api/api/runs/run-1/discard" && item.options.method === "POST"));
-  assert.equal(document.querySelector('a[href*="artifacts/download/zip"]'), null);
-  assert.equal(button("Rerun saved reports").disabled, false);
 });
 
-test("saved cycles select exact sources without uploading again", async () => {
-  handler = (url) => url.endsWith("/catalog") ? { ...catalog, periods: [{ period: "2026-09", ready: true, cycles: [receipt] }] } : url.endsWith("/validate-saved") ? review : null;
-  await mount(); await click(button("Rerun saved reports")); await click(button("Validate sources"));
-  const request = calls.find((item) => item.url.endsWith("/validate-saved"));
-  assert.deepEqual(JSON.parse(request.options.body), { period: "2026-09", cycle_id: "saved-cycle-1" });
-  assert.equal(calls.some((item) => item.url.endsWith("/validate")), false);
-});
-
-test("failed generation displays saved sources and retries the recorded cycle", async () => {
-  handler = (url) => url.endsWith("/validate") || url.endsWith("/validate-saved") ? review : url.endsWith("/generate") ?
-    { ...generated, status: "generation_failed", manifest: null, error: { code: "ACTION_FAILED", message: "Workbook rendering failed." } } : null;
-  await mount(); await click(button("Validate sources")); await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]')); await click(button("Generate reports"));
-  assert.match(document.body.textContent, /Sources saved · Reports not generated/);
-  assert.match(document.body.textContent, /Workbook rendering failed/);
-  assert.equal(document.querySelectorAll('a[href*="artifacts"]').length, 0);
-  await click(button("Review saved sources to retry"));
+test("saved cycles recreate reports without uploads using exact recorded sources", async () => {
+  handler = (url) => url.endsWith("/catalog") ? { ...catalog, periods: [{ period: "2026-09", ready: true, cycles: [receipt] }] } : url.endsWith("/validate-saved") ? { ...review, warnings: [] } : url.endsWith("/generate") ? generated : null;
+  await mount(); await click(button("Use saved data")); await click(button("Generate reports"));
   assert.deepEqual(JSON.parse(calls.find((item) => item.url.endsWith("/validate-saved")).options.body), { period: "2026-09", cycle_id: "saved-cycle-1" });
+  assert.equal(calls.some((item) => item.url.endsWith("/validate")), false);
+  assert.match(document.body.textContent, /Your reports are ready/);
 });
 
-test("corrections name the saved version and changes discard an earlier review", async () => {
-  handler = (url) => url.endsWith("/catalog") ? { ...catalog, datasets: catalog.datasets.map((item) => ({ ...item, versions: [{ period: "2026-09", version_id: item.id + "-old", source_filename: "saved.csv", row_count: 5 }] })) } : url.endsWith("/validate") ? { ...review, warnings: [] } : null;
-  await mount(); await upload(0, "corrected.csv");
-  await click([...document.querySelectorAll("label")].find((label) => label.textContent.includes("Correct this saved month")).querySelector("input"));
-  // React tracks textarea values through its native setter.
-  const textarea = document.querySelector("textarea");
-  await act(async () => { Object.getOwnPropertyDescriptor(dom.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Missing invoice included"); textarea.dispatchEvent(new dom.Event("input", { bubbles: true })); });
-  await click(button("Validate sources"));
-  const request = calls.find((item) => item.url.endsWith("/validate"));
-  assert.equal(request.options.body.get("sales_history.replaces"), "sales_history-old");
-  assert.equal(request.options.body.get("reason"), "Missing invoice included");
-  await click(button("Remove"));
-  assert.ok(calls.some((item) => item.url.endsWith("/discard")));
-  assert.equal([...document.querySelectorAll("button")].some((item) => item.textContent === "Generate reports"), false);
+test("current corrected data is a deliberate saved-source choice", async () => {
+  handler = (url) => url.endsWith("/catalog") ? { ...catalog, periods: [{ period: "2026-09", ready: true, cycles: [receipt] }] } : url.endsWith("/validate-saved") ? review : null;
+  await mount(); await click(button("Use saved data"));
+  const select = document.querySelector('[aria-label="Saved source selection"]');
+  await act(async () => { select.value = "current"; select.dispatchEvent(new dom.Event("change", { bubbles: true })); });
+  await click(button("Generate reports"));
+  assert.equal(JSON.parse(calls.find((item) => item.url.endsWith("/validate-saved")).options.body).cycle_id, null);
 });
 
-test("history setup validates then saves through the dedicated endpoints", async () => {
-  handler = (url) => url.endsWith("/history/validate") ? { ready: true, validation_id: "history-1", row_count: 20, periods: ["2026-07", "2026-08"], errors: [], warnings: [] } :
-    url.endsWith("/history/commit") ? { status: "saved", committed_versions: ["july", "august"] } : null;
-  await mount();
-  await click([...document.querySelectorAll("summary")].find((item) => item.textContent.includes("Initial history setup")));
-  const element = document.querySelector('input[type="file"]');
-  Object.defineProperty(element, "files", { configurable: true, value: [new File(["history"], "history.csv")] });
-  await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
-  await click(button("Validate history"));
-  const request = calls.find((item) => item.url.endsWith("/history/validate"));
-  assert.equal(request.options.body.get("dataset_id"), "sales_history");
-  assert.equal(request.options.body.get("source_file").name, "history.csv");
-  await click(button("Save history"));
-  assert.match(document.body.textContent, /History saved\. 2 monthly version/);
-});
-
-test("validation errors and failed revalidation remove permission to generate", async () => {
+test("changing files invalidates review and prevents stale generation", async () => {
   handler = (url) => url.endsWith("/validate") ? review : null;
-  await mount(); await click(button("Validate sources"));
-  assert.ok(button("Generate reports"));
-  handler = (url) => { if (url.endsWith("/validate")) throw new TypeError("Disconnected"); return null; };
-  await click(button("Validate sources"));
-  assert.match(document.body.textContent, /Could not reach ForgeXL/);
-  assert.equal([...document.querySelectorAll("button")].some((item) => item.textContent === "Generate reports"), false);
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
+  await upload(0, "different.csv");
+  assert.ok(calls.some((item) => item.url.endsWith("/discard")));
+  assert.equal(document.querySelector('[aria-label="Acknowledge validation warnings"]'), null);
+  assert.equal(button("Generate reports").disabled, false);
+  assert.equal(calls.some((item) => item.url.endsWith("/generate")), false);
+});
+
+test("changing report month retains already selected multi-year files", async () => {
+  await mount(); await uploadBoth();
+  const month = document.querySelector('input[type="month"]');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value").set.call(month, "2026-08");
+    month.dispatchEvent(new dom.Event("input", { bubbles: true }));
+  });
+  assert.match(document.body.textContent, /sales_history.csv/);
+  assert.match(document.body.textContent, /sample_history.csv/);
+  assert.equal(button("Generate reports").disabled, false);
+});
+
+test("generation failure retries exact saved sources without reupload", async () => {
+  let attempts = 0;
+  handler = (url) => url.endsWith("/validate") || url.endsWith("/validate-saved") ? { ...review, warnings: [] } : url.endsWith("/generate") ?
+    ++attempts === 1 ? { ...generated, status: "generation_failed", manifest: null, error: { code: "ACTION_FAILED", message: "Workbook rendering failed." } } : generated : null;
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
+  assert.match(document.body.textContent, /Sources saved · Reports not generated/);
+  assert.equal(document.querySelectorAll('a[href*="artifacts"]').length, 0);
+  await click(button("Retry using saved data"));
+  assert.deepEqual(JSON.parse(calls.find((item) => item.url.endsWith("/validate-saved")).options.body), { period: "2026-09", cycle_id: "saved-cycle-1" });
+  assert.match(document.body.textContent, /Your reports are ready/);
+});
+
+test("errors block generation and allow another attempt", async () => {
   handler = (url) => url.endsWith("/validate") ? { ...review, ready: false, validation_id: null, warnings: [], errors: [{ code: "MISSING_COLUMNS", message: "Required sales columns are missing." }] } : null;
-  await click(button("Validate sources"));
-  assert.match(document.body.textContent, /Validation needs attention/);
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
   assert.match(document.body.textContent, /Required sales columns are missing/);
-  assert.equal([...document.querySelectorAll("button")].some((item) => item.textContent === "Generate reports"), false);
+  assert.equal(calls.some((item) => item.url.endsWith("/generate")), false);
+  handler = (url) => { if (url.endsWith("/validate")) throw new TypeError("Disconnected"); return null; };
+  await click(button("Generate reports"));
+  assert.match(document.body.textContent, /Could not reach ForgeXL/);
 });
 
-test("history overlap selection is explicit and review shows exact skipped months", async () => {
-  handler = (url) => url.endsWith("/history/validate") ? { ready: true, validation_id: "history-2",
-    row_count: 30, imported_row_count: 20, periods: ["2026-07", "2026-08"], skipped_periods: ["2026-06"],
-    errors: [], warnings: [{ code: "HISTORY_MONTHS_SKIPPED", message: "Existing months are unchanged." }] } :
-    url.endsWith("/history/commit") ? { status: "saved", committed_versions: ["july", "august"],
-      committed_periods: { "2026-07": "july", "2026-08": "august" } } : null;
-  await mount();
-  await click([...document.querySelectorAll("summary")].find((item) => item.textContent.includes("Initial history setup")));
-  const element = document.querySelector('input[type="file"]');
-  Object.defineProperty(element, "files", { configurable: true, value: [new File(["history"], "chunk.csv")] });
-  await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
-  await click([...document.querySelectorAll("label")].find((label) => label.textContent.includes("Import missing months only")).querySelector("input"));
-  await click(button("Validate history"));
-  assert.equal(calls.find((item) => item.url.endsWith("/history/validate")).options.body.get("skip_existing"), "true");
-  assert.match(document.body.textContent, /Skipped unchanged: 2026-06/);
-  assert.match(document.body.textContent, /Rows to save: 20/);
-  assert.equal(button("Save history").disabled, true);
-  await click(document.querySelector('input[aria-label="Acknowledge validation warnings"]'));
-  await click(button("Save history"));
-  assert.match(document.body.textContent, /Saved months: 2026-07, 2026-08/);
-});
-
-test("history processing locks the monthly controls until it completes", async () => {
+test("a running request locks controls and prevents double submission", async () => {
   let release;
-  handler = (url) => url.endsWith("/history/validate") ? new Promise((resolve) => { release = resolve; }) : null;
-  await mount();
-  const element = document.querySelector('input[type="file"]');
-  Object.defineProperty(element, "files", { configurable: true, value: [new File(["history"], "chunk.csv")] });
-  await act(async () => element.dispatchEvent(new dom.Event("change", { bubbles: true })));
-  await click(button("Validate history"));
-  assert.equal(button("Validate sources").disabled, true);
-  assert.equal(button("Rerun saved reports").disabled, true);
-  await act(async () => release({ ready: false, row_count: 0, periods: [], errors: [], warnings: [] }));
-  await settle();
-  assert.equal(button("Validate sources").disabled, false);
+  handler = (url) => url.endsWith("/validate") ? new Promise((resolve) => { release = resolve; }) : null;
+  await mount(); await uploadBoth();
+  await act(async () => { button("Generate reports").click(); button("Generate reports").click(); });
+  assert.equal(button("Checking your files…").disabled, true);
+  assert.equal(button("Use saved data").disabled, true);
+  assert.equal(document.querySelector('input[type="month"]').disabled, true);
+  assert.equal(calls.filter((item) => item.url.endsWith("/validate")).length, 1);
+  await act(async () => release({ ...review, ready: false, errors: [], warnings: [] }));
 });
 
-test("a transient preview failure can retry without regenerating the reports", async () => {
-  let previewAttempts = 0;
+test("preview connection failure retries without generating again", async () => {
+  let attempts = 0;
   handler = (url) => {
     if (url.endsWith("/validate")) return { ...review, warnings: [] };
     if (url.endsWith("/generate")) return generated;
-    if (url.includes("/preview") && previewAttempts++ === 0) throw new TypeError("Temporary connection drop");
+    if (url.includes("/preview") && attempts++ === 0) throw new TypeError("Temporary drop");
     return null;
   };
-  await mount(); await click(button("Validate sources")); await click(button("Generate reports"));
-  assert.ok(button("Retry preview"));
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
   await click(button("Retry preview"));
   assert.match(document.body.textContent, /995/);
   assert.equal(calls.filter((item) => item.url.endsWith("/generate")).length, 1);
+});
+
+test("unsupported files fail clearly before sending any request", async () => {
+  await mount(); await upload(0, "unsupported.xls");
+  assert.match(document.body.textContent, /Choose a CSV or Excel/);
+  assert.equal(button("Generate reports").disabled, true);
+  assert.equal(calls.some((item) => item.url.endsWith("/validate")), false);
 });

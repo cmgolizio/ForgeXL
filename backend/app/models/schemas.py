@@ -214,6 +214,7 @@ class ActionDefinition(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    workflow_path: str | None = None
     id: str
     version: str
     name: str

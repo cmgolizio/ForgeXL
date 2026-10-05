@@ -25,7 +25,7 @@ import { formatArtifactTypeLabel, formatFileSize } from "@/lib/formatters";
  * names it — under the Action's own filename, which is the point of an
  * artifact.
  */
-export default function ArtifactDownloads({ runId, artifacts }) {
+export default function ArtifactDownloads({ runId, artifacts, showBundle = true }) {
   const files = Array.isArray(artifacts) ? artifacts : [];
   if (!runId || files.length === 0) return null;
 
@@ -70,7 +70,7 @@ export default function ArtifactDownloads({ runId, artifacts }) {
         Offered only when there is more than one file: a bundle of one is a
         slower way to download the file that is already on the line above it.
       */}
-      {files.length > 1 ? (
+      {showBundle && files.length > 1 ? (
         <div className='flex flex-wrap items-center gap-3'>
           <DownloadLink href={runArtifactsZipUrl({ runId })}>
             Download All ({files.length} files, ZIP)

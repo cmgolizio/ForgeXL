@@ -333,7 +333,7 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
     # the specification rather than about the code (build plan 13A).
     {
         "id": "monthly_sales_rep_report",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "name": "Monthly Sales Rep Report",
         "inputs": (
             {
@@ -357,17 +357,6 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
                 "dataset_id": "sample_history",
                 "period_matches": "sales_history",
                 "interpret_dates": True,
-            },
-            {
-                "id": "account_assignments",
-                "label": "Account Assignments",
-                "required": True,
-                "accepted_extensions": (),
-                "required_columns": ("Customer", "Sales Person"),
-                "source": ActionInputSource.LIBRARY,
-                "dataset_id": "account_assignments",
-                "period_matches": "sales_history",
-                "interpret_dates": False,
             },
         ),
         "outputs": tuple(
@@ -558,7 +547,7 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
     (ActionOutput, ("id", "label", "description", "formats")),
     (
         ActionDefinition,
-        ("id", "version", "name", "description", "inputs", "outputs"),
+        ("workflow_path", "id", "version", "name", "description", "inputs", "outputs"),
     ),
     (ActionListResponse, ("actions",)),
     (ValidationIssue, ("code", "message", "details", "slot_id")),
@@ -1172,7 +1161,7 @@ def test_proof_actions_keep_optional_artifacts_and_report_returns_its_batch() ->
             "account_assignments": report_months.assignment_frame(),
         }
     )
-    assert len(result.artifacts) == 3
+    assert len(result.artifacts) == 2
     assert result.artifact_bundle_filename == "September 2026 Sales Rep Reports.zip"
     assert all(artifact.filename.endswith(" - September 2026.xlsx") for artifact in result.artifacts)
 

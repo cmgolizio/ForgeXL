@@ -1,7 +1,7 @@
 # Monthly Sales Rep Report — Specification
 
 The authoritative calculation and workbook specification for Action
-`monthly_sales_rep_report`, version **`0.2.0`**. Phase 14 generates six
+`monthly_sales_rep_report`, version **`0.3.0`**. Phase 14 generates six
 worksheets for every applicable rep in one Run, with individual XLSX downloads
 and a reporting-month ZIP. Supplementary placement definitions remain
 **PARTLY PROVISIONAL**; they are not included in the six accepted worksheets.
@@ -17,14 +17,14 @@ accepted-view calculations and literal footer values live in
 
 The implemented reporting policy uses invoice salesperson for rep performance,
 signed credits/returns for net sales, and rolling twelve-month product/account
-detail. The snapshot supplies current ownership and account-list/roster context
-without reassigning transaction performance. These choices define software
+detail. Account context comes from distinct customer/rep pairs observed in
+current-R12 transactions. Account assignment lists are not accepted or read. These choices define software
 behavior; private source findings and business acceptance evidence are retained
 in a separate private review document.
 
 Worksheet labels state the actual period. Rolling-year summaries are labeled
 R12, month buckets include the year, and the account comparison recalculates
-both R12 periods from transactions rather than reusing snapshot totals.
+both R12 periods directly from the selected sales history.
 
 ## Sources and exact replay
 
@@ -32,23 +32,18 @@ both R12 periods from transactions rather than reusing snapshot totals.
 | --- | --- | --- |
 | `sales_history` | `history:2026-08` | Committed sales months through August, including signed credit rows. |
 | `sample_history` | `history:2026-08` | Separate committed sample months through August, including sample credits. |
-| `account_assignments` | `period:2026-08` | Snapshot effective for that reporting month. |
 
 The runner resolves the selectors before the Action runs and records every
 immutable dataset version under `library_inputs`. The Action receives only
-DataFrames. For replay, use `versions:<id>,<id>,...` for each history slot and
-`version:<id>` for the snapshot, naming every recorded version. A history set
-may contain only one version per month; snapshots cannot be combined. Sample
-and assignment input periods must reach the selected sales month. Recorded
+DataFrames. For replay, use `versions:<id>,<id>,...` for each history slot,
+naming every recorded version. A history set may contain only one version
+per month. Sample inputs must reach the selected sales month. Recorded
 ingestion date interpretation is applied in a working copy; stored rows are
 not changed.
 
 Column names match exactly, without aliases or fuzzy matching. Sales and
 samples require the fifteen transaction headers in
-[monthly-source-schemas.md](monthly-source-schemas.md). The confirmed
-assignment schema requires `Customer` and `Sales Person`; known optional
-`Prior R12`, `Current R12`, `$ Change`, and `% Change` are preserved but not
-used to calculate invoice performance.
+[monthly-source-schemas.md](monthly-source-schemas.md). There is no assignment input.
 
 Accepted transaction types are exact:
 
@@ -74,12 +69,13 @@ month in the selected sales history. The explicit `history:YYYY-MM` endpoint
 must exist, so the derived month is the requested month. Filenames never
 choose the reporting period.
 
-Every nonblank snapshot rep or rep with sales/sample activity in **current
-R12** receives one workbook. Snapshot reps with no activity are retained;
-former reps with only prior-R12 activity do not automatically receive a new
-workbook. Transaction reps absent from the snapshot are warned about, retained
-with their own performance, and included if active in current R12. The report
-still requires a usable assignment snapshot, including at least one rep.
+Every nonblank rep with sales/sample activity in **current R12** receives one
+workbook. A rep with only prior-R12 activity does not receive a new workbook.
+No external roster is consulted and no warning claims a transaction rep is
+unrecognized because of missing assignments. Context account counts use exact
+customer/rep pairs observed in current R12; company accounts count distinct
+customers across those pairs. A rep can have zero current-month sales while
+remaining active during the rolling year.
 
 Every window includes both endpoints:
 
@@ -124,8 +120,9 @@ with the selected reporting period; the example uses August 2026.
 `Producer | Selection` is this report's combined product display
 identity. It deliberately aggregates across SKU/vintage/volume variants sharing
 that identity; the supplementary product table retains the full source key.
-The current-R12 account lists include both invoice-attributed accounts and
-snapshot context, so an assigned idle account can appear with zero sales.
+The current-R12 account lists use transaction-derived context; assignment-only
+accounts are absent. Historical comparison detail retains accounts observed in
+the comparison windows for applicable reps.
 Monthly supplier sheets include suppliers with any monthly lines, including
 credit-only and net-zero activity, and exclude historical-only suppliers.
 
@@ -192,10 +189,8 @@ bytes remain in memory and are lost on backend restart; source versions persist.
 
 Exact repeated source rows are reported and preserved: equality cannot prove a
 legitimate repeated line is an error. Overlapping correction files must be
-reconciled before import, not blindly appended. Conflicting snapshot owners
-warn in direct engine calls without multiplying invoice performance; ordinary
-library ingestion still refuses ambiguous ownership until the source is fixed.
-Unknown reps, unexpected columns and incomplete history remain explicit.
+reconciled before import, not blindly appended. Unexpected source columns,
+missing invoice identities and incomplete history remain explicit.
 
 The remaining provisional rules are:
 
@@ -206,11 +201,18 @@ The remaining provisional rules are:
 | `sample_period` | Existing behavior fails when nonempty sample history ends before the reporting month; an explicit representation of a genuinely zero company sample month remains unresolved. |
 
 `PROVISIONAL_REPORT_RULES` remains in Data Quality and Run metrics while these
-rules remain open; version `0.2.0` deliberately stays below 1.0.0. Passing synthetic
+rules remain open; version `0.3.0` deliberately stays below 1.0.0. Passing synthetic
 tests verifies the contract; it does not establish completeness or business
 acceptance of a production export.
 
 See [phase-14-validation.md](phase-14-validation.md) for automated round-trip
 and download checks and the remaining **manual Microsoft Excel for Mac opening
 check**. Production source reconciliation and coverage findings remain private.
-Phase 15's dedicated monthly workflow UI is outside this change.
+The monthly workflow accepts single-month and multi-year uploads in the same
+form. It checks all source partitions before saving any. Exact unchanged
+stored partitions are reused; conflicting values, types or date interpretation
+block generation until the user chooses saved data or an explicit single-month
+correction. New months after the chosen report month may be saved, but are
+excluded from that report’s pinned version set. Receipts survive restart; old
+schema-v1 receipts retain their recorded sales/sample sources and explicitly
+warn that report Action 0.3.0 differs from their original version.

@@ -243,7 +243,7 @@ class PreparedReport:
     #: Sample rows, prepared the same way.
     samples: pl.DataFrame
 
-    #: Snapshot Customer/rep context; direct-call conflicts remain explicit.
+    #: Distinct customer/rep pairs observed in current R12 transactions.
     ownership: pl.DataFrame
 
     #: Every rep the report covers, in name order (build plan 13D).
@@ -308,7 +308,7 @@ class _Collected:
 def prepare(
     sales: pl.DataFrame,
     samples: pl.DataFrame,
-    assignments: pl.DataFrame,
+    assignments: pl.DataFrame | None = None,
     *,
     sales_slot: str | None = None,
     samples_slot: str | None = None,
@@ -325,15 +325,14 @@ def prepare(
     Args:
         sales: Sales history rows, every month the Run read.
         samples: Sample history rows.
-        assignments: The account-assignment snapshot for the month.
+        assignments: Ignored compatibility parameter for older internal callers.
         sales_slot, samples_slot, assignments_slot: Input slot IDs, so an
             issue points at the input it came from.
     """
     collected = _Collected()
 
-    ownership, reps = _prepare_ownership(
-        assignments, collected, slot_id=assignments_slot
-    )
+    # Legacy internal callers may still pass a snapshot; it is never read.
+    ownership, reps = _empty_ownership(), ()
 
     prepared_sales = _prepare_transactions(
         sales, SALES_SCHEMA, collected, slot_id=sales_slot
@@ -370,20 +369,25 @@ def prepare(
         _check_duplicate_rows(samples, prepared_samples, period, collected, samples_slot)
         _check_invoice_types(prepared_sales, SALES_INVOICE_TYPES, collected, sales_slot)
         _check_invoice_types(prepared_samples, SAMPLE_INVOICE_TYPES, collected, samples_slot)
-        _check_unrecognised_reps(
-            prepared_sales, prepared_samples, reps, collected, sales_slot
-        )
-        active_reps = set(reps)
+        active_reps = set()
         for frame in (prepared_sales, prepared_samples):
             active_reps.update(frame.filter(period.window(WindowKey.ROLLING_YEAR).covers())[OWNER].drop_nulls().to_list())
         reps = tuple(sorted(active_reps))
+        if not reps:
+            collected.add("NO_SALES_REPS", "No salesperson has sales or sample activity in the reporting month’s rolling year.", slot_id=sales_slot)
+        customer = TRANSACTION_COLUMNS.customer
+        ownership = pl.concat([
+            frame.filter(period.window(WindowKey.ROLLING_YEAR).covers())
+                .select(pl.col(customer).cast(pl.String).alias(ASSIGNMENTS_CUSTOMER_COLUMN),
+                        pl.col(OWNER).alias(REP_COLUMN))
+            for frame in (prepared_sales, prepared_samples)
+        ], how="vertical").filter(
+            _is_present(pl.col(ASSIGNMENTS_CUSTOMER_COLUMN)) & _is_present(pl.col(REP_COLUMN))
+        ).unique().sort([REP_COLUMN, ASSIGNMENTS_CUSTOMER_COLUMN])
 
 
     _check_source_columns(sales, SALES_SCHEMA, collected, sales_slot)
     _check_source_columns(samples, SAMPLES_SCHEMA, collected, samples_slot)
-    _check_source_columns(
-        assignments, ASSIGNMENTS_SCHEMA, collected, assignments_slot
-    )
     _note_provisional_rules(collected)
 
     return PreparedReport(
@@ -398,65 +402,14 @@ def prepare(
     )
 
 
-def _prepare_ownership(
-    assignments: pl.DataFrame,
-    collected: _Collected,
-    *,
-    slot_id: str | None,
-) -> tuple[pl.DataFrame, tuple[str, ...]]:
-    """Read the snapshot into `Customer` -> `Sales Rep` (build plan 9E, 13D).
-
-    This map supplies roster and account-list context, never performance
-    attribution. Library ingestion refuses blank or conflicting assignments;
-    the engine can qualify a directly supplied conflict without joining it
-    through transaction rows or multiplying sales.
-    """
-    customer = ASSIGNMENTS_CUSTOMER_COLUMN
-    rep = ASSIGNMENTS_REP_COLUMN
-
-    if customer not in assignments.columns or rep not in assignments.columns:
-        # The runner's required-column check has already failed the Run; this
-        # is the defensive path that keeps preparation from raising.
-        return _empty_ownership(), ()
-
-    named = (
-        assignments.select(
-            pl.col(customer).cast(pl.String).alias(customer),
-            pl.col(rep).cast(pl.String).alias(REP_COLUMN),
-        )
-        .filter(_is_present(pl.col(customer)) & _is_present(pl.col(REP_COLUMN)))
-        .unique(maintain_order=True)
-    )
-
-    conflicts = (
-        named.group_by(customer)
-        .agg(pl.col(REP_COLUMN).n_unique().alias("reps"))
-        .filter(pl.col("reps") > 1)
-        .sort(customer)
-    )
-    if conflicts.height:
-        accounts = conflicts[customer].to_list()
-        collected.add(
-            "DUPLICATE_ACCOUNT_OWNERSHIP",
-            "The account-assignment snapshot gives more than one rep to "
-            f"{_human_list(accounts[:MAX_EXAMPLES])}"
-            f"{'' if conflicts.height <= MAX_EXAMPLES else ', and others'}. "
-            "Resolve the ownership conflict before importing this snapshot. "
-            "Performance stays with each invoice salesperson and is not multiplied.",
-            details={"accounts": accounts, "account_count": conflicts.height},
-            slot_id=slot_id,
-        )
-
-    reps = tuple(sorted(set(named[REP_COLUMN].to_list())))
-    if not reps:
-        collected.add(
-            "NO_SALES_REPS",
-            "The account-assignment snapshot names no sales rep, so there is "
-            "nobody to produce a report for.",
-            slot_id=slot_id,
-        )
-
-    return named, reps
+def validate_transaction_source(frame: pl.DataFrame, dataset_id: str) -> tuple[tuple[ValidationIssue, ...], tuple[ValidationIssue, ...]]:
+    """Check all incoming history rows, including months after a report cutoff."""
+    schema = SALES_SCHEMA if dataset_id == "sales_history" else SAMPLES_SCHEMA
+    collected = _Collected()
+    prepared = _prepare_transactions(frame, schema, collected, slot_id=dataset_id)
+    expected = SALES_INVOICE_TYPES if dataset_id == "sales_history" else SAMPLE_INVOICE_TYPES
+    _check_invoice_types(prepared, expected, collected, dataset_id)
+    return tuple(collected.errors), tuple(collected.warnings)
 
 
 def _prepare_transactions(
@@ -771,43 +724,6 @@ def _check_invoice_types(
         collected.add("UNEXPECTED_INVOICE_TYPE",
             f"{_human_list(unexpected)} cannot be counted in this dataset. Expected {_human_list(expected)}; separate sales and sample rows explicitly before import.",
             {"column": column, "unexpected": unexpected, "expected": list(expected)}, slot_id)
-
-
-def _check_unrecognised_reps(
-    sales: pl.DataFrame,
-    samples: pl.DataFrame,
-    reps: Sequence[str],
-    collected: _Collected,
-    slot_id: str | None,
-) -> None:
-    """Warn for a transaction rep the snapshot does not name."""
-    column = TRANSACTION_COLUMNS.transaction_rep
-    named: set[str] = set()
-    for frame in (sales, samples):
-        if frame.height and column in frame.columns:
-            named.update(
-                value
-                for value in frame.get_column(column)
-                .cast(pl.String)
-                .unique()
-                .to_list()
-                if value is not None and value.strip()
-            )
-
-    unknown = sorted(named - set(reps))
-    if not unknown:
-        return
-
-    collected.add(
-        "UNRECOGNISED_SALES_REP",
-        f"{_human_list(unknown)} "
-        f"{'appears' if len(unknown) == 1 else 'appear'} on transactions but "
-        f"{'is' if len(unknown) == 1 else 'are'} not in the "
-        "account-assignment snapshot. Activity stays with each invoice "
-        "salesperson; reps active in current R12 also receive a workbook.",
-        details={"reps": unknown, "column": column},
-        slot_id=slot_id,
-    )
 
 
 def _check_source_columns(
@@ -1346,7 +1262,7 @@ def report_metrics(prepared: PreparedReport) -> dict[str, int]:
 
     return {
         "sales_reps": len(prepared.reps),
-        "accounts": prepared.ownership.height,
+        "accounts": prepared.ownership[ASSIGNMENTS_CUSTOMER_COLUMN].n_unique(),
         "history_months": len(prepared.history_months),
         "sales_rows": month_rows,
         "sample_rows": sample_rows,

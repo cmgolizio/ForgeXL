@@ -11,11 +11,10 @@ retained in private review material.
 | --- | --- | --- |
 | `sales_history` | History | Read `Invoice Date`; commit one month per version. |
 | `sample_history` | History | Separate sample data with the same canonical transaction columns. |
-| `account_assignments` | Snapshot | Caller explicitly supplies the effective reporting month. |
 
 Sales and samples remain separate datasets. Monthly report performance uses
-invoice `Sales Person`. Snapshot ownership supplies current context and never
-reattributes historical transactions.
+invoice `Sales Person`. Rep/customer context comes from transaction activity;
+account assignment files are not an input or an upload option.
 
 ## Exact transaction headers
 
@@ -50,28 +49,6 @@ require the invoice rep but can have no known account. Ingestion preserves
 blank transaction identifiers with a warning; report validation enforces the
 stricter performance requirements before artifacts are generated.
 
-## Assignment headers
-
-| Column | Required | Role |
-| --- | --- | --- |
-| `Customer` | Yes | Account identity. |
-| `Sales Person` | Yes | Current snapshot owner. |
-| `Prior R12` | No | Optional contextual total. |
-| `Current R12` | No | Optional contextual total. |
-| `$ Change` | No | Optional contextual change. |
-| `% Change` | No | Optional contextual ratio. |
-
-Only the two identity columns are required. The four optional names are
-recognized without an unexpected-column warning. These fields are retained in
-the snapshot but never reused as invoice-performance calculations. Other extra
-columns remain stored and produce `UNEXPECTED_SOURCE_COLUMNS`.
-
-Assignment ingestion refuses blank identities or conflicting owners for one
-account (`MISSING_ACCOUNT_ASSIGNMENT_FIELD`, `AMBIGUOUS_ACCOUNT_OWNERSHIP`).
-An identical repeated assignment to the same owner is not a conflict. Direct
-report-engine calls can warn on conflicting context without multiplying sales;
-this does not weaken the ingestion contract or select an owner automatically.
-
 ## Parsing and preservation
 
 CSV text identifiers are declared before inference so leading zeroes survive.
@@ -90,24 +67,27 @@ interpretations fail with `AMBIGUOUS_DATE_FORMAT`; the caller must select an
 explicit format. Existing date cells are used directly. Dates are not trimmed
 or guessed from filenames.
 
-## Monthly import behavior
+## Monthly report upload behavior
 
-Missing required headers, unreadable/missing dates, several calendar months in
-a monthly input, unexpected selected periods, future dates and missing snapshot
-periods fail validation before writes. The parser also refuses duplicate headers,
-unsupported extensions and ambiguous data worksheets.
+The monthly reporting form accepts a single month or several years in either
+source slot. The reporting month is an explicit selection. Parsed rows are
+partitioned by `Invoice Date` with no transformations to source fields.
+Every month must contain its complete source data; the app never appends a
+partial export to an already saved month.
 
-Duplicate-file checks use SHA-256 plus reporting period across immutable
-versions. An already committed month requires an explicit replacement naming
-the old version and a reason. Snapshot bytes may legitimately repeat for another
-month. An identical-byte replacement is allowed only to correct a different or
-missing date interpretation; unchanged interpretations remain duplicates.
+Required-column, malformed-date, future-date, numeric and invoice-type checks
+still apply. Ambiguous data worksheets and unsupported extensions are refused.
+Exactly unchanged stored months are reused without duplication. A conflict in
+any uploaded partition blocks the entire review before any new source writes.
+Corrections contain just the selected month and explicitly name the current
+version with a reason; the superseded version remains available.
 
-A reporting-cycle import validates all files first. If a later storage failure
-occurs, its structured result identifies earlier successful commits and remaining
-inputs. History bootstrap partitions validated transaction rows by month;
-snapshots remain explicitly period-specific. Exact repeated transaction lines
-are preserved and reported; overlap reconciliation is a separate explicit step.
+All source partitions validate before saving. A later disk or receipt failure
+reports every successful month/version and preserves those valid commits.
+Revalidating the same files safely reuses completed partitions and saves the
+remaining ones. Report receipts record only the sales/sample versions through
+the selected month. Existing low-level snapshot storage remains for historical
+compatibility; it is not exposed by the report catalog, form or Action.
 
 See [monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) for
 report calculations and [architecture.md](architecture.md) for ingestion,
