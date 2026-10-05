@@ -1,8 +1,8 @@
 import { useId } from "react";
 
-export const buttonClass = "rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800";
-export const controlClass = "w-full rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm dark:border-zinc-700";
-export const panelClass = "flex flex-col gap-4 rounded-xl border border-zinc-200 p-5 dark:border-zinc-800";
+export const buttonClass = "secondary-button";
+export const controlClass = "form-control";
+export const panelClass = "workflow-panel flex flex-col gap-4";
 
 export function Issues({ title, issues = [] }) {
   if (!issues.length) return null;
@@ -59,9 +59,9 @@ export default function Review({ review }) {
       </li>)}
     </ul>
     <details>
-      <summary className="cursor-pointer text-sm">Sources and rep roster ({review.reps.length})</summary>
+      <summary className="cursor-pointer text-sm">File details and sales reps ({review.reps.length})</summary>
       <ul className="my-3 space-y-2 text-sm">{review.sources.map((source) => <li key={source.dataset_id}>
-        {source.label}: {source.filename} · {source.row_count.toLocaleString()} rows · {source.operation}
+        {source.label}: {source.filename} · {source.row_count.toLocaleString()} rows · {source.operation}{source.imported_periods?.length ? ` · ${source.imported_periods.length} new months` : ""}{source.reused_periods?.length ? ` · ${source.reused_periods.length} saved months reused` : ""}
         {source.version_id ? <span className="block break-all font-mono text-xs text-zinc-500">Saved version {source.version_id}</span> : null}
       </li>)}</ul>
       <p className="text-sm">{review.reps.join(", ") || "No rep roster available"}</p>

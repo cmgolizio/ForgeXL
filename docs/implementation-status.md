@@ -1,137 +1,113 @@
 # Implementation Status
 
-Last updated: 2026-10-02. Latest engineering phase: **Phase 15 — Production
-Monthly Workflow**. The workflow and automated checks are implemented.
-**Production business acceptance, live-browser verification and manual Excel
-for Mac opening remain outstanding.** These are not marked completed.
-V1 follow-through completed stable two-server startup, multi-chunk history,
-explicit overlap/partial-save recovery, preview retry, origin write guards and
-user-controlled result-memory release. See [v1-finalization.md](v1-finalization.md)
-for the full fix/blocker inventory, operating checklist and provisional evaluation.
+Last updated: 2026-10-02. Phase 15's monthly workflow now includes the user's
+guided-workflow corrections. The current requirements at the top of
+[build-plan.md](build-plan.md) supersede earlier assignment and single-month
+screen requirements. See [usability-fixes.md](usability-fixes.md) for this change.
+Production business acceptance, live-browser layout verification and manual
+Excel for Mac opening remain outstanding.
 
 ## Current behavior
 
-Open `/monthly-reports` from the home page. Initial setup validates company
-sales/sample history and saves monthly partitions. The recurring cycle chooses
-a month, reviews sales, samples and an assignment snapshot, then generates all
-rep reports. Saved sources can be reused without uploading. Corrections name
-the current immutable version and a reason; duplicate uploads are refused.
-History may arrive in several complete-month chunks. Stored-month overlap
-blocks by default; explicit missing-month selection shows exact skipped months
-and requires warning consent. Partial saves identify month/version pairs for
-safe same-file resumption. No history row merging or implicit replacement.
+The home screen presents action cards. Every action follows choose action →
+upload required files → a prominent Generate report button. Selecting an action
+shows its file controls and a Change action control. Results emphasize downloads;
+table previews, audit details and cleanup are expandable.
 
-Validation shows backend-derived row counts, period/schema/ownership checks,
-rep roster, errors, warnings and missing history. Warnings need explicit
-consent. A review expires after 15 minutes and can generate only once. Changes
-in live sources or the installed Action require revalidation.
+Monthly reports accept only sales history and sample history. Account assignment
+uploads are not required or offered. Invoice Sales Person determines performance
+and the roster of reps active in current R12. Account context comes from distinct
+customer/rep pairs in that same window. Snapshot-only reps and accounts do not
+affect reports. Each active rep receives a six-sheet workbook; the batch is
+available as a period-named ZIP.
 
-Generation commits reviewed inputs, saves a durable source-selection receipt,
-then executes `monthly_sales_rep_report` version `0.2.0`. A partial source-save
-failure reports committed IDs. Workbook failure keeps the valid sources and
-receipt for retry. The UI distinguishes source saving from report generation.
+The same upload controls accept one month or multiple years. The selected report
+month bounds report calculations. Every supplied month is validated, including
+months later than that cutoff, before anything is saved. New complete months are
+partitioned and saved; equivalent stored months are reused. Conflicting history
+blocks all writes. A correction requires a single-month replacement naming the
+current immutable version and a reason. No history row merging or implicit
+replacement occurs. Partial saves identify month/version pairs for safe same-file
+resumption.
 
-A saved cycle can be rerun with its exact historical sales/sample versions and
-assignment snapshot, including after corrections or restart. Choosing current
-versions is explicit and records a new cycle. Action-version changes are
-qualified because a receipt preserves sources, not executable code. Source
-versions and receipts persist; Runs, previews and artifact bytes stay in memory.
-Both result screens can explicitly release a finished Run's in-memory results
-without removing sources or receipts. There is no automatic eviction.
+Generate reports performs validation and then generation without a separate
+review-button step. Errors pause for correction. Warnings require explicit
+acknowledgment before that same button continues. Reviewed selections expire
+after 15 minutes, generate once, and are invalidated by changed inputs, saved
+versions or the installed Action.
 
-One successful report Run returns nineteen calculation/preview tables and a
-six-sheet workbook for every applicable rep, plus a period-named ZIP. Performance
-follows invoice salesperson. Signed sales/sample credits stay in their separate
-datasets. Snapshot ownership supplies roster/account context without moving
-historical performance. Idle snapshot reps remain included.
+Generation commits reviewed inputs, saves a durable two-source receipt, then
+executes `monthly_sales_rep_report` version `0.3.0`. Workbook failure retains
+saved sources and the receipt for retry. Existing schema-v1 three-source receipts
+remain readable: only their exact sales/sample versions are loaded, with an
+Action-version-change warning. Assignment snapshots are not loaded. No source
+version is migrated in place.
+
+Saved cycles replay exact historical sales/sample versions, including after
+corrections or restart. Current corrected versions are an explicit alternative
+that records a new cycle. Receipts preserve source selections, not executable
+code. Sources and receipts persist; Runs, previews and artifact bytes remain in
+memory and can be explicitly released without removing saved inputs.
 
 The six sheets cover monthly samples, R12 samples, R12 account sales, monthly
 supplier sales and ratios, R12 product/account quantities, and current/prior R12
-account comparisons. Missing R12 calendar months blank unavailable totals and
-growth. Calendar coverage does not prove that all transactions were supplied.
-Workbook presentation remains shared and separate from calculations.
+account comparisons. Signed credits, revenue and quantity formulas, exact
+identities, missing-history blanks and shared workbook presentation are retained.
+Calendar coverage does not prove that all company transactions were supplied.
 
-## Phase progression and audit repairs
+## Phase progression
 
 | Phase | Implemented foundation |
 | --- | --- |
-| 0–8 | Local workbench, reusable Actions, in-memory Runs, preview/export/audit, streaming transport and failure checks. |
-| 9 | Persistent Data Library with immutable history/snapshot versions. |
-| 10 | Source schemas, date interpretation, monthly ingestion and initial history partitioning. |
-| 11 | Library-backed Action inputs and exact source-version provenance. |
-| 12 | Optional artifacts, shared workbook rendering, safe names and ZIP downloads. |
-| 13 | Report preparation, dynamic roster, company/rep calculations and supporting tables. |
-| 14 | Six workbook views, literal footer values, complete rep batch and period-named ZIP. |
-| 15 | Dedicated monthly UI/API, preflight trust summary, deliberate corrections, saved-source reruns, durable receipts and retry recovery. Production/manual acceptance remains open. |
+| 0–8 | Local workbench, reusable Actions, in-memory Runs, preview/export/audit and streaming transport. |
+| 9–11 | Persistent immutable sources, date/schema validation and exact source-version provenance. |
+| 12–14 | Shared rendering, artifact downloads, report calculations and six workbook views. |
+| 15 | Monthly workflow, receipts, deliberate corrections, warning consent and retry recovery. |
+| Phase 15 corrections | Two-source reports, direct multi-year uploads and guided UI for all actions. |
 
-This audit additionally repairs omitted report warnings in Run summaries,
-partial-upload buffer cleanup, filesystem-path disclosure in library errors,
-year-zero periods, omitted mixed-Excel-type ingestion warnings, stale tests
-requiring no persistent library, and outdated architecture/README statements.
-Earlier precision, attribution, history merging, period matching, partial import,
-worksheet capacity and filename regressions remain covered.
-
-The two proof Actions retain their original behavior. New result warnings have
-an empty default. Generic Run/result/artifact schemas and routes remain
-compatible; seven workflow routes and a finished-Run discard route are additive. Business formulas and report
-Action version did not change. No stored source version is migrated in place.
+The two proof Actions retain their processing behavior. Action metadata now has
+an optional `workflow_path`, allowing dedicated workflows to be discovered by
+the generic frontend. New ordinary Actions still render forms from their input
+metadata. The Next.js/FastAPI/Polars architecture and local operation are retained.
 
 ## Verification
 
-- Clean locked setup followed by `npm run verify:v1`: **2,302 backend tests,
-  9 frontend DOM interaction tests and 5 startup/transport tests passed**,
-  no failures/skips/xfails. One existing upstream Starlette/httpx deprecation
-  warning. The environment's npm proxy-setting warning and locked development
-  ESLint 9 support deprecation are disclosed in the completion record.
-- Pyright: **0 errors, 0 warnings**.
-- ESLint and the Next.js production build: passed.
-- Actual production Next.js proxy → FastAPI → isolated disk → XLSX/ZIP harness:
-  passed, including both proof Actions with CSV/XLSX inputs/downloads, history
-  chunks/overlap consent, cross-origin denial, valid same-origin browser writes,
-  golden company revenue, three workbooks/eighteen sheets, result release,
-  disconnected-backend 502 and exact workbook replay after restarting FastAPI
-  from a complete library backup restored in a different directory.
-- Actual `npm start`: both servers ready, page/catalog correct, duplicate launch
-  refused without stopping its owner, shutdown releases both ports, no business
-  data written on startup. `npm run doctor` and `pip check`: passed.
-- Correction, duplicate refusal, original-cycle replay, token expiry/discard,
-  warning consent, explicit date interpretation, partial commits, receipt-write
-  failures and render-failure retry have HTTP regressions.
+- **2,306 backend tests and 17 frontend DOM interaction tests passed**, with no
+  skips or failures. Five startup/transport tests also passed.
+- Pyright: **0 errors, 0 warnings**. ESLint and the production build passed.
+- Multi-year regressions cover 36-month import/generation, exact replay, unchanged
+  overlap without double counting, conflict refusal, report cutoff, invalid later
+  months, removal of assignment inputs and legacy receipt compatibility.
+- Actual production Next.js proxy → FastAPI → isolated disk → XLSX/ZIP checks
+  passed: both proof Actions, same-origin write guards, golden company revenue
+  `995`, two active rep workbooks/twelve sheets, result release, backend disconnect,
+  and exact workbook replay after backup restoration and restart.
+- Actual `npm start` passed: both servers ready, duplicate launch refused without
+  stopping its owner, shutdown releases ports, no business data written at startup.
+- Correction, token expiry/discard, warning consent, explicit date interpretation,
+  partial commits, receipt-write failures and render-failure retry remain covered.
 - Company-size synthetic benchmark: 24 months, 72,000 sales rows, 6,000 sample
-  rows, 900 accounts, 1,500 products, 50 suppliers and 15 rep workbooks.
-  Three fresh follow-through runs: **2.78 seconds median** for validate/save/
-  generate/ZIP, range **2.61–3.09 seconds**. Stage details in `v1-benchmark.json`;
-  original Phase 15 measurements remain in `phase-15-benchmark.json`.
-- Workbench benchmark: five repetitions per size/format. At 100k rows, median
-  whole Run 11.6 ms CSV / 670.8 ms XLSX; full-size XLSX export separately
-  2.85 / 2.75 seconds. Preview paging and result release verified. These Linux
-  measurements are not target Mac/LAN promises.
-- Prior Phase 15 private-source reconciliation repeated **16,355 independent grouped
-  value comparisons** successfully. That workflow validation refused the
-  conflicting ownership snapshot before committing the reporting month.
-  Private files were unavailable in this fresh checkout; those comparisons were
-  not repeated for this follow-through and do not establish company acceptance.
+  rows, 900 accounts, 1,500 products, 50 suppliers and 15 rep workbooks. Current
+  repeated measurements are recorded in `usability-benchmark.json`. Linux timings
+  are not target Mac/LAN promises. Earlier benchmark files remain historical.
+
+One upstream Starlette/httpx deprecation warning and the environment's npm
+proxy-setting warning remain. No dependency changes were needed.
 
 ## Outstanding acceptance
 
-The supplied validation sources still lack complete company credit/sample
-coverage and contain an ownership conflict requiring a corrected snapshot.
-Complete Phase 15F with complete sources, independent production spot-checks,
-and Microsoft Excel for Mac opening. No Excel repair/display check is claimed
-from programmatic reopening.
+Native browser verification could not run here: browser automation's daemon
+failed startup and a direct official Chrome launch was blocked by the runtime's
+socket restrictions. DOM interactions and production HTTP were checked; native
+browser layout, file chooser and download interaction require a normal browser.
 
-Live-browser verification is also pending. Prior-session local socket/cloud
-loopback failures are recorded in Phase 15 evidence. In this fresh session,
-automation's browser daemon exited during startup and an official Chrome build
-exited 139 even on a direct blank-page launch. DOM interactions and the production HTTP proxy were verified,
-but native browser layout, file chooser and downloads need a normal browser.
+Complete company sales/credit/sample coverage, independent production
+spot-checks and Microsoft Excel for Mac opening remain acceptance work. Prior
+private-source comparisons were not repeated in this checkout. An assignment
+snapshot is no longer an input or acceptance prerequisite. Programmatic workbook
+reopening does not establish an Excel repair/display check.
 
 Placement previews and the true-zero sample-month policy retain provisional
-warnings. Placements remain outside the six workbook sheets. No new phase was
-invented beyond the build plan's Phase 15.
-
-See [Phase 15 validation](phase-15-validation.md),
-[V1 completion record](v1-finalization.md),
-[report specification](monthly-sales-rep-report-spec.md),
-[source schemas](monthly-source-schemas.md), and
-[architecture](architecture.md). Historical records remain in Git history.
+warnings. Placements remain outside the six workbook sheets. Historical Phase 15
+and V1 completion records describe their original versions; current behavior is
+defined by the updated build plan, report specification and this status.

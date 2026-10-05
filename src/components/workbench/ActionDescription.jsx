@@ -14,9 +14,7 @@ export default function ActionDescription({ action }) {
         <h2 className='text-base font-semibold text-zinc-900 dark:text-zinc-100'>
           {action.name}
         </h2>
-        <span className='text-xs text-zinc-500 dark:text-zinc-500'>
-          Version {action.version}
-        </span>
+
       </div>
       <p className='text-sm text-zinc-600 dark:text-zinc-400'>
         {action.description}

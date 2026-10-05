@@ -1,5 +1,14 @@
 # ForgeXL — Architecture
 
+> Current correction (2026-10-02): monthly reports consume only sales/sample
+> history, derive reps/account context from invoice activity, and accept
+> multi-year uploads directly in the report form. No assignment upload is
+> exposed. New two-source receipts use schema 2; schema-1 receipts remain
+> readable without loading their snapshots. See [usability-fixes.md](usability-fixes.md).
+> Historical phase sections below retain the original snapshot design as
+> implementation history; the current report specification supersedes it.
+
+
 **Status:** engineering implemented through Phase 15 on 2026-10-01. The configured report
 contract defines six sections. Source
 reconciliation and automated acceptance are recorded in

@@ -174,6 +174,8 @@ class Action(abc.ABC):
     #: Stable identifier, unique across the registry. Also the value the
     #: frontend submits as `action_id`. Never used to build a filesystem path
     #: or a shell command (build plan section 16).
+    workflow_path: ClassVar[str | None] = None
+
     id: ClassVar[str]
 
     #: Semantic version of this Action's logic. Recorded in every manifest, so
@@ -195,6 +197,7 @@ class Action(abc.ABC):
     def definition(self) -> ActionDefinition:
         """Return this Action's public metadata for `GET /api/actions`."""
         return ActionDefinition(
+            workflow_path=self.workflow_path,
             id=self.id,
             version=self.version,
             name=self.name,

@@ -30,7 +30,7 @@ export default function ExportButtons({ runId, output, outputs }) {
   return (
     <section className='flex flex-col gap-3'>
       <h3 className='text-sm font-medium text-zinc-900 dark:text-zinc-100'>
-        Export
+        Download your report
       </h3>
 
       <div className='flex flex-wrap gap-2'>
@@ -53,7 +53,7 @@ export default function ExportButtons({ runId, output, outputs }) {
       <p className='text-xs text-zinc-500 dark:text-zinc-500'>
         {tableCount > 1
           ? `Downloads ${output.label}. The workbook holds all ${tableCount} result tables.`
-          : "Generated from this Run when you download it."}
+          : "Choose Excel or CSV to save your result."}
       </p>
     </section>
   );

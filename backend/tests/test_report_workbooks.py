@@ -67,17 +67,17 @@ def footer(tables, rep, section):
     ).select("Measure", "Value").iter_rows())
 
 
-def test_transfers_keep_both_invoice_reps_and_snapshot_idle_rep(completed):
+def test_transfers_keep_both_invoice_reps_without_snapshot_only_reps(completed):
     prepared, tables = completed
-    assert prepared.reps == (source.ALPHA, source.BETA, source.IDLE)
-    assert "UNRECOGNISED_SALES_REP" in [issue.code for issue in prepared.warnings]
+    assert prepared.reps == (source.ALPHA, source.BETA)
+    assert "UNRECOGNISED_SALES_REP" not in [issue.code for issue in prepared.warnings]
     comparison = tables["rolling_account_comparison"]
     alpha = only(comparison, **{REP_COLUMN: source.ALPHA, CUSTOMER: source.TRANSFERRED})
     beta = only(comparison, **{REP_COLUMN: source.BETA, CUSTOMER: source.TRANSFERRED})
     assert (alpha[PRIOR_R12], alpha[CURRENT_R12], alpha[CHANGE], alpha[GROWTH], alpha["Status"]) == (0, 42.75, 42.75, None, "New")
     assert (beta[PRIOR_R12], beta[CURRENT_R12], beta["Status"]) == (0, 14.25, "New")
     assert only(tables["company_summary"])["Revenue"] == 58.25
-    assert only(tables["rep_summary"], **{REP_COLUMN: source.IDLE})["Revenue"] == 0
+    assert tables["rep_summary"].filter(pl.col(REP_COLUMN) == source.IDLE).height == 0
 
 
 def test_sample_credits_and_twelve_calendar_months_have_exact_values(completed):
@@ -181,7 +181,7 @@ def test_partial_r12_history_has_blank_totals_and_explicit_notes():
     assert tables["rolling_account_sales"][NET_SALES].null_count() == tables["rolling_account_sales"].height
     assert tables["rolling_product_accounts"][BOTTLES].null_count() == tables["rolling_product_accounts"].height
     assert tables["rolling_samples"]["Apr 2026"].null_count() == tables["rolling_samples"].height
-    assert footer(tables, source.IDLE, "rolling_samples")[R12_BOTTLES] is None
+    assert footer(tables, source.ALPHA, "rolling_samples")[R12_BOTTLES] is None
     comparison = only(tables["rolling_account_comparison"], **{REP_COLUMN: source.ALPHA, CUSTOMER: source.ACCOUNT})
     assert comparison[PRIOR_R12] == 15
     assert (comparison[CURRENT_R12], comparison[CHANGE], comparison[GROWTH], comparison["Status"]) == (None, None, None, "Incomplete history")
@@ -197,7 +197,7 @@ def test_samples_need_an_invoice_rep_but_not_an_account():
     inputs["sample_history"] = inputs["sample_history"].with_columns(pl.lit(None, pl.String).alias(CUSTOMER))
     action = MonthlySalesRepReportAction()
     assert action.validate(inputs) == []
-    assert len(action.run(inputs).artifacts) == 3
+    assert len(action.run(inputs).artifacts) == 2
 
 
 def test_duplicate_sales_and_samples_in_earlier_r12_months_are_reported_and_retained():
@@ -304,12 +304,12 @@ def test_one_http_run_downloads_every_workbook_individually_and_as_month_zip(com
     manifest = response.json()
     run = run_store.get_run(manifest["run_id"])
     assert run.result is not None
-    assert len(manifest["artifacts"]) == 3
+    assert len(manifest["artifacts"]) == 2
     bundle = client.get(f"/api/runs/{run.run_id}/artifacts/download/zip")
     assert bundle.status_code == 200
     assert 'filename="August 2026 Sales Rep Reports.zip"' in bundle.headers["content-disposition"]
     with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
-        assert archive.namelist() == [f"{rep} - August 2026.xlsx" for rep in (source.ALPHA, source.BETA, source.IDLE)]
+        assert archive.namelist() == [f"{rep} - August 2026.xlsx" for rep in (source.ALPHA, source.BETA)]
         for artifact in manifest["artifacts"]:
             individual = client.get(f"/api/runs/{run.run_id}/artifacts/{artifact['id']}/download")
             assert individual.status_code == 200

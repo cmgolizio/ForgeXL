@@ -53,7 +53,6 @@ def fixtures():
     return {
         "sales_history": transactions(list(rows(PERIOD, 3000))).as_csv(),
         "sample_history": transactions(list(rows(PERIOD, 250, samples=True))).as_csv(),
-        "account_assignments": assignments([(name, REPS[index % len(REPS)]) for index, name in enumerate(ACCOUNTS)]).as_csv(),
     }, {
         "sales_history": transactions([row for month in MONTHS[:-1] for row in rows(month, 3000)]).as_csv(),
         "sample_history": transactions([row for month in MONTHS[:-1] for row in rows(month, 250, samples=True)]).as_csv(),

@@ -12,8 +12,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: "Local Data Workbench",
-  description: "Local data-processing proof of concept.",
+  title: "ForgeXL",
+  description: "Turn sales data into ready-to-use Excel reports.",
 };
 
 export default function RootLayout({ children }) {

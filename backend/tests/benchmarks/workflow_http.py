@@ -105,8 +105,8 @@ def main():
                         raise AssertionError("Server did not become ready: " + log_path.read_text())
                     wait_ready()
                     page = client.get("/monthly-reports")
-                    assert page.status_code == 200 and "Monthly Reports" in page.text
-                    assert "/monthly-reports" in client.get("/").text
+                    assert page.status_code == 200 and "Monthly sales rep reports" in page.text
+                    assert "What would you like to create?" in client.get("/").text
                     verify_proof_actions(client)
                     base = "/forge-api/api/monthly"
                     denied = client.post(base + "/validate", headers={"Origin": "https://untrusted.example"}, data={"period": golden.GOLDEN_MONTH})
@@ -133,14 +133,13 @@ def main():
                         assert saved["status"] == "saved"
                     review = checked(client.post(base + "/validate", data={"period": golden.GOLDEN_MONTH}, files={
                         "sales_history": ("sales.csv", golden.sales_table(golden.GOLDEN_MONTH).as_csv()),
-                        "sample_history": ("samples.csv", golden.sample_table(golden.GOLDEN_MONTH).as_csv()),
-                        "account_assignments": ("owners.csv", golden.assignment_table().as_csv())}))
+                        "sample_history": ("samples.csv", golden.sample_table(golden.GOLDEN_MONTH).as_csv())}))
                     assert review["ready"], review
                     result = checked(client.post(base + "/generate", json={"validation_id": review["validation_id"], "acknowledge_warnings": True}))
                     assert result["status"] == "reports_generated"
                     run_id = result["manifest"]["run_id"]
                     original = unpack(client.get(f"/forge-api/api/runs/{run_id}/artifacts/download/zip"))
-                    assert len(original) == 3
+                    assert len(original) == 2
                     for payload in original.values():
                         workbook = load_workbook(BytesIO(payload), data_only=True)
                         assert len(workbook.sheetnames) == 6
@@ -167,7 +166,7 @@ def main():
                         "cross_origin_write_refused": "passed", "same_origin_browser_write": "passed",
                         "disconnected_backend_502": "passed", "explicit_run_release_preserves_saved_cycle": "passed",
                         "history_chunks_overlap_consent": "passed", "monthly_cycle": "passed",
-                        "workbooks": 3, "worksheets": 18, "company_revenue_control": 995.0,
+                        "workbooks": 2, "worksheets": 12, "company_revenue_control": 995.0,
                         "restart_and_backup_restore_exact_workbook_replay": "passed", "live_browser": "not exercised"}, indent=2))
             finally:
                 for process in processes:

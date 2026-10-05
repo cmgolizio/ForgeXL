@@ -33,7 +33,6 @@ def monthly_files(*, sales=None, samples=None, owners=None):
     return {
         "sales_history": ("sales.csv", sales if sales is not None else source(golden.SALES_ROWS[PERIOD])),
         "sample_history": ("samples.csv", samples if samples is not None else source(golden.SAMPLE_ROWS[PERIOD])),
-        "account_assignments": ("owners.csv", owners if owners is not None else golden.assignment_table().as_csv()),
     }
 
 
@@ -100,12 +99,12 @@ def test_validate_then_generate_commits_once_and_downloads_every_rep(client):
     refused = client.post(PREFIX + "/generate", json={"validation_id": review["validation_id"]})
     assert refused.status_code == 400
     result = generate(client, review)
-    assert result["sources_committed"] and len(result["committed_versions"]) == 3
+    assert result["sources_committed"] and len(result["committed_versions"]) == 2
     assert preview(client, result)[0]["Revenue"] == 995.0
     assert preview(client, result)[0]["Quantity"] == 33.0
     assert {item["code"] for item in result["manifest"]["validation"]["warnings"]} >= {item["code"] for item in review["warnings"]}
     files = archive(client, result)
-    assert len(files) == 3
+    assert len(files) == 2
     for name, payload in files.items():
         assert name.endswith(" - September 2026.xlsx")
         workbook = load_workbook(BytesIO(payload), data_only=True)
@@ -141,7 +140,7 @@ def test_duplicate_and_correction_do_not_append_and_old_cycle_keeps_original(cli
     old_id = original["committed_versions"]["sales_history"]
     before = len(library.list_versions("sales_history"))
     duplicate = validate(client, {"sales_history": monthly_files()["sales_history"]})
-    assert not duplicate["ready"]
+    assert duplicate["ready"]
     assert len(library.list_versions("sales_history")) == before
     corrected = source([*golden.SALES_ROWS[PERIOD], transaction_row(invoice_date="2026-09-22", total_price=100, quantity=2)])
     refused = validate(client, {"sales_history": ("corrected.csv", corrected)})
@@ -165,16 +164,11 @@ def test_duplicate_and_correction_do_not_append_and_old_cycle_keeps_original(cli
     assert preview(client, captured)[0]["Revenue"] == 1095.0
 
 
-def test_assignment_correction_is_month_scoped_and_changes_roster(client):
-    _, original = cycle(client)
-    old = original["committed_versions"]["account_assignments"]
-    payload = assignments([*golden.OWNERSHIP, ("New quiet account", "Quiet Rep")]).as_csv()
-    review = validate(client, {"account_assignments": ("owners-corrected.csv", payload)}, reason="Add missed ownership", **{"account_assignments.replaces": old})
-    assert review["ready"] and "Quiet Rep" in review["reps"]
-    result = generate(client, review)
-    assert len(result["manifest"]["artifacts"]) == 4
-    assert library.current_version("account_assignments", PERIOD).supersedes == old
-
+def test_assignment_upload_is_rejected_instead_of_being_optional(client):
+    response = client.post(PREFIX + "/validate", data={"period": PERIOD},
+        files={"account_assignments": ("owners.csv", golden.assignment_table().as_csv())})
+    assert response.status_code == 400
+    assert library.list_datasets() == []
 
 def test_render_failure_keeps_receipt_and_sources_for_retry(client, monkeypatch):
     seed_history(client)
@@ -226,10 +220,9 @@ def test_receipt_write_failure_keeps_sources_and_allows_current_source_retry(cli
     assert generate(client, retry)["status"] == "reports_generated"
 
 
-@pytest.mark.parametrize("fault", ["owners", "period", "missing", "number", "same"])
+@pytest.mark.parametrize("fault", ["period", "missing", "number", "same"])
 def test_invalid_inputs_never_commit_any_month(client, fault):
     files = monthly_files()
-    if fault == "owners": files["account_assignments"] = ("owners.csv", assignments([("Acme Wine Bar", "Beth Comeaux"), ("Acme Wine Bar", "Kevin Wardell")]).as_csv())
     if fault == "period": files["sales_history"] = ("wrong.csv", source(golden.SALES_ROWS["2026-08"]))
     if fault == "missing": files.pop("sample_history")
     if fault == "number": files["sales_history"] = ("bad.csv", source([transaction_row(invoice_date="2026-09-01", total_price="not-a-number")]))
@@ -280,7 +273,7 @@ def test_period_path_boundary_is_structured(client, period):
 def test_catalog_contains_metadata_only_and_no_local_paths(client):
     cycle(client)
     payload = client.get(PREFIX + "/catalog").json()
-    assert len(payload["datasets"]) == 3
+    assert len(payload["datasets"]) == 2
     assert "/workspace/" not in str(payload) and "parquet" not in str(payload)
     assert "rows" not in payload["datasets"][0]
 
@@ -338,11 +331,11 @@ def test_a_saved_cycle_warns_when_the_report_action_version_changes(client, monk
     from app.models.report_spec import REPORT_ACTION_ID
     installed = registry.get_action(REPORT_ACTION_ID)
     assert installed is not None
-    monkeypatch.setattr(installed, "version", "0.3.0")
+    monkeypatch.setattr(installed, "version", "0.4.0")
     review = client.post(PREFIX + "/validate-saved", json={"period": PERIOD, "cycle_id": result["receipt"]["cycle_id"]}).json()
     assert review["ready"]
     assert "ACTION_VERSION_CHANGED" in {item["code"] for item in review["warnings"]}
-    assert review["action"]["version"] == "0.3.0"
+    assert review["action"]["version"] == "0.4.0"
 
 
 def test_library_write_failure_does_not_disclose_a_physical_path(client, monkeypatch, data_library):

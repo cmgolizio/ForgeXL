@@ -1,6 +1,35 @@
 ````md
 # Local Data Workbench — Proof of Concept Build Plan
 
+## Current product requirements — 2026-10-02
+
+Christopher explicitly changed the monthly-report requirements. These rules
+supersede assignment-upload and single-month-screen instructions below:
+
+- The monthly report has exactly two source inputs: sales history and sample
+  history. Account assignments are neither required nor offered. Previously
+  stored snapshot records remain intact but are never report inputs.
+- Performance and the dynamic rep roster come from invoice `Sales Person`.
+  Reps with sales/sample activity in current R12 receive reports. Account
+  context is the distinct customer/rep pairs observed in that same window.
+- Every action follows choose action → upload required files → a prominent
+  Generate report button. Monthly validation is part of that button; errors
+  and meaningful warnings may pause generation for correction/acknowledgment.
+- The same monthly upload surface accepts one month or multiple years. Each
+  source is parsed once and partitioned by its transaction dates. The selected
+  report month controls calculations, even if the upload contains later months.
+- New months are saved; exactly equivalent stored months are reused. Conflicts
+  fail before any writes. Correcting a stored month requires a single-month
+  replacement, the current version identity, and a reason. No row merging or
+  implicit replacement is authorized.
+- Source versions/receipts remain persistent and reports remain ephemeral.
+  New receipts name two datasets. Schema-v1 three-dataset receipts can be read;
+  their sales/sample versions are reused with a changed-Action warning.
+
+This is an authorized correction to Phase 15 and its report contract, not a
+new phase or a replacement of the Next.js/FastAPI/Polars architecture.
+
+
 ## Document Purpose
 
 This document is the authoritative implementation plan for the **Local Data Workbench Proof of Concept**.

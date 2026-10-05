@@ -303,7 +303,7 @@ def replace_value(
 EXPECTED: dict[str, Any] = {
     "report_month": GOLDEN_MONTH,
     "report_label": "September 2026",
-    "reps": (BETH, JENNIFER, KEVIN),
+    "reps": (BETH, KEVIN),
     "company": {
         # 375.00 + 200.00 + 180.00 + 300.00 - 60.00
         "Revenue": 995.00,
@@ -311,8 +311,8 @@ EXPECTED: dict[str, Any] = {
         "Quantity": 33.0,
         "Lines": 5,
         "Accounts Sold": 3,
-        "Accounts": 4,
-        "Sales Reps": 3,
+        "Accounts": 3,
+        "Sales Reps": 2,
         # 300.00 + 240.00
         "Prior Month Revenue": 540.00,
         # (995 - 540) / 540
@@ -376,31 +376,12 @@ EXPECTED: dict[str, Any] = {
             "Sample Quantity": 1.0,
             "Sample Value": 25.00,
         },
-        JENNIFER: {
-            "Revenue": 0.0,
-            "Quantity": 0.0,
-            "Lines": 0,
-            "Accounts Sold": 0,
-            "Accounts": 1,
-            "Prior Month Revenue": 0.0,
-            "MoM Growth": None,
-            "Last Year Revenue": 0.0,
-            "YoY Growth": None,
-            "YTD Revenue": 0.0,
-            "Prior YTD Revenue": 0.0,
-            "YTD Growth": None,
-            "Share of Company Revenue": 0.0,
-            "Placements": 0,
-            "Sample Lines": 0,
-            "Sample Quantity": 0.0,
-            "Sample Value": 0.0,
-        },
+
     },
     "accounts": {
         (BETH, ACME): {"Revenue": 575.00, "Quantity": 19.0, "Lines": 2},
         (BETH, CORNER): {"Revenue": 180.00, "Quantity": 6.0, "Lines": 1},
         (KEVIN, BISTRO): {"Revenue": 240.00, "Quantity": 8.0, "Lines": 2},
-        (JENNIFER, HARBOUR): {"Revenue": 0.0, "Quantity": 0.0, "Lines": 0},
     },
     "company_suppliers": {
         # SKU-100 375.00 + SKU-300 200.00

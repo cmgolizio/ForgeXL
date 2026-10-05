@@ -1,5 +1,6 @@
 "use client";
 
+
 import Link from "next/link";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -12,6 +13,7 @@ import DataPreview from "@/components/workbench/DataPreview";
 import ExportButtons from "@/components/workbench/ExportButtons";
 import FileUploadSlot from "@/components/workbench/FileUploadSlot";
 import LibraryInputSlot from "@/components/workbench/LibraryInputSlot";
+import WorkflowSteps, { StepHeading } from "@/components/workflow/WorkflowSteps";
 import OutputSelector from "@/components/workbench/OutputSelector";
 import ResultsSummary from "@/components/workbench/ResultsSummary";
 import ReleaseRun from "@/components/workbench/ReleaseRun";
@@ -35,6 +37,7 @@ export default function ActionRunner() {
   const [actions, setActions] = useState([]);
   const [actionsStatus, setActionsStatus] = useState("loading");
   const [actionsError, setActionsError] = useState(null);
+  const [catalogAttempt, setCatalogAttempt] = useState(0);
 
   const [selectedActionId, setSelectedActionId] = useState("");
   const [files, setFiles] = useState({});
@@ -55,7 +58,7 @@ export default function ActionRunner() {
     async function loadActions() {
       try {
         const loaded = await fetchActions({ signal: controller.signal });
-        setActions(loaded);
+        setActions(loaded.toSorted((a, b) => Number(Boolean(b.workflow_path)) - Number(Boolean(a.workflow_path))));
         setActionsStatus("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -66,7 +69,7 @@ export default function ActionRunner() {
 
     loadActions();
     return () => controller.abort();
-  }, []);
+  }, [catalogAttempt]);
 
   const selectedAction = useMemo(
     () => actions.find((action) => action.id === selectedActionId) ?? null,
@@ -264,26 +267,25 @@ export default function ActionRunner() {
         <p className='text-sm text-red-800 dark:text-red-300'>
           {actionsError?.message}
         </p>
+        <button className="secondary-button self-start mt-3" onClick={() => { setActionsStatus("loading"); setActionsError(null); setCatalogAttempt((attempt) => attempt + 1); }}>Retry connection</button>
       </section>
     );
   }
 
   return (
     <div data-workbench-state={state} className='flex flex-col gap-6'>
-      <ActionSelector
-        actions={actions}
-        selectedActionId={selectedActionId}
-        onSelect={handleSelectAction}
-        disabled={running}
-      />
-
-      <ActionDescription action={selectedAction} />
+      <WorkflowSteps current={selectedAction ? running || manifest ? 3 : 2 : 1} />
+      <section>
+        {selectedAction ? <div className="chosen-action"><span><small>Selected action</small><strong>{selectedAction.name}</strong></span><button className="secondary-button" onClick={() => handleSelectAction("")} disabled={running}>Change action</button></div> : <>
+          <StepHeading number="1" title="Choose an action" />
+          <ActionSelector actions={actions} selectedActionId={selectedActionId} onSelect={handleSelectAction} disabled={running} />
+        </>}
+      </section>
 
       {selectedAction ? (
-        <section className='flex flex-col gap-4'>
-          <h3 className='text-sm font-medium text-zinc-900 dark:text-zinc-100'>
-            Required Inputs
-          </h3>
+        <section className="workflow-panel flex flex-col gap-5">
+          <StepHeading number="2" title="Upload your file">{selectedAction.name}</StepHeading>
+          <ActionDescription action={selectedAction} />
           {selectedAction.inputs.map((input) =>
             (input.source ?? "upload") === "library" ? (
               <LibraryInputSlot key={input.id} input={input} />
@@ -308,12 +310,16 @@ export default function ActionRunner() {
         </section>
       ) : null}
 
-      <RunButton onRun={handleRun} running={running} disabled={!canRun} />
+      {selectedAction ? <section className="workflow-panel">
+        <StepHeading number="3" title="Generate your report" />
+        <RunButton onRun={handleRun} running={running} disabled={!canRun} />
+        <p className="generate-help">{missingRequiredSlots.length ? "Choose the required files above to continue." : "Preview the result and download Excel or CSV."}</p>
+      </section> : null}
 
       <RunStatus state={state} error={runError} manifest={manifest} />
 
       {state === "success" && manifest && selectedOutput ? (
-        <div className='flex flex-col gap-6 border-t border-zinc-200 pt-6 dark:border-zinc-800'>
+        <div className='workflow-panel flex flex-col gap-6'>
           <OutputSelector
             outputs={outputs}
             selectedOutputId={selectedOutput.id}
@@ -322,20 +328,10 @@ export default function ActionRunner() {
 
           <ResultsSummary manifest={manifest} output={selectedOutput} />
 
-          <DataPreview
-            // A different Run or result table is a different preview: the key
-            // remounts it so paging starts again at the first page.
-            key={`${manifest.run_id}:${selectedOutput.id}`}
-            runId={manifest.run_id}
-            outputId={selectedOutput.id}
-            label={outputs.length > 1 ? selectedOutput.label : null}
-          />
-
-          <ExportButtons
-            runId={manifest.run_id}
-            output={selectedOutput}
-            outputs={outputs}
-          />
+          <ExportButtons runId={manifest.run_id} output={selectedOutput} outputs={outputs} />
+          <details className="advanced-options"><summary>Preview report data</summary><div className="mt-4">
+            <DataPreview key={`${manifest.run_id}:${selectedOutput.id}`} runId={manifest.run_id} outputId={selectedOutput.id} label={outputs.length > 1 ? selectedOutput.label : null} />
+          </div></details>
 
           {/*
             Artifacts belong to the Run, not to the selected result table, so
@@ -348,8 +344,10 @@ export default function ActionRunner() {
             artifacts={manifest.artifacts}
           />
 
-          <AuditSummary manifest={manifest} />
-          <ReleaseRun runId={manifest.run_id} onReleased={clearRunResult} disabled={running} />
+          <details className="advanced-options"><summary>Run details & cleanup</summary><div className="mt-4 space-y-4">
+            <AuditSummary manifest={manifest} />
+            <ReleaseRun runId={manifest.run_id} onReleased={clearRunResult} disabled={running} />
+          </div></details>
         </div>
       ) : null}
     </div>

@@ -134,15 +134,14 @@ matched **exactly** — `Sku` is not `SKU`, and `Supplier Name` is not
 
 ### Monthly Sales Rep Report
 
-This Action reads stored sales history, sample history and a reporting-month
-assignment snapshot. One successful Run generates a six-sheet workbook for
+This Action reads stored sales history and sample history. One successful Run generates a six-sheet workbook for
 every applicable rep, individual downloads and a monthly ZIP.
 
 | Field | Value |
 | --- | --- |
 | Action ID | `monthly_sales_rep_report` |
-| Version | `0.2.0` |
-| Inputs | `sales_history`, `sample_history`, `account_assignments` |
+| Version | `0.3.0` |
+| Inputs | `sales_history`, `sample_history` |
 | Results | Nineteen preview/export tables plus all six-sheet rep workbook artifacts. |
 
 Performance follows the salesperson on the invoice. Net sales include signed
@@ -159,38 +158,42 @@ The [specification](docs/monthly-sales-rep-report-spec.md) records exact rules;
 [Phase 14 validation](docs/phase-14-validation.md) records independent source
 checks and the remaining company-data and manual Excel for Mac acceptance.
 
-Open **Monthly Reports** from the home page (`/monthly-reports`). For a new
-installation, expand initial history setup, validate company sales/sample
-history, then save the reviewed monthly partitions. Large history can arrive
-in several files spanning complete months. Already-stored months are refused
-by default. **Import missing months only** explicitly skips whole stored
-months after review and warning consent; it never merges missing rows into an
-existing month. Correct an incomplete stored month using monthly replacement.
-After a partial history save, revalidate the same file with that option to save
-only the remaining months. For the recurring cycle:
+1. Open ForgeXL and choose **Monthly Sales Rep Report**.
+2. Choose the **Report month**. Upload company **Sales data** and **Sample
+   data** as CSV or XLSX. Either file can contain one month or several years.
+   Saved data for the month can be reused by leaving its upload empty.
+3. Click the large **Generate reports** button. ForgeXL checks the sources
+   automatically. If it displays errors, correct them; if it displays warnings,
+   review and acknowledge them, then click the same button to continue.
+4. Click **Download all reports (ZIP)**, or download individual Excel workbooks.
+   Expand **Preview report data** to spot-check totals.
 
-1. Choose the report month and upload its sales, samples and assignment snapshot.
-   An already-saved source can be reused by leaving that slot empty.
-2. Validate. Review row counts, source/month checks, detected reps, ownership
-   issues and missing history; acknowledge any warnings.
-3. Generate. The screen reports source saving separately from report generation.
-4. Download the monthly ZIP or individual rep workbooks, and spot-check the
-   company/result previews against the source.
+No account assignment upload is required or offered. Reports follow the
+salesperson on each invoice. Reps with sales/sample activity in current R12
+receive workbooks; assignment-only idle reps do not.
 
-Corrections explicitly replace the current monthly version with a reason;
-they never append a second copy of a corrected month. **Rerun saved reports**
-can use a previous cycle's exact source IDs or deliberately capture the current
-stored versions. The recorded source selection survives a restart. Download
-bytes and previews remain in memory and are recreated by rerunning the cycle.
-If workbook generation fails after source saving, review the saved cycle and
-retry without uploading again. A partial storage failure lists the versions
-already committed; refresh and supply only missing sources.
+New months are saved automatically, and exactly unchanged stored months are
+reused without double-counting. Conflicting stored months block generation
+before any writes. To correct one month, upload only that month, expand its
+**File requirements & date options**, select **Replace saved month**, and
+explain the correction. Previous versions remain available.
 
-The existing `POST /api/runs` interface still accepts explicit history/snapshot
-selectors. An exact replay also depends on the original report Action version;
-the monthly workflow warns if the installed version differs from the receipt.
-See [Phase 15 validation](docs/phase-15-validation.md) for API routes,
-performance evidence and the remaining production/manual acceptance checks.
+Choose **Use saved data** to regenerate reports without uploads. The most
+recent report’s exact source selection is the default; an earlier report or
+current corrected data can be selected explicitly. If workbook generation
+fails, click **Retry using saved data**. If saving fails partway, keep/reselect
+the same files and try again; successful months are reused safely. Source data
+and receipts survive restart. Preview/download bytes are regenerated on demand.
+Old report receipts remain readable; the app warns when the installed Action
+version changes the report contract.
+
+Other actions use the same three steps: choose action, upload the required
+file(s), **Generate report**, then download Excel or CSV. **More options**
+contains the standalone history-import tool for adding history without running
+a report; it is not required for multi-year monthly uploads.
+
+See [the specification](docs/monthly-sales-rep-report-spec.md) and
+[the usability fix record](docs/usability-fixes.md) for current rules and checks.
 
 ### Supported file formats
 
@@ -243,12 +246,15 @@ outbound HTTP client in the running backend.
 Separate from a Run, and the one thing ForgeXL does keep:
 **`data/library/`**, on this machine, ignored by git in full.
 
-The Data Library holds business data that has to outlive a Run — sales history,
-sample history, and account-ownership snapshots — as versioned Parquet files
+The Data Library holds business data that has to outlive a Run — sales history
+and sample history — as versioned Parquet files
 with small JSON records beside them. Committed versions are immutable: a month
 is corrected by committing a replacement that records what it replaces and why,
 so an older report can still be reproduced from the data it was built from.
 There is no database.
+
+Older account-ownership snapshots remain stored for compatibility but are never
+read by monthly reports or offered as uploads.
 
 Change the location with `FORGEXL_LIBRARY_DIRECTORY`. The directory is created
 when the first version is committed, not at startup, and it is safe to back up
@@ -259,13 +265,10 @@ and point `FORGEXL_LIBRARY_DIRECTORY` there; verify catalog and a saved cycle
 before replacing a working copy. No automatic backup, cloud sync or encryption
 is provided. See [`docs/architecture.md`](docs/architecture.md) §5a.
 
-**What fills it** is the monthly ingestion layer (build plan Phase 10): the
-three recurring exports — sales, samples and the account-assignment list — are
-parsed, checked against their canonical schemas, placed in a reporting month
-read from the data rather than from the filename, and committed as one version
-per month. All three are validated before any of them is stored, so a bad file
-means nothing is written at all, and re-uploading a month's export is refused
-rather than counted twice.
+**What fills it** is the monthly reporting workflow: sales and samples are
+parsed, validated and partitioned by transaction month. All partitions validate
+before any write. New months become immutable versions; unchanged stored
+months are reused, and conflicting months require a deliberate correction.
 
 The accepted columns and every refusal are documented in
 [`docs/monthly-source-schemas.md`](docs/monthly-source-schemas.md). The implemented

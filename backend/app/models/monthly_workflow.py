@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.library import parse_period, parse_version_id
 from app.models.schemas import ActionReference, RunError, RunManifest, ValidationIssue
 
-SOURCE_IDS = ("sales_history", "sample_history", "account_assignments")
+SOURCE_IDS = ("sales_history", "sample_history")
 
 
 class SourceReview(BaseModel):
@@ -19,6 +19,8 @@ class SourceReview(BaseModel):
     row_count: int
     period: str | None = None
     version_id: str | None = None
+    imported_periods: tuple[str, ...] = ()
+    reused_periods: tuple[str, ...] = ()
     operation: Literal["import", "reuse", "replace"]
     errors: tuple[ValidationIssue, ...] = ()
     warnings: tuple[ValidationIssue, ...] = ()
@@ -39,7 +41,7 @@ class CoverageReview(BaseModel):
 class CycleReceipt(BaseModel):
     """Immutable source selection. No outputs, workbook bytes or Run state."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     cycle_id: str
     period: str
     created_at: datetime
@@ -53,8 +55,11 @@ class CycleReceipt(BaseModel):
         try:
             parse_version_id(self.cycle_id)
             parse_period(self.period)
-            if set(self.versions) != set(SOURCE_IDS):
-                raise ValueError("A cycle must name all three source datasets.")
+            allowed: set[str] = set(SOURCE_IDS)
+            if self.schema_version == 1:
+                allowed.add("account_assignments")
+            if set(self.versions) != allowed:
+                raise ValueError("A cycle must name its exact source datasets.")
             for dataset_id, ids in self.versions.items():
                 if not ids or len(set(ids)) != len(ids):
                     raise ValueError("A source selection must be nonempty and unique.")
@@ -69,7 +74,7 @@ class CycleReceipt(BaseModel):
     def selectors(self) -> dict[str, str]:
         return {
             key: ("version:" if key == "account_assignments" else "versions:") + ",".join(ids)
-            for key, ids in self.versions.items()
+            for key, ids in self.versions.items() if key in SOURCE_IDS
         }
 
 

@@ -78,6 +78,7 @@ def test_get_actions_serialises_every_definition_field(client_with_actions):
     assert response.json() == {
         "actions": [
             {
+                "workflow_path": None,
                 "id": "alpha",
                 "version": "2.3.4",
                 "name": "Alpha",
@@ -151,6 +152,7 @@ def test_get_actions_is_fully_json_serialisable(client):
     assert payload["actions"], "the application must expose at least one Action"
     for entry in payload["actions"]:
         assert set(entry) == {
+        "workflow_path",
             "id",
             "version",
             "name",
@@ -314,5 +316,4 @@ def test_every_action_declares_its_own_input_slot_ids(client):
         "sales_file",
         "sales_history",
         "sample_history",
-        "account_assignments",
     ]

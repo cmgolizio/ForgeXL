@@ -171,39 +171,32 @@ def test_a_window_is_inclusive_of_both_ends(clean) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_roster_comes_from_the_assignment_snapshot(clean) -> None:
-    assert clean.reps == (BETH, JENNIFER, KEVIN)
+def test_the_roster_comes_from_current_r12_activity(clean) -> None:
+    assert clean.reps == (BETH, KEVIN)
 
 
-def test_a_rep_the_snapshot_adds_appears_without_a_code_change() -> None:
+def test_a_snapshot_only_rep_is_ignored() -> None:
     extended = golden.assignment_frame(
         (*golden.OWNERSHIP, ("New Bar", "Dana Ruiz"))
     )
 
     prepared = prepare(assignments=extended)
 
-    assert "Dana Ruiz" in prepared.reps
+    assert "Dana Ruiz" not in prepared.reps
 
 
 def test_a_rep_the_snapshot_drops_keeps_invoice_performance() -> None:
     without_kevin = golden.assignment_frame(tuple(pair for pair in golden.OWNERSHIP if pair[1] != KEVIN) + ((BISTRO, BETH),))
     prepared = prepare(assignments=without_kevin)
     assert prepared.usable
-    assert prepared.reps == (BETH, JENNIFER, KEVIN)
+    assert prepared.reps == (BETH, KEVIN)
     tables = engine.build_tables(prepared)
     assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==KEVIN)["Revenue"][0] == 240.0
 
 
-def test_a_rep_with_no_activity_is_still_on_the_roster(clean) -> None:
-    """Jennifer owns one account that never traded."""
-    assert JENNIFER in clean.reps
-
-    summary = engine.build_tables(clean)["rep_summary"]
-    row = summary.filter(pl.col(REP_COLUMN) == JENNIFER)
-
-    assert row.height == 1
-    assert row["Revenue"][0] == 0.0
-
+def test_a_rep_with_no_transaction_activity_is_not_on_the_roster(clean) -> None:
+    assert JENNIFER not in clean.reps
+    assert engine.build_tables(clean)["rep_summary"].filter(pl.col(REP_COLUMN) == JENNIFER).height == 0
 
 def test_a_blank_rep_in_the_snapshot_is_not_a_rep() -> None:
     with_blank = golden.assignment_frame(
@@ -212,7 +205,7 @@ def test_a_blank_rep_in_the_snapshot_is_not_a_rep() -> None:
 
     prepared = prepare(assignments=with_blank)
 
-    assert prepared.reps == (BETH, JENNIFER, KEVIN)
+    assert prepared.reps == (BETH, KEVIN)
 
 
 def test_active_invoice_reps_are_part_of_the_roster() -> None:
@@ -381,14 +374,11 @@ def test_every_rep_gets_a_row_for_every_company_supplier(clean) -> None:
 
 
 def test_a_share_of_nothing_is_no_share_rather_than_zero(clean) -> None:
-    """Jennifer sold nothing, so her supplier shares have no denominator."""
-    comparison = engine.build_tables(clean)["supplier_comparison"]
-    jennifer = comparison.filter(pl.col(REP_COLUMN) == JENNIFER)
-
-    assert jennifer.height == 2
-    assert jennifer["Rep Share"].to_list() == [None, None]
-    assert jennifer["Index"].to_list() == [None, None]
-
+    comparison = engine.build_tables(prepare(sales=golden.sales_frame().with_columns(pl.lit(0.0).alias(REVENUE))))["supplier_comparison"]
+    beth = comparison.filter(pl.col(REP_COLUMN) == BETH)
+    assert beth.height == 2
+    assert beth["Rep Share"].to_list() == [None, None]
+    assert beth["Index"].to_list() == [None, None]
 
 def test_a_zero_part_of_a_real_whole_is_a_zero_share(clean) -> None:
     """Kevin sells none of one supplier, and his total is not zero."""
@@ -404,14 +394,14 @@ def test_a_zero_part_of_a_real_whole_is_a_zero_share(clean) -> None:
 
 
 def test_growth_against_nothing_has_no_answer(clean) -> None:
-    summary = engine.build_tables(clean)["rep_summary"]
-    jennifer = summary.filter(pl.col(REP_COLUMN) == JENNIFER)
-
-    assert jennifer["Prior Month Revenue"][0] == 0.0
-    assert jennifer["MoM Growth"][0] is None
-    assert jennifer["YoY Growth"][0] is None
-    assert jennifer["YTD Growth"][0] is None
-
+    sales = golden.sales_frame().with_columns(pl.when(pl.col(DATE_COLUMN).str.starts_with("2026-09"))
+        .then(pl.lit("New Rep")).otherwise(pl.col(TRANSACTION_COLUMNS.transaction_rep)).alias(TRANSACTION_COLUMNS.transaction_rep))
+    summary = engine.build_tables(prepare(sales=sales))["rep_summary"]
+    new = summary.filter(pl.col(REP_COLUMN) == "New Rep")
+    assert new["Prior Month Revenue"][0] == 0.0
+    assert new["MoM Growth"][0] is None
+    assert new["YoY Growth"][0] is None
+    assert new["YTD Growth"][0] is None
 
 def test_growth_from_a_negative_prior_period_keeps_its_sign() -> None:
     """The denominator is the absolute prior value (rule ``growth``)."""
@@ -702,7 +692,6 @@ def test_unexpected_columns_cannot_override_prepared_ownership() -> None:
     assert dict(tables["rep_summary"].select(REP_COLUMN, "Revenue").iter_rows()) == {
         BETH: 755.0,
         KEVIN: 240.0,
-        JENNIFER: 0.0,
     }
     assert sales[engine.OWNER].to_list() == [KEVIN] * sales.height
 
@@ -739,13 +728,12 @@ def test_a_blank_supplier_keeps_rep_revenue_in_the_company_comparison() -> None:
     )
     comparison = engine.build_tables(prepare(sales=sales))["supplier_comparison"]
 
-    assert comparison.height == 3
+    assert comparison.height == 2
     assert dict(comparison.select(REP_COLUMN, "Rep Revenue").iter_rows()) == {
         BETH: 755.0,
         KEVIN: 240.0,
-        JENNIFER: 0.0,
     }
-    assert comparison["Company Revenue"].to_list() == [995.0] * 3
+    assert comparison["Company Revenue"].to_list() == [995.0] * 2
 
 
 def test_an_unreadable_invoice_date_stops_the_report() -> None:
@@ -798,7 +786,7 @@ def test_conflicting_current_owners_warn_without_multiplying_invoice_sales() -> 
     conflicted = golden.assignment_frame((*golden.OWNERSHIP, (ACME, KEVIN)))
     prepared = prepare(assignments=conflicted)
     assert prepared.usable
-    assert "DUPLICATE_ACCOUNT_OWNERSHIP" in codes(prepared.warnings)
+    assert "DUPLICATE_ACCOUNT_OWNERSHIP" not in codes(prepared.warnings)
     tables = engine.build_tables(prepared)
     assert tables["company_summary"]["Revenue"][0] == 995.0
     assert tables["rep_summary"].filter(pl.col(REP_COLUMN)==BETH)["Revenue"][0] == 755.0
@@ -812,15 +800,16 @@ def test_an_account_listed_twice_with_the_same_rep_is_fine() -> None:
     prepared = prepare(assignments=repeated)
 
     assert prepared.usable, codes(prepared.errors)
-    assert prepared.ownership.height == len(golden.OWNERSHIP)
+    assert prepared.ownership.height == 3
 
 
-def test_a_snapshot_with_no_rep_stops_the_report() -> None:
+def test_empty_snapshot_does_not_stop_the_report() -> None:
     empty = golden.assignment_frame(())
 
     prepared = prepare(assignments=empty)
 
-    assert "NO_SALES_REPS" in codes(prepared.errors)
+    assert prepared.usable
+    assert prepared.reps == (BETH, KEVIN)
 
 
 def test_a_sample_history_that_skips_the_reporting_month_stops_the_report() -> None:
@@ -866,7 +855,7 @@ def test_the_golden_month_reports_exactly_its_expected_warnings(clean) -> None:
     assert codes(clean.warnings) == list(golden.EXPECTED["warnings"])
 
 
-def test_a_transaction_rep_the_snapshot_does_not_name_is_a_warning() -> None:
+def test_new_transaction_reps_need_no_assignment_verification() -> None:
     renamed = golden.sales_frame().with_columns(
         pl.when(pl.col(TRANSACTION_COLUMNS.invoice_number) == "INV-2609-1")
         .then(pl.lit("Temp Cover"))
@@ -877,7 +866,7 @@ def test_a_transaction_rep_the_snapshot_does_not_name_is_a_warning() -> None:
     prepared = prepare(sales=renamed)
 
     assert prepared.usable, codes(prepared.errors)
-    assert "UNRECOGNISED_SALES_REP" in codes(prepared.warnings)
+    assert "UNRECOGNISED_SALES_REP" not in codes(prepared.warnings)
 
 
 def test_an_unrecognised_invoice_rep_keeps_company_total_and_changes_attribution() -> None:
@@ -929,8 +918,8 @@ def test_a_missing_comparison_window_is_a_warning() -> None:
 
     assert "MISSING_COMPARISON_PERIOD" in codes(prepared.warnings)
     summary = engine.build_tables(prepared)["rep_summary"]
-    assert summary["Last Year Revenue"].to_list() == [0.0, 0.0, 0.0]
-    assert summary["YoY Growth"].to_list() == [None, None, None]
+    assert summary["Last Year Revenue"].to_list() == [0.0, 0.0]
+    assert summary["YoY Growth"].to_list() == [None, None]
 
 
 def test_a_short_history_warns_that_placements_are_overstated(clean) -> None:
@@ -995,8 +984,8 @@ def test_the_metrics_are_counts(clean) -> None:
     metrics = engine.report_metrics(clean)
 
     assert metrics == {
-        "sales_reps": 3,
-        "accounts": 4,
+        "sales_reps": 2,
+        "accounts": 3,
         "history_months": 4,
         "sales_rows": 5,
         "sample_rows": 2,
@@ -1018,7 +1007,7 @@ def test_account_identifiers_are_not_fuzzy_matched_to_current_ownership() -> Non
     tables = engine.build_tables(prepared)
     assert tables["company_summary"]["Revenue"][0] == 995.0
     assert CORNER in tables["account_performance"][CUSTOMER].to_list()
-    assert CORNER.lower() in tables["account_performance"][CUSTOMER].to_list()
+    assert CORNER.lower() not in tables["account_performance"][CUSTOMER].to_list()
 
 
 def test_the_ownership_map_names_the_report_column_not_the_source_one(
