@@ -13,11 +13,13 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 
 from app import config
-from app.api import actions, runs, monthly
+from app.api import actions, runs, monthly, csv_tools
 from app.api.request_guard import BrowserWriteGuard
-from app.errors import WorkbenchError
+from app.errors import WorkbenchError, InvalidRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ app.add_middleware(BrowserWriteGuard)
 app.include_router(actions.router)
 app.include_router(runs.router)
 app.include_router(monthly.router)
+app.include_router(csv_tools.router)
 
 
 @app.exception_handler(WorkbenchError)
@@ -58,6 +61,16 @@ async def handle_workbench_error(
         )
     return JSONResponse(status_code=exc.http_status, content=exc.as_response_body())
 
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation(request: Request, error: RequestValidationError):
+    if not request.url.path.startswith("/api/csv/"):
+        return await request_validation_exception_handler(request, error)
+    structured = InvalidRequestError("Invalid CSV request or filter options.", details={"issues": [
+        {"message": item["msg"], "location": list(item["loc"])} for item in error.errors()
+    ]})
+    return JSONResponse(status_code=structured.http_status, content=structured.as_response_body())
 
 @app.get("/health")
 def health() -> dict[str, str]:

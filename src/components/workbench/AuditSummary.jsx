@@ -79,9 +79,9 @@ function Inputs({ inputs }) {
         Inputs Used
       </h4>
       <ul className='flex flex-col gap-1'>
-        {used.map((input) => (
+        {used.map((input, index) => (
           <li
-            key={input.slot_id}
+            key={`${input.slot_id}-${index}`}
             className='flex flex-wrap items-baseline justify-between gap-x-4 text-sm'
           >
             <span className='text-zinc-800 dark:text-zinc-200'>

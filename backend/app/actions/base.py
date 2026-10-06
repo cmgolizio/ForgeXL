@@ -175,6 +175,7 @@ class Action(abc.ABC):
     #: frontend submits as `action_id`. Never used to build a filesystem path
     #: or a shell command (build plan section 16).
     workflow_path: ClassVar[str | None] = None
+    accepts_options: ClassVar[bool] = False
 
     id: ClassVar[str]
 
@@ -217,6 +218,12 @@ class Action(abc.ABC):
         Returning a non-empty list fails the Run before :meth:`run` is called.
         """
         return []
+
+    def run_configured(self, inputs: Mapping[str, pl.DataFrame], options: Mapping[str, Any]) -> ActionResult:
+        """Backward-compatible configuration hook. Existing Actions keep run(inputs)."""
+        if options:
+            raise ValueError("This Action accepts no configuration.")
+        return self.run(inputs)
 
     @abc.abstractmethod
     def run(self, inputs: Mapping[str, pl.DataFrame]) -> ActionResult:

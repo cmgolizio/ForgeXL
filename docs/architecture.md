@@ -1,5 +1,11 @@
 # ForgeXL — Architecture
 
+> CSV extension (2026-10-06): discovered Combine/Filter workflows use strict
+> string parsing, bounded in-memory preparation, ordered upload metadata and
+> validated per-request configuration, then the existing ephemeral Run pipeline.
+> The streaming proxy and monthly library boundary are unchanged. See
+> [csv-tools.md](csv-tools.md) for the current CSV contracts.
+
 > Current correction (2026-10-02): monthly reports consume only sales/sample
 > history, derive reps/account context from invoice activity, and accept
 > multi-year uploads directly in the report form. No assignment upload is

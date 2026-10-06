@@ -245,6 +245,8 @@ def test_the_application_registers_both_proof_actions():
         "exact_duplicate_remover",
         "product_master_builder",
         "monthly_sales_rep_report",
+        "combine_csv",
+        "filter_csv",
     ]
 
 

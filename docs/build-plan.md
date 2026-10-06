@@ -1,6 +1,24 @@
 ````md
 # Local Data Workbench — Proof of Concept Build Plan
 
+## CSV tools requirement extension — 2026-10-06
+
+The authorized CSV feature adds **Combine CSV files** and **Filter a CSV** to
+backend action discovery, with a dedicated metadata-linked workflow. These are
+generic ephemeral Runs: no monthly schema, assignment input, month restriction,
+or Data Library write. Combine → exact all-field keep-first deduplication →
+optional filters; Filter preserves repeats by default. Fields are strictly
+parsed as text; exact headers, Unicode, whitespace, numeric/date text and quoting
+semantics are preserved. Preview/full CSV downloads use existing Run services.
+
+This authorization includes backward-compatible `ActionInput.max_files`, a
+configuration hook retaining old `run(inputs)` callers, ordered bounded multipart
+intake, separate validated options and reusable in-memory inspection. It is one
+complete feature, not gated by separate historical phases. Old single-field
+protections and parsing defaults remain. See [csv-tools.md](csv-tools.md) for
+operation, contracts, limits, cleanup and verification. Existing monthly
+requirements below remain in force.
+
 ## Current product requirements — 2026-10-02
 
 Christopher explicitly changed the monthly-report requirements. These rules

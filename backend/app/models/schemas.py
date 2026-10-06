@@ -138,6 +138,8 @@ class ActionInput(BaseModel):
             "Validated against resolved versions before the Action sees frames."
         ),
     )
+    max_files: int = Field(default=1, ge=1, description="Ordered upload count accepted by this slot.")
+
     interpret_dates: bool = Field(
         default=False,
         description=(

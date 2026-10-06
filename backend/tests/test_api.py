@@ -98,6 +98,7 @@ def test_get_actions_serialises_every_definition_field(client_with_actions):
                         "dataset_id": None,
                         "period_matches": None,
                         "interpret_dates": False,
+                        "max_files": 1,
                     }
                 ],
                 "outputs": [
@@ -179,6 +180,7 @@ def test_get_actions_is_fully_json_serialisable(client):
                 "dataset_id",
                 "period_matches",
                 "interpret_dates",
+                "max_files",
             }
             assert slot["source"] in {"upload", "library"}
             if slot["source"] == "upload":
@@ -245,6 +247,8 @@ def test_get_actions_exposes_both_proof_actions(client):
         "exact_duplicate_remover",
         "product_master_builder",
         "monthly_sales_rep_report",
+        "combine_csv",
+        "filter_csv",
     ]
 
 
@@ -316,4 +320,7 @@ def test_every_action_declares_its_own_input_slot_ids(client):
         "sales_file",
         "sales_history",
         "sample_history",
+        "combine_source",
+        "combine_additional",
+        "filter_source",
     ]

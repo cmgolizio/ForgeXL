@@ -95,3 +95,14 @@ def _parse_origins(raw: str | None) -> list[str]:
 ALLOWED_FRONTEND_ORIGINS: list[str] = _parse_origins(
     os.environ.get("FORGEXL_ALLOWED_FRONTEND_ORIGINS")
 )
+# CSV-tools limits; independent of monthly ingestion and ordinary Run intake.
+CSV_MAX_FILES = int(os.environ.get("FORGEXL_CSV_MAX_FILES", "20"))
+CSV_MAX_TOTAL_BYTES = int(os.environ.get("FORGEXL_CSV_MAX_TOTAL_BYTES", str(500 * 1024 * 1024)))
+CSV_SESSION_TTL_SECONDS = int(os.environ.get("FORGEXL_CSV_SESSION_TTL_SECONDS", "900"))
+CSV_MAX_SESSIONS = int(os.environ.get("FORGEXL_CSV_MAX_SESSIONS", "4"))
+CSV_MAX_RETAINED_BYTES = int(os.environ.get("FORGEXL_CSV_MAX_RETAINED_BYTES", str(1024 * 1024 * 1024)))
+
+if not 2 <= CSV_MAX_FILES <= 1000:
+    raise ValueError("FORGEXL_CSV_MAX_FILES must be between 2 and 1000.")
+if min(CSV_MAX_TOTAL_BYTES, CSV_SESSION_TTL_SECONDS, CSV_MAX_SESSIONS, CSV_MAX_RETAINED_BYTES) <= 0:
+    raise ValueError("CSV byte, lifetime and session limits must be positive.")

@@ -54,3 +54,11 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; }
 .chosen-action span { display: flex; flex-direction: column; gap: 4px; }
 .chosen-action small { color: #7c899b; font-size: 11px; }
 .chosen-action strong { font-size: 15px; font-weight: 600; }
+
+.csv-condition { border: 1px solid var(--line); border-radius: 10px; padding: 16px; font-size: 13px; }
+.csv-condition legend { padding: 0 6px; font-weight: 600; }
+.csv-file-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; font-size: 13px; }
+.csv-file-row > span { overflow-wrap: anywhere; }
+.csv-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; }
+.csv-metrics dt { font-size: 12px; color: #738095; }
+.csv-metrics dd { margin-top: 4px; font-size: 24px; font-weight: 650; }

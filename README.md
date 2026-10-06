@@ -132,6 +132,21 @@ trims, re-cases, normalises, fuzzy-matches or infers anything. Column names are
 matched **exactly** — `Sku` is not `SKU`, and `Supplier Name` is not
 `Supplier`.
 
+### CSV tools
+
+Choose **Combine CSV files** or **Filter a CSV** on the existing action cards.
+Upload the source; Combine also takes ordered additional files. Add filters,
+click **Combine files** / **Apply filters**, preview, then **Download CSV**.
+Combine removes exact parsed-field duplicates first; Filter keeps repeated rows
+unless you enable duplicate removal. Combine and filter can run together.
+
+CSV tools preserve every field as text, including leading zeros, large IDs,
+decimal/date text, whitespace, Unicode and quoted newlines. Headers must match
+exactly, in any column order. CSV data never updates stored monthly history.
+Default bounds: 250 MiB/file, 500 MiB/request, 20 files including source; prepared
+sessions expire after 15 minutes. Filtering and order changes reuse inspection.
+See [CSV operation, contracts, limits and tests](docs/csv-tools.md).
+
 ### Monthly Sales Rep Report
 
 This Action reads stored sales history and sample history. One successful Run generates a six-sheet workbook for

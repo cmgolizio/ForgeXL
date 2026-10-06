@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import Request
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
-from starlette.datastructures import FormData
+from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
 
 from app import config
@@ -25,8 +25,11 @@ from app.services.storage import display_filename
 
 
 class _MemoryMultiPartParser(MultiPartParser):
-    def __init__(self, request: Request) -> None:
-        super().__init__(request.headers, request.stream())
+    def __init__(self, request: Request, repeated_files: frozenset[str] = frozenset(), *, max_files: int = 1000, aggregate_limit: int | None = None) -> None:
+        super().__init__(request.headers, request.stream(), max_files=max_files)
+        self.repeated_files = repeated_files
+        self.aggregate_limit = aggregate_limit
+        self._total_bytes = 0
         self.file_limit = config.MAX_UPLOAD_BYTES
         # Zero means "unlimited" to SpooledTemporaryFile, so use at least one.
         self.spool_max_size = max(1, self.file_limit)
@@ -41,7 +44,7 @@ class _MemoryMultiPartParser(MultiPartParser):
     def on_headers_finished(self) -> None:
         super().on_headers_finished()
         name = self._current_part.field_name
-        if name in self._field_names:
+        if name in self._field_names and (name not in self.repeated_files or self._current_part.file is None):
             raise InvalidRequestError(
                 "Each form field must be submitted only once.",
                 details={"field": name},
@@ -52,6 +55,9 @@ class _MemoryMultiPartParser(MultiPartParser):
         file = self._current_part.file
         if file is not None:
             self._file_bytes += end - start
+            self._total_bytes += end - start
+            if self.aggregate_limit is not None and self._total_bytes > self.aggregate_limit:
+                raise UploadTooLargeError(f"Combined uploads exceed the {self.aggregate_limit} byte limit.")
             if self._file_bytes > self.file_limit:
                 filename = file.filename or ""
                 raise UploadTooLargeError(
@@ -83,7 +89,7 @@ class _MemoryMultiPartParser(MultiPartParser):
 
 
 @asynccontextmanager
-async def read_run_form(request: Request) -> AsyncIterator[FormData]:
+async def read_run_form(request: Request, *, repeated_files: frozenset[str] = frozenset(), max_files: int = 1000, aggregate_limit: int | None = None) -> AsyncIterator[FormData]:
     """Close every upload on success, rejection or disconnect.
 
     A request rejected during intake has not created a Run yet. The runner
@@ -92,7 +98,7 @@ async def read_run_form(request: Request) -> AsyncIterator[FormData]:
     content_type, _ = parse_options_header(request.headers.get("content-type"))
     try:
         if content_type == b"multipart/form-data":
-            form = await _MemoryMultiPartParser(request).parse()
+            form = await _MemoryMultiPartParser(request, repeated_files, max_files=max_files, aggregate_limit=aggregate_limit).parse()
         elif content_type == b"application/x-www-form-urlencoded":
             form = await FormParser(request.headers, request.stream()).parse()
         else:
@@ -102,7 +108,7 @@ async def read_run_form(request: Request) -> AsyncIterator[FormData]:
 
     try:
         names = [name for name, _ in form.multi_items()]
-        if len(names) != len(set(names)):
+        if any(names.count(name) > 1 and (name not in repeated_files or any(not isinstance(value, UploadFile) for key, value in form.multi_items() if key == name)) for name in set(names)):
             raise InvalidRequestError("Each form field must be submitted only once.")
         yield form
     finally:

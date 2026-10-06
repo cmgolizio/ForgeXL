@@ -105,6 +105,9 @@ async def create_run(request: Request) -> RunManifest:
                 "That Action does not exist.", details={"action_id": action_id}
             )
 
+        if action.accepts_options:
+            raise InvalidRequestError("Use /api/csv/inspect then /api/csv/runs for this configurable Action.")
+
         uploads = {
             field: PendingUpload(filename=value.filename or "", stream=value.file)
             for field, value in form.multi_items()

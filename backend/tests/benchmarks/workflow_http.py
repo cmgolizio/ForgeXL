@@ -7,8 +7,9 @@ and synthetic golden fixtures protect all real business data.
 """
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
+import csv
 import os
 from pathlib import Path
 import socket
@@ -59,6 +60,56 @@ def verify_proof_actions(client):
     assert invalid.status_code == 422 and invalid.json()["error"]["code"] == "MISSING_COLUMNS"
 
 
+
+def verify_csv_tools(client):
+    """Actual production proxy → strict text CSV intake → Run → full attachment."""
+    discovered = checked(client.get("/forge-api/api/actions"))["actions"]
+    assert next(item for item in discovered if item["id"] == "combine_csv")["inputs"][1]["max_files"] == 19
+    assert "CSV tools" in client.get("/csv-tools?action=combine_csv").text
+    source = 'ID,Value,Customer\n000123,1.00,Château\n000123,1.00,Château\n'
+    appended = 'Customer,ID,Value\n"Château","000123","1.00"\n' + ''.join(f'Customer {n},{n:06},+2.00\n' for n in range(250))
+    prepared = checked(client.post("/forge-api/api/csv/inspect", files=[
+        ("action_id", (None, "combine_csv")),
+        ("combine_source", ("same.csv", source.encode())),
+        ("combine_additional", ("same.csv", appended.encode())),
+        ("combine_additional", ("same.csv", b"ID,Value,Customer\n999999,-3.00,Last\n")),
+    ]))
+    assert prepared["columns"] == ["ID", "Value", "Customer"]
+    old_token = prepared["session_id"]
+    prepared = checked(client.post("/forge-api/api/csv/reorder", json={"session_id": old_token, "order": [0,2,1]}))
+    assert client.post("/forge-api/api/csv/runs", json={"session_id": old_token, "action_id": "combine_csv", "options": {}}).status_code == 400
+    manifest = checked(client.post("/forge-api/api/csv/runs", json={
+        "action_id": "combine_csv", "session_id": prepared["session_id"], "options": {}}))
+    assert manifest["metrics"]["duplicates_removed"] == 2
+    base = f'/forge-api/api/runs/{manifest["run_id"]}/outputs/csv_result'
+    page = checked(client.get(base + "/preview"))
+    assert len(page["rows"]) == 100 and page["total_rows"] == 252
+    assert page["rows"][0] == ["000123", "1.00", "Château"]
+    assert page["rows"][1] == ["999999", "-3.00", "Last"]
+    download = client.get(base + "/download/csv")
+    assert download.status_code == 200 and "attachment; filename=" in download.headers["content-disposition"]
+    values = list(csv.reader(StringIO(download.text)))
+    assert len(values) == 253 and values[-1] == ["000249", "+2.00", "Customer 249"]
+    empty = checked(client.post("/forge-api/api/csv/runs", json={
+        "action_id": "combine_csv", "session_id": prepared["session_id"], "options": {
+            "conditions": [{"column": "Customer", "kind": "text", "operator": "equals", "value": "impossible"}]}}))
+    assert empty["metrics"]["rows_excluded"] == 252 and empty["metrics"]["output_rows"] == 0
+    empty_base = f'/forge-api/api/runs/{empty["run_id"]}/outputs/csv_result'
+    assert checked(client.get(empty_base + "/preview"))["rows"] == []
+    assert list(csv.reader(StringIO(client.get(empty_base + "/download/csv").text))) == [["ID", "Value", "Customer"]]
+    filtered = checked(client.post("/forge-api/api/csv/inspect", files=[
+        ("action_id", (None, "filter_csv")), ("filter_source", ("filter.csv", source.encode()))]))
+    filtered_run = checked(client.post("/forge-api/api/csv/runs", json={"session_id": filtered["session_id"], "action_id": "filter_csv",
+        "options": {"conditions": [{"column": "Value", "kind": "number", "operator": "equals", "value": "1"}]}}))
+    assert filtered_run["metrics"]["output_rows"] == 2 and filtered_run["metrics"]["duplicates_removed"] == 0
+    invalid = client.post("/forge-api/api/csv/runs", json={"session_id": filtered["session_id"], "action_id": "filter_csv", "options": {"unknown": True}})
+    assert invalid.status_code == 400 and invalid.json()["error"]["code"] == "INVALID_REQUEST"
+    for token in (prepared["session_id"], filtered["session_id"]):
+        assert checked(client.post("/forge-api/api/csv/discard", json={"session_id": token}))["discarded"]
+    for run in (manifest, empty, filtered_run):
+        assert checked(client.post(f'/forge-api/api/runs/{run["run_id"]}/discard'))["discarded"]
+    print("CSV production HTTP: combine/filter, fidelity, complete and header-only downloads, cleanup passed.")
+
 def port():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -108,6 +159,7 @@ def main():
                     assert page.status_code == 200 and "Monthly sales rep reports" in page.text
                     assert "What would you like to create?" in client.get("/").text
                     verify_proof_actions(client)
+                    verify_csv_tools(client)
                     base = "/forge-api/api/monthly"
                     denied = client.post(base + "/validate", headers={"Origin": "https://untrusted.example"}, data={"period": golden.GOLDEN_MONTH})
                     assert denied.status_code == 403 and denied.json()["error"]["code"] == "CROSS_ORIGIN_REQUEST"
