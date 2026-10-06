@@ -385,3 +385,13 @@ calculated. Name each with `artifact_ids()` and `artifact_filename()` so the
 IDs and filenames stay safe and collision-free. ForgeXL then lists the files
 under the result, offers a download link for each and a ZIP of all of them —
 again with no frontend change.
+
+### Reusing saved history when a master differs
+
+If monthly validation reports differing saved months, choose **Use saved sales
+months** or **Use saved sample months** for that source. Keep your files selected,
+click **Generate reports** to revalidate, acknowledge the warning, and generate.
+Only missing months are imported; uploaded differences are ignored and existing
+months keep their saved data. To actually correct a month, use a complete
+single-month replacement with its current version and a reason. See
+[the recovery contract](docs/usability-fixes.md).

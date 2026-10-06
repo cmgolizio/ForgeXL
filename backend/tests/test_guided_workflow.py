@@ -127,3 +127,90 @@ def test_old_three_source_receipt_replays_without_needing_its_snapshot(client):
     repeated = generate(client, review)
     assert repeated["manifest"]["action"]["version"] == "0.3.0"
     assert repeated["receipt"]["schema_version"] == 1
+
+
+def test_explicit_saved_history_reuse_imports_missing_months_and_preserves_roster(client):
+    # Reproduce the user path: saved sales, a differing master, and new samples.
+    original = master_files()
+    sales = original['sales_history']
+    seeded = client.post(PREFIX + '/history/validate', data={'dataset_id': 'sales_history'},
+        files={'source_file': sales}).json()
+    assert seeded['ready']
+    assert client.post(PREFIX + '/history/commit', json={'validation_id': seeded['validation_id'],
+        'acknowledge_warnings': True}).json()['status'] == 'saved'
+    before = {v.period: (v.version_id, library.load_version('sales_history', v.version_id))
+        for v in library.current_versions('sales_history')}
+    files = master_files()
+    files['sales_history'] = ('different-master.csv', sales[1].replace(b',100\n', b',999\n'))
+    blocked = client.post(PREFIX + '/validate', data={'period': PERIOD}, files=files).json()
+    assert not blocked['ready'] and not blocked['reps']
+    checks = {item['label']: item['detail'] for item in blocked['checks']}
+    assert checks['Sales reps detected'] == 'Not checked until source errors are resolved'
+    assert checks['Historical comparisons'] == 'Not checked until source errors are resolved'
+    review = client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'sales_history.use_saved_months': 'true'}, files=files).json()
+    assert review['ready'], review
+    assert review['reps'] == ['Rep One']
+    assert len(review['sources'][0]['reused_periods']) == 36
+    warning = next(item for item in review['warnings'] if item['code'] == 'HISTORY_DIFFERENCES_IGNORED')
+    assert len(warning['details']['months']) == 36
+    assert all(item['existing_version_id'] == before[item['period']][0] for item in warning['details']['months'])
+    assert client.post(PREFIX + '/generate', json={'validation_id': review['validation_id']}).status_code == 400
+    result = generate(client, review)
+    assert all(not key.startswith('sales_history') for key in result['committed_versions'])
+    assert len(library.current_versions('sample_history')) == 36
+    for month, (identity, frame) in before.items():
+        assert month is not None
+        assert library.current_version('sales_history', month).version_id == identity
+        assert library.load_version('sales_history', identity).equals(frame)
+    page = client.get(f"/api/runs/{result['manifest']['run_id']}/outputs/company_summary/preview").json()
+    assert page['rows'][0][page['columns'].index('Revenue')] == 100
+
+
+def test_explicit_reuse_still_saves_new_sales_months(client):
+    files = master_files()
+    earlier = {key: (name, payload.replace(b'2026-09-15', b'2026-08-15'))
+        for key, (name, payload) in files.items()}
+    # Seed complete months through August, then upload September with changes.
+    review = client.post(PREFIX + '/validate', data={'period': '2026-08'}, files=earlier).json()
+    generate(client, review)
+    previous = {v.period: v.version_id for v in library.current_versions('sales_history')}
+    name, payload = files['sales_history']
+    files['sales_history'] = (name, payload.replace(b',100\n', b',999\n'))
+    review = client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'sales_history.use_saved_months': 'true', 'sample_history.use_saved_months': 'true'}, files=files).json()
+    assert review['ready'], review
+    assert review['sources'][0]['imported_periods'] == [PERIOD]
+    result = generate(client, review)
+    assert library.current_version('sales_history', PERIOD).version_id == result['committed_versions']['sales_history']
+    for month, identity in previous.items():
+        assert month is not None
+        assert library.current_version('sales_history', month).version_id == identity
+
+
+def test_reuse_does_not_hide_invalid_uploaded_rows(client):
+    generate(client, validate(client, master_files()))
+    files = master_files()
+    name, payload = files['sales_history']
+    files['sales_history'] = (name, payload.replace(b',100\n', b',unreadable\n'))
+    review = client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'sales_history.use_saved_months': 'true'}, files=files).json()
+    assert not review['ready']
+    assert 'NON_NUMERIC_MEASURE' in {item['code'] for item in review['errors']}
+    assert len(library.list_versions('sales_history')) == 36
+
+
+def test_reuse_options_reject_invalid_or_contradictory_requests(client):
+    for value in ('yes', '1', 'TRUE'):
+        assert client.post(PREFIX + '/validate', data={'period': PERIOD,
+            'sales_history.use_saved_months': value}, files=master_files()).status_code == 400
+    assert client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'sales_history.use_saved_months': 'true'}).status_code == 400
+    assert client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'sales_history.use_saved_months': 'true', 'sales_history.replaces': 'some-version'},
+        files=master_files()).status_code == 400
+    assert client.post(PREFIX + '/validate', data={'period': PERIOD,
+        'other.use_saved_months': 'true'}, files=master_files()).status_code == 400
+    repeated = [('period', (None, PERIOD)), ('sales_history.use_saved_months', (None, 'true')),
+        ('sales_history.use_saved_months', (None, 'true'))]
+    assert client.post(PREFIX + '/validate', files=repeated).status_code == 400

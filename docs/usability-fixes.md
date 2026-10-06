@@ -1,3 +1,42 @@
+# Saved-history conflict recovery — 2026-10-06
+
+A differing multi-year upload no longer forces users to remove both files or
+prepare 37 separate corrections merely to reuse the saved history. Conflicts
+still block by default. Each affected source offers **Use saved sales months** or
+**Use saved sample months**. This retains both uploads and clears the stale review;
+click **Generate reports** to revalidate, review the ignored-differences warning,
+acknowledge it, then generate. Only missing months are imported. Every saved
+month, including the report month, keeps its current version and rows. This
+choice deliberately ignores uploaded differences; it does not establish that
+the saved data is complete or correct.
+
+The same choice is available under **File requirements & date options**. Selecting
+a new file clears that source's reuse decision. A correction and saved-month
+reuse cannot be selected together. Every uploaded row still passes normal
+schema/date/measure validation before reuse. Replacement remains an explicit
+single-month/current-version/reason operation. Source changes after review still
+invalidate generation, and receipts pin the exact saved/new versions used.
+
+`POST /api/monthly/validate` accepts optional single text fields
+`sales_history.use_saved_months` and `sample_history.use_saved_months`, each
+`true` or `false` (default false). Unknown fields, malformed booleans, repetitions,
+reuse without an upload and reuse combined with correction are rejected.
+`HISTORY_DIFFERENCES_IGNORED` groups affected months with saved version IDs and
+uploaded/saved row counts. Warning acknowledgment is required before generation.
+
+Rep detection and historical comparisons now say **Not checked until source
+errors are resolved** when preflight has not run. They no longer imply zero reps
+or complete comparison coverage in that state. Missing Customer on sample
+transactions remains a warning; sample rows stay stored as uploaded.
+
+For an already-installed version, if the saved sales history is the intended
+source and includes the report month: remove only the **Sales data** upload,
+keep the **Sample data** upload, and generate. This uses saved sales history while
+saving new sample months. **Use saved data** requires both sales and samples to
+already be saved and is a different operation.
+
+---
+
 # CSV workflow extension — 2026-10-06
 
 The existing action cards now link to **Combine CSV files** and **Filter a CSV**

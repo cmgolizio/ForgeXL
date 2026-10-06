@@ -1,3 +1,34 @@
+# Monthly saved-history recovery — 2026-10-06
+
+Implemented per-source explicit reuse of differing saved months while retaining
+both uploads and importing only missing months. Conflict refusal remains the
+backward-compatible default. The grouped warning lists month/version/row-count
+identities, and generation requires warning consent. Replacement, malformed-row,
+unknown-field, repeated-field and stale-review protections remain intact.
+Preflight-blocked rep detection and comparisons now report that they were not
+checked. See [usability-fixes.md](usability-fixes.md) for operating instructions
+and the `.use_saved_months` multipart contract.
+
+Final `npm run verify:v1` passed: **2,410 backend tests, 33 frontend DOM tests, 5 helper tests**;
+Pyright 0 errors/warnings, ESLint, production build, production HTTP and startup
+checks passed. Added regressions reproduce saved sales plus a differing master
+and new samples, assert unchanged saved rows/version identities, warning consent,
+correct roster and revenue, missing-month imports, malformed-row refusal, option
+validation and retained frontend files. Production Next.js proxy/FastAPI checks
+explicitly reuse a differing historical month, save the new report month,
+download two six-sheet workbooks with revenue control 995, and replay identical
+workbooks after restart/backup restore.
+
+The first combined verification run failed because its new HTTP fixture moved
+rows out of a saved month rather than changing overlapping data. The fixture was
+corrected to change a saved invoice number; HTTP and startup checks then passed, followed by a successful full rerun.
+Native browser verification remains outstanding following the local-URL blocker
+documented below. Actual company uploads and the host's saved library were not
+available or examined; all checks used isolated synthetic stores. No business
+data was modified, and no deployment or merge was performed for this fix.
+
+---
+
 # CSV tools completed — 2026-10-06
 
 Implemented discovered **Combine CSV files** and **Filter a CSV** workflows in

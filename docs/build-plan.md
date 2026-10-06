@@ -1,6 +1,15 @@
 ````md
 # Local Data Workbench — Proof of Concept Build Plan
 
+## Saved-history recovery extension — 2026-10-06
+
+Monthly conflicts remain blocking by default. A deliberate per-source **Use saved
+months** choice may ignore differing uploaded partitions, reuse current immutable
+versions, and import missing months. The differences are disclosed in a grouped
+warning requiring acknowledgment. This never merges rows or replaces saved data;
+all source validation, correction and stale-review protections remain. See
+[usability-fixes.md](usability-fixes.md) for UI and multipart contracts.
+
 ## CSV tools requirement extension — 2026-10-06
 
 The authorized CSV feature adds **Combine CSV files** and **Filter a CSV** to

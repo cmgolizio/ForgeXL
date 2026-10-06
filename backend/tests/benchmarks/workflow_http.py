@@ -183,10 +183,20 @@ def main():
                         if skip: assert review["skipped_periods"] == [historical[split - 1]]
                         saved = checked(client.post(base + "/history/commit", json={"validation_id": review["validation_id"], "acknowledge_warnings": True}))
                         assert saved["status"] == "saved"
-                    review = checked(client.post(base + "/validate", data={"period": golden.GOLDEN_MONTH}, files={
-                        "sales_history": ("sales.csv", golden.sales_table(golden.GOLDEN_MONTH).as_csv()),
-                        "sample_history": ("samples.csv", golden.sample_table(golden.GOLDEN_MONTH).as_csv())}))
-                    assert review["ready"], review
+                    # Differing historical master: explicit reuse, still import the new month.
+                    master_rows = [row for month in sorted(golden.SALES_ROWS) for row in golden.SALES_ROWS[month]]
+                    master = transactions(master_rows).as_csv().replace(b"INV-2608-1", b"INV-2608-changed")
+                    uploaded = {"sales_history": ("master.csv", master),
+                        "sample_history": ("samples.csv", golden.sample_table(golden.GOLDEN_MONTH).as_csv())}
+                    blocked = checked(client.post(base + "/validate", data={"period": golden.GOLDEN_MONTH}, files=uploaded))
+                    assert not blocked["ready"] and any(item["code"] == "HISTORY_MONTH_CONFLICT" for item in blocked["errors"])
+                    reused = checked(client.post(base + "/validate", data={"period": golden.GOLDEN_MONTH,
+                        "sales_history.use_saved_months": "true"}, files=uploaded))
+                    assert reused["ready"] and len(reused["reps"]) == 2
+                    assert any(item["code"] == "HISTORY_DIFFERENCES_IGNORED" for item in reused["warnings"])
+                    assert client.post(base + "/generate", json={"validation_id": reused["validation_id"]}).status_code == 400
+                    print("Monthly production HTTP: differing history explicitly reused; missing month retained; warning consent enforced.")
+                    review = reused
                     result = checked(client.post(base + "/generate", json={"validation_id": review["validation_id"], "acknowledge_warnings": True}))
                     assert result["status"] == "reports_generated"
                     run_id = result["manifest"]["run_id"]
