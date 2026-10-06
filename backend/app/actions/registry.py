@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from app import config
 from app.actions.base import Action
+from app.actions.csv_tools import CombineCSVAction, FilterCSVAction
 from app.actions.exact_duplicate_remover import ExactDuplicateRemoverAction
 from app.actions.monthly_sales_rep_report import MonthlySalesRepReportAction
 from app.actions.product_master_builder import ProductMasterBuilderAction
@@ -79,11 +81,20 @@ class ActionRegistry:
 
 #: The application's Actions, in the order the Action selector shows them.
 #: Register a new Action by importing it above and adding it here.
+# Upload capacity is static discovery metadata, configured once at startup.
+CombineCSVAction.inputs = tuple(
+    slot.model_copy(update={"max_files": max(1, config.CSV_MAX_FILES - 1)})
+    if slot.id == "combine_additional" else slot
+    for slot in CombineCSVAction.inputs
+)
+
 ACTION_REGISTRY = ActionRegistry(
     (
         ExactDuplicateRemoverAction(),
         ProductMasterBuilderAction(),
         MonthlySalesRepReportAction(),
+        CombineCSVAction(),
+        FilterCSVAction(),
     )
 )
 

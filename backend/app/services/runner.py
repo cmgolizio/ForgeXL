@@ -145,6 +145,9 @@ def execute_run(
     action: Action,
     uploads: Mapping[str, PendingUpload],
     dataset_references: Mapping[str, str] | None = None,
+    *,
+    prepared: tuple[Mapping[str, pl.DataFrame], tuple[InputMetadata, ...]] | None = None,
+    options: Mapping[str, object] | None = None,
 ) -> RunOutcome:
     """Execute `action` against its inputs and return the finalized Run.
 
@@ -180,56 +183,64 @@ def execute_run(
         Run.create(action_reference, created_at=created_at, warnings=warnings)
     )
     try:
-        loaded, input_issues = _read_and_check_slots(action, uploads)
-        parsed, parse_issues = _parse_inputs(action, loaded)
-        resolved, library_issues = _resolve_library_slots(action, references)
-        issues = [*input_issues, *parse_issues, *library_issues]
-        warnings += tuple(
-            ValidationIssue(
-                code="MIXED_COLUMN_TYPES",
-                message=(
-                    "Excel columns with mixed cell types were preserved as text: "
-                    + ", ".join(item.mixed_columns)
-                    + "."
-                ),
-                slot_id=slot_id,
-                details={"columns": list(item.mixed_columns)},
+        if prepared is None:
+            loaded, input_issues = _read_and_check_slots(action, uploads)
+            parsed, parse_issues = _parse_inputs(action, loaded)
+            resolved, library_issues = _resolve_library_slots(action, references)
+            issues = [*input_issues, *parse_issues, *library_issues]
+            warnings += tuple(
+                ValidationIssue(
+                    code="MIXED_COLUMN_TYPES",
+                    message=(
+                        "Excel columns with mixed cell types were preserved as text: "
+                        + ", ".join(item.mixed_columns)
+                        + "."
+                    ),
+                    slot_id=slot_id,
+                    details={"columns": list(item.mixed_columns)},
+                )
+                for slot_id, item in parsed.items()
+                if item.mixed_columns
             )
-            for slot_id, item in parsed.items()
-            if item.mixed_columns
-        )
 
-        input_records = tuple(_input_metadata(loaded, parsed))
-        library_records = tuple(
-            record for item in resolved.values() for record in item.as_metadata()
-        )
-        # The uploaded bytes have served their purpose: everything downstream
-        # works from the dataframes and this metadata. Releasing them here
-        # keeps a Run from holding a second copy of every input for the rest
-        # of its life.
-        loaded.clear()
+            input_records = tuple(_input_metadata(loaded, parsed))
+            library_records = tuple(
+                record for item in resolved.values() for record in item.as_metadata()
+            )
+            # The uploaded bytes have served their purpose: everything downstream
+            # works from the dataframes and this metadata. Releasing them here
+            # keeps a Run from holding a second copy of every input for the rest
+            # of its life.
+            loaded.clear()
 
-        # One mapping of named frames, whichever source filled each slot. From
-        # here down nothing distinguishes an uploaded input from a stored one,
-        # which is what build plan 11B means by an Action still receiving
-        # DataFrames.
-        frames = _frames_by_slot(parsed, resolved)
+            # One mapping of named frames, whichever source filled each slot. From
+            # here down nothing distinguishes an uploaded input from a stored one,
+            # which is what build plan 11B means by an Action still receiving
+            # DataFrames.
+            frames = _frames_by_slot(parsed, resolved)
+
+        else:
+            frames, input_records = prepared
+            resolved = {}
+            library_records = ()
+            issues = []
 
         if not issues:
             issues.extend(_validate_library_periods(action, resolved))
         if not issues:
-            issues.extend(_validate_datasets(action, frames))
+            if prepared is None:
+                issues.extend(_validate_datasets(action, frames))
         if not issues:
             issues.extend(action.validate(frames))
 
         run = run_store.update_run(
-            run.with_changes(inputs=input_records, library_inputs=library_records)
+            run.with_changes(inputs=input_records, library_inputs=library_records, metrics={"effective_options": dict(options)} if options is not None else {})
         )
 
         if issues:
             raise RunValidationError(issues)
 
-        result = _execute_action(action, frames)
+        result = _execute_action(action, frames, options)
         warnings += tuple(result.warnings)
         outputs, tables = _collect_outputs(
             action, result, input_records, library_records
@@ -247,7 +258,7 @@ def execute_run(
                 validation=ValidationSummary(passed=True, warnings=warnings),
                 outputs=outputs,
                 artifacts=artifact_records,
-                metrics=dict(result.metrics),
+                metrics={**dict(run.metrics), **dict(result.metrics)},
                 result=produced,
                 rows_affected=result.rows_affected,
             )
@@ -529,11 +540,11 @@ def _resolve_library_slots(
 
 
 def _execute_action(
-    action: Action, frames: Mapping[str, pl.DataFrame]
+    action: Action, frames: Mapping[str, pl.DataFrame], options: Mapping[str, object] | None = None
 ) -> ActionResult:
     """Run the Action's transformation, converting a crash into a clean error."""
     try:
-        return action.run(frames)
+        return action.run_configured(frames, options) if options is not None else action.run(frames)
     except Exception as error:
         logger.exception("Action %s raised during execution", action.id)
         raise ActionExecutionError(
@@ -603,7 +614,7 @@ def _collect_outputs(
             results.describe_output(
                 output_id=declared.id,
                 label=declared.label,
-                formats=EXPORT_FORMATS,
+                formats=declared.formats if action.accepts_options else EXPORT_FORMATS,
                 frame=frame,
                 received_columns=received_columns,
                 received_rows=received_rows,

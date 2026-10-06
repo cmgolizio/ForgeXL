@@ -1,3 +1,49 @@
+# CSV tools completed — 2026-10-06
+
+Implemented discovered **Combine CSV files** and **Filter a CSV** workflows in
+the existing application. Ordered multi-file append, exact all-field keep-first
+deduplication, optional subsequent filters, filter-only duplicate preservation,
+strict string-field parsing, validated typed comparisons, preview/full CSV
+exports, zero-match downloads, provenance/options audits, bounded prepared
+sessions, reordering without reupload/parse, retries, stale-result invalidation,
+and cleanup are integrated. No monthly schema/restriction or persistent-library
+write is part of these operations. See [csv-tools.md](csv-tools.md) for operation,
+contracts, defaults, precise blank/date rules, and configuration limits.
+
+## CSV implementation verification
+
+`npm run verify:v1` **passed** on this working tree:
+
+- **2,406 backend tests** (100 added), **32 frontend DOM interaction tests**
+  (15 added), and **5 startup/transport helper tests**, without skips/failures.
+- Pyright **0 errors / 0 warnings**, ESLint, and Next.js production build.
+- Actual production Next.js streaming proxy → FastAPI → CSV inspection,
+  retained-file reordering, configured Runs, paginated preview, complete download
+  beyond 100 rows, preserved textual values, header-only zero-match download,
+  duplicate filenames, malformed-option refusal and explicit cleanup.
+- Existing proof CSV/XLSX actions; monthly golden company control **995**,
+  two rep workbooks/twelve worksheets, signed-credit/attribution/R12 regressions,
+  history/consent/conflict behavior, result release, exact restart/backup replay,
+  write-origin protection and disconnected-backend 502 checks.
+- Production startup starts both servers, refuses duplicate launch without
+  stopping its owner, releases ports on shutdown, and writes **0** business-data
+  files at startup. All business-shaped fixtures use isolated temporary stores.
+
+The available remote browser refused the local CSV page with
+**`net::ERR_BLOCKED_BY_CLIENT`**. A real browser walkthrough could not be performed;
+DOM and real HTTP transport checks are distinct and neither is described as
+native layout/file-picker/download verification. A normal browser on the host
+Mac should still be used for native acceptance. No deployment or merge was
+performed, and no persistent company data was uploaded or modified.
+
+The pre-existing Starlette/httpx deprecation and environment npm proxy warning
+remain. No dependency changes, database, authentication, queue or cloud service
+were introduced. No functional CSV implementation item remains open; native
+browser acceptance is the outstanding verification limitation. Existing monthly
+business/Excel acceptance gates below remain independent of this feature.
+
+---
+
 # Implementation Status
 
 Last updated: 2026-10-02. Phase 15's monthly workflow now includes the user's

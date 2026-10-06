@@ -312,3 +312,10 @@ export const commitHistory = (payload) => monthlyJson("history/commit", payload)
 function monthlyJson(path, payload) {
   return request(`/api/monthly/${path}`, { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } });
 }
+
+// Generic CSV tools retain inspected string frames in Python, never the browser.
+export const inspectCSV = (formData, { signal } = {}) => request("/api/csv/inspect", { method: "POST", body: formData, signal });
+export const processCSV = (payload, { signal } = {}) => request("/api/csv/runs", { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" }, signal });
+export const discardCSV = (sessionId) => request("/api/csv/discard", { method: "POST", body: JSON.stringify({ session_id: sessionId }), headers: { "Content-Type": "application/json" } });
+
+export const reorderCSV = (payload, { signal } = {}) => request("/api/csv/reorder", { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" }, signal });

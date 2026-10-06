@@ -1,4 +1,8 @@
-"""Phase 6A contract freeze — the behaviour Phase 6B-6I must not break.
+"""CSV tools authorize additive routes and max_files metadata. The original
+Action inventory/behavior remains pinned below; CSV behavior is verified in
+test_csv_tools.py.
+
+Phase 6A contract freeze — the behaviour Phase 6B-6I must not break.
 
 Phase 6A is defensive (build plan "Phase 6A", item 5): before the runtime
 architecture is changed, pin what the finished Phase 0/1-5 implementation
@@ -446,6 +450,11 @@ FROZEN_ROUTES: dict[str, list[str]] = {
     "/health": ["get"],
     "/api/actions": ["get"],
     "/api/runs": ["post"],
+    # Authorized CSV extension; existing route/method contracts are retained.
+    "/api/csv/inspect": ["post"],
+    "/api/csv/runs": ["post"],
+    "/api/csv/reorder": ["post"],
+    "/api/csv/discard": ["post"],
     "/api/runs/{run_id}": ["get"],
     # V1 explicit memory cleanup; all existing routes and shapes stay frozen.
     "/api/runs/{run_id}/discard": ["post"],
@@ -541,6 +550,7 @@ FROZEN_SCHEMA_FIELDS: tuple[tuple[type, tuple[str, ...]], ...] = (
             "source",
             "dataset_id",
             "period_matches",
+            "max_files",
             "interpret_dates",
         ),
     ),
@@ -780,13 +790,13 @@ def _called_names(module) -> set[str]:
 def test_the_registered_actions_are_exactly_the_frozen_inventory(
     registered_action_ids,
 ) -> None:
-    assert tuple(registered_action_ids) == FROZEN_ACTION_IDS
+    assert tuple(registered_action_ids) == (*FROZEN_ACTION_IDS, "combine_csv", "filter_csv")
 
 
 def test_registration_order_is_frozen(registered_action_ids) -> None:
     # The order the registry returns is the order the Action selector renders,
     # so it is part of what the user sees.
-    assert registered_action_ids == list(FROZEN_ACTION_IDS)
+    assert registered_action_ids == [*FROZEN_ACTION_IDS, "combine_csv", "filter_csv"]
 
 
 @pytest.mark.parametrize("entry", FROZEN_ACTIONS, ids=FROZEN_ACTION_IDS)
@@ -1367,7 +1377,7 @@ def test_get_actions_serves_the_frozen_inventory(api_client) -> None:
     assert list(payload) == ["actions"]
 
     served = payload["actions"]
-    assert [entry["id"] for entry in served] == list(FROZEN_ACTION_IDS)
+    assert [entry["id"] for entry in served] == [*FROZEN_ACTION_IDS, "combine_csv", "filter_csv"]
 
     for entry, expected in zip(served, FROZEN_ACTIONS):
         assert entry["version"] == expected["version"]

@@ -1,3 +1,26 @@
+# CSV workflow extension — 2026-10-06
+
+The existing action cards now link to **Combine CSV files** and **Filter a CSV**
+through backend workflow metadata. Source/additional CSV controls show effective
+order, add more files, individual removal and move arrows. Python supplies the
+actual headers. Native filter controls support all/any, explicit case behavior,
+text membership, blanks, numbers and explicitly formatted dates. One large
+**Combine files**/**Apply filters** button processes; metrics, full CSV download,
+and a paginated preview follow. Zero matches remain downloadable.
+
+Inputs lock during processing; changed files/order/action/filters hide and release
+stale results. Inspection and processing retry keep valid inputs. Filter changes
+reuse inspected frames; append-order changes reorder retained segments without
+reupload/parse. Clear files and results, leaving the page, expiry and backend
+restart cleanly release preparation. Reinspection after expiry retains filters.
+CSV processing is ephemeral and does not save/correct monthly business history.
+
+See [csv-tools.md](csv-tools.md) for instructions, strict field/blank semantics,
+contracts, limits and tests. Final verification and browser limitations are
+recorded in [implementation-status.md](implementation-status.md).
+
+---
+
 # Guided workflow corrections — 2026-10-02
 
 ## Problem and resulting behavior

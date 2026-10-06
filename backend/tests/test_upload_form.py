@@ -185,3 +185,35 @@ def test_health_stays_responsive_while_an_action_is_running(client, registered_a
         finally:
             release.set()
         assert pending.result(timeout=3).status_code == 200
+
+@pytest.mark.parametrize("failure", ["success", "aggregate", "count", "malformed", "single-repeat"])
+def test_csv_multifile_intake_closes_all_buffers(client, memory_files, monkeypatch, failure):
+    from app.services import csv_tools
+    csv_tools.SESSIONS.clear()
+    if failure == "aggregate": monkeypatch.setattr(config, "CSV_MAX_TOTAL_BYTES", 7)
+    if failure == "count": monkeypatch.setattr(config, "CSV_MAX_FILES", 1)
+    parts = [("action_id", (None, "combine_csv")), ("combine_source", ("same.csv", b"A\nx\n")),
+             ("combine_additional", ("same.csv", b'A\n"bad' if failure == "malformed" else b"A\ny\n"))]
+    if failure == "single-repeat": parts.append(("combine_source", ("same.csv", b"A\nz\n")))
+    try:
+        response = client.post("/api/csv/inspect", files=parts)
+        assert response.status_code == (200 if failure == "success" else 413 if failure == "aggregate" else 422 if failure == "malformed" else 400)
+        assert memory_files and all(file.closed for file in memory_files)
+        if failure != "success": assert not csv_tools.SESSIONS._sessions
+    finally:
+        csv_tools.SESSIONS.clear()
+
+
+@pytest.mark.parametrize("failure", ["cancel", "disconnect"])
+def test_csv_intake_cancellation_and_disconnect_release_partial_buffers(memory_files, failure):
+    events = [{"type": "http.request", "body": _file_part().replace(b'source_file', b'combine_additional') + b"A\nx", "more_body": True}]
+    async def receive():
+        if events: return events.pop(0)
+        if failure == "cancel": raise asyncio.CancelledError()
+        return {"type": "http.disconnect"}
+    request = Request({"type": "http", "headers": [(b"content-type", b"multipart/form-data; boundary=boundary")]}, receive)
+    async def parse():
+        async with read_run_form(request, repeated_files=frozenset({"combine_additional"}), max_files=20, aggregate_limit=100):
+            pytest.fail("Abandoned upload reached CSV preparation")
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else ClientDisconnect): asyncio.run(parse())
+    assert memory_files and all(file.closed for file in memory_files)

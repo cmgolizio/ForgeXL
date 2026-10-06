@@ -489,3 +489,60 @@ def _human_list(values: tuple[str, ...]) -> str:
     if len(values) <= 1:
         return "".join(values)
     return f"{', '.join(values[:-1])} and {values[-1]}"
+
+
+def parse_csv_text(payload: bytes) -> ParsedFile:
+    """Narrow CSV-tools policy: strict UTF-8/BOM, exact string fields, no inference.
+
+    Validate CSV quote framing and record widths before constructing Polars
+    string columns. Empty fields are empty strings (quoted or unquoted).
+    Ordinary Actions and monthly ingestion never call this policy.
+    """
+    import csv
+    import sys
+    # A field cannot exceed the bounded upload; stdlib's 128 KiB default would
+    # reject otherwise valid long fields. No accepted upload becomes unbounded.
+    csv.field_size_limit(sys.maxsize)
+    try:
+        text = payload.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError as error:
+        raise FileParseError("CSV tools accept UTF-8 or UTF-8 BOM only. Save this file as UTF-8.") from error
+    if "\x00" in text:
+        raise FileParseError("The CSV contains NUL bytes or an unsupported encoding. Save it as UTF-8.")
+    # csv.reader(strict=True) permits quotes inside unquoted fields. Refuse
+    # those too instead of accepting malformed records as plausible text.
+    state = "start"
+    for character in text:
+        if state == "quoted":
+            if character == '"': state = "closed"
+        elif state == "closed":
+            if character == '"': state = "quoted"
+            elif character == ',': state = "start"
+            elif character in '\r\n': state = "start"
+            else: raise FileParseError("Malformed CSV: text after a closing quote.")
+        elif character == '"':
+            if state != "start": raise FileParseError("Malformed CSV: quote inside an unquoted field.")
+            state = "quoted"
+        elif character in ',\r\n': state = "start"
+        else: state = "unquoted"
+    if state == "quoted":
+        raise FileParseError("Malformed CSV: unterminated quoted field.")
+    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+    try:
+        header = next(reader)
+        if not header: raise FileParseError("The CSV needs a header row.")
+        reject_duplicate_columns(header)
+        columns: list[list[str]] = [[] for _ in header]
+        for record_number, row in enumerate(reader, start=2):
+            # A physically empty line is a single empty field for one-column
+            # CSVs; for wider CSVs it is a malformed short record, never skipped.
+            if not row and len(header) == 1: row = [""]
+            if len(row) != len(header):
+                raise FileParseError(f"CSV record {record_number} has {len(row)} fields; expected {len(header)}.")
+            for values, value in zip(columns, row): values.append(value)
+    except StopIteration as error:
+        raise FileParseError("The uploaded CSV is empty; a header row is required.") from error
+    except csv.Error as error:
+        raise FileParseError(f"Malformed CSV: {error}.") from error
+    frame = pl.DataFrame({name: pl.Series(name, values, dtype=pl.String) for name, values in zip(header, columns)})
+    return ParsedFile(frame=frame, parser_engine="python-csv-strict-text")
