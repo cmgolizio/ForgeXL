@@ -46,6 +46,7 @@ function Cycle({ catalog, onSaved }) {
   const [files, setFiles] = useState({});
   const [dates, setDates] = useState({});
   const [replacing, setReplacing] = useState({});
+  const [useSavedMonths, setUseSavedMonths] = useState({});
   const [reason, setReason] = useState("");
   const [cycleId, setCycleId] = useState("");
   const [review, setReview] = useState(null);
@@ -77,7 +78,7 @@ function Cycle({ catalog, onSaved }) {
     const result = await generateMonthlyReports({ validation_id: reviewed.validation_id, acknowledge_warnings: consent });
     validation.current = null; setOutcome(result); setReview(null);
     // A partial save keeps the files selected for safe same-file resumption.
-    if (result.sources_committed) { setFiles({}); setReplacing({}); setReason(""); }
+    if (result.sources_committed) { setFiles({}); setReplacing({}); setUseSavedMonths({}); setReason(""); }
     await onSaved();
   }
 
@@ -99,6 +100,7 @@ function Cycle({ catalog, onSaved }) {
           for (const [id, file] of Object.entries(files)) if (file) {
             form.append(id, file);
             if (dates[id]) form.append(`${id}.date_format`, dates[id]);
+            if (useSavedMonths[id]) form.append(`${id}.use_saved_months`, "true");
             if (replacing[id]) form.append(`${id}.replaces`, replacing[id]);
           }
           if (reason.trim()) form.append("reason", reason.trim());
@@ -115,7 +117,7 @@ function Cycle({ catalog, onSaved }) {
   }
 
   function chooseFile(dataset, file) {
-    change(() => setFiles((previous) => ({ ...previous, [dataset.id]: null })));
+    change(() => { setFiles((previous) => ({ ...previous, [dataset.id]: null })); setUseSavedMonths((previous) => ({ ...previous, [dataset.id]: false })); });
     if (![".csv", ".xlsx"].includes(fileExtension(file.name))) {
       setError(new ApiError(`${file.name} is not supported. Choose a CSV or Excel (.xlsx) file.`));
       return;
@@ -128,7 +130,7 @@ function Cycle({ catalog, onSaved }) {
     <WorkflowSteps current={review || busy || outcome ? 3 : 2} />
     <section className="workflow-panel">
       <StepHeading number="2" title={mode === "uploads" ? "Add your sales and sample files" : "Use saved data"}>
-        {mode === "uploads" ? "A single month or several years both work. Saved months are reused without double-counting." : "Generate another copy using the data you already saved."}
+        {mode === "uploads" ? "A single month or several years both work. Matching saved months are reused. If they differ, choose which saved history to keep." : "Generate another copy using the data you already saved."}
       </StepHeading>
       <div className="mb-6 flex flex-wrap items-end justify-between gap-5">
         <label className="flex w-full flex-col gap-2 text-sm font-medium sm:w-60">Report month
@@ -144,11 +146,12 @@ function Cycle({ catalog, onSaved }) {
           {datasets.map((dataset) => {
             const saved = dataset.versions.find((item) => item.period === period);
             return <div key={dataset.id}>
-              <FileUploadSlot input={{ id: dataset.id, label: dataset.id === "sales_history" ? "Sales data" : "Sample data", accepted_extensions: [".csv", ".xlsx"], required: !saved, description: dataset.id === "sales_history" ? "Company sales, including credits and returns." : "Sample transactions, including sample credits." }} file={files[dataset.id]} disabled={blocked} onSelect={(file) => chooseFile(dataset, file)} onRemove={() => change(() => { setFiles((previous) => ({ ...previous, [dataset.id]: null })); setReplacing((previous) => ({ ...previous, [dataset.id]: null })); })} />
+              <FileUploadSlot input={{ id: dataset.id, label: dataset.id === "sales_history" ? "Sales data" : "Sample data", accepted_extensions: [".csv", ".xlsx"], required: !saved, description: dataset.id === "sales_history" ? "Company sales, including credits and returns." : "Sample transactions, including sample credits." }} file={files[dataset.id]} disabled={blocked} onSelect={(file) => chooseFile(dataset, file)} onRemove={() => change(() => { setFiles((previous) => ({ ...previous, [dataset.id]: null })); setReplacing((previous) => ({ ...previous, [dataset.id]: null })); setUseSavedMonths((previous) => ({ ...previous, [dataset.id]: false })); })} />
               {saved ? <p className="saved-notice">✓ {saved.row_count.toLocaleString()} rows saved for this month. Upload only if you have new data.</p> : null}
               <details className="mt-4 text-xs text-zinc-500"><summary>File requirements & date options</summary><p className="my-3 leading-relaxed">Columns: {dataset.required_columns.join(", ")}. Each month must contain its complete transactions. Multiple data worksheets must be saved separately.</p>
                 <DateFormat value={dates[dataset.id] ?? ""} onChange={(value) => change(() => setDates((previous) => ({ ...previous, [dataset.id]: value })))} disabled={blocked} label={`${dataset.id === "sales_history" ? "Sales" : "Samples"} date format`} />
-                {files[dataset.id] && saved ? <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={Boolean(replacing[dataset.id])} disabled={blocked} onChange={(event) => { const checked = event.target.checked; change(() => setReplacing((previous) => ({ ...previous, [dataset.id]: checked ? saved.version_id : null }))); }} /><span>Replace saved month with a corrected single-month file</span></label> : null}
+                {files[dataset.id] && dataset.versions.length && !replacing[dataset.id] ? <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" aria-label={`Use saved months for ${dataset.id === "sales_history" ? "sales" : "samples"}`} checked={Boolean(useSavedMonths[dataset.id])} disabled={blocked} onChange={(event) => { const checked = event.target.checked; change(() => setUseSavedMonths((previous) => ({ ...previous, [dataset.id]: checked }))); }} /><span>Use saved months even if this file differs; import missing months only.</span></label> : null}
+                {files[dataset.id] && saved ? <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={Boolean(replacing[dataset.id])} disabled={blocked} onChange={(event) => { const checked = event.target.checked; change(() => { setReplacing((previous) => ({ ...previous, [dataset.id]: checked ? saved.version_id : null })); if (checked) setUseSavedMonths((previous) => ({ ...previous, [dataset.id]: false })); }); }} /><span>Replace saved month with a corrected single-month file</span></label> : null}
               </details>
             </div>;
           })}
@@ -162,7 +165,7 @@ function Cycle({ catalog, onSaved }) {
       </div>}
     </section>
     <ErrorNotice error={error} />
-    {review ? <Review review={review} /> : null}
+    {review ? <Review review={review} disabled={blocked} onUseSavedMonths={(id) => change(() => { setUseSavedMonths((previous) => ({ ...previous, [id]: true })); setReplacing((previous) => ({ ...previous, [id]: null })); })} /> : null}
     {!generated ? <section className="workflow-panel">
       <StepHeading number="3" title="Generate your reports">ForgeXL checks the files, saves new history, and creates every rep’s workbook.</StepHeading>
       {review?.ready && review.warnings.length ? <div className="mb-5"><WarningConsent checked={acknowledged} onChange={setAcknowledged} disabled={blocked} /></div> : null}

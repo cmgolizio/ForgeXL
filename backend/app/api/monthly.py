@@ -70,15 +70,22 @@ def catalog() -> dict:
 @router.post("/validate", response_model=WorkflowValidation)
 async def validate_monthly_uploads(request: Request) -> WorkflowValidation:
     async with read_run_form(request) as form:
-        allowed = {"period", "reason"} | set(SOURCE_IDS) | {key + ".date_format" for key in SOURCE_IDS[:2]} | {key + ".replaces" for key in SOURCE_IDS}
+        allowed = {"period", "reason"} | set(SOURCE_IDS) | {key + ".date_format" for key in SOURCE_IDS[:2]} | {key + ".replaces" for key in SOURCE_IDS} | {key + ".use_saved_months" for key in SOURCE_IDS}
         _fields(form, allowed)
+        reuse = {}
+        for key in SOURCE_IDS:
+            value = _text(form, key + ".use_saved_months")
+            if value not in ("", "true", "false"):
+                raise InvalidRequestError(f"{key}.use_saved_months must be true or false.")
+            if value:
+                reuse[key] = value == "true"
         started = time.perf_counter()
         files = await run_in_threadpool(_files, form, SOURCE_IDS)
         summary = await run_in_threadpool(monthly_workflow.WORKFLOW.validate_uploads,
             period=_text(form, "period", required=True), files=files,
             date_formats={key: _text(form, key + ".date_format") for key in SOURCE_IDS[:2] if _text(form, key + ".date_format")},
             replacements={key: _text(form, key + ".replaces") for key in SOURCE_IDS if _text(form, key + ".replaces")},
-            reason=_text(form, "reason") or None)
+            use_saved_months=reuse, reason=_text(form, "reason") or None)
         # Time since the multipart body was received; network time is measured
         # by the browser or the benchmark client, never invented here.
         return summary.model_copy(update={"timings_ms": {**summary.timings_ms,

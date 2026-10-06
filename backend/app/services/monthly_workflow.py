@@ -57,13 +57,19 @@ class MonthlyWorkflow:
     def validate_uploads(self, *, period: str, files: Mapping[str, SourceFile],
                          date_formats: Mapping[str, str] | None = None,
                          replacements: Mapping[str, str] | None = None,
+                         use_saved_months: Mapping[str, bool] | None = None,
                          reason: str | None = None) -> WorkflowValidation:
         with self._lock:
             self._pending = None
             period = _period(period)
             dates = dict(date_formats or {})
             replacing = dict(replacements or {})
-            _check_fields(set(files) | set(dates) | set(replacing))
+            reuse = dict(use_saved_months or {})
+            _check_fields(set(files) | set(dates) | set(replacing) | set(reuse))
+            if any(type(value) is not bool for value in reuse.values()):
+                raise InvalidRequestError("use_saved_months must be true or false.")
+            if any(value and (key not in files or key in replacing) for key, value in reuse.items()):
+                raise InvalidRequestError("Reusing saved months needs an upload and cannot be combined with replacing that source.")
             if any(key not in files for key in replacing):
                 raise InvalidRequestError("A correction needs its replacement file.")
             action = _action()
@@ -103,6 +109,7 @@ class MonthlyWorkflow:
                     warnings.extend(check.warnings)
                     chunks: list[SourceValidation] = []
                     reused: list[str] = []
+                    ignored: list[dict] = []
                     if not source_errors:
                         assert check.frame is not None and check.parsed is not None
                         assert values is not None
@@ -119,6 +126,11 @@ class MonthlyWorkflow:
                                     check.schema.period_column if check.date_format else None, check.date_format):
                                     reused.append(month)
                                     continue
+                                if reuse.get(dataset_id):
+                                    reused.append(month)
+                                    ignored.append({"period": month, "existing_version_id": existing.version_id,
+                                        "uploaded_rows": frame.height, "saved_rows": stored.height})
+                                    continue
                                 errors.append(_issue("HISTORY_MONTH_CONFLICT",
                                     f"{_label(dataset_id)} for {month} differs from the saved data. "
                                     "Use the saved data, or upload a corrected single-month file and select Replace saved month. Nothing was overwritten.",
@@ -127,6 +139,11 @@ class MonthlyWorkflow:
                             chunks.append(replace(check, parsed=replace(check.parsed, frame=frame),
                                 period=month, periods=(month,), min_date=month_dates.min(), max_date=month_dates.max(),
                                 duplicate_of=None, errors=()))
+                    if ignored:
+                        warnings.append(_issue("HISTORY_DIFFERENCES_IGNORED",
+                            f"{_label(dataset_id)}: using saved data for {len(ignored)} differing month(s). "
+                            "Uploaded rows for those months are ignored; saved months are unchanged. Only missing months will be imported.",
+                            dataset_id, {"months": ignored}))
                     imports[dataset_id] = tuple(chunks)
                     operation = "replace" if dataset_id in replacing else "import" if chunks else "reuse"
                     reviews.append(SourceReview(dataset_id=dataset_id, label=_label(dataset_id),
@@ -134,7 +151,8 @@ class MonthlyWorkflow:
                         version_id=current.version_id if current else None,
                         imported_periods=tuple(chunk.period for chunk in chunks if chunk.period),
                         reused_periods=tuple(reused), operation=operation,
-                        errors=tuple(issue for issue in errors if issue.slot_id == dataset_id), warnings=check.warnings))
+                        errors=tuple(issue for issue in errors if issue.slot_id == dataset_id),
+                        warnings=tuple(issue for issue in warnings if issue.slot_id == dataset_id)))
                     if period not in check.periods and current is None:
                         errors.append(_issue("REPORT_MONTH_MISSING", f"{_label(dataset_id)} does not include {period}. Choose a month in your files or upload that month’s data.", dataset_id))
                     if dataset_id in replacing:
@@ -245,10 +263,11 @@ class MonthlyWorkflow:
                 detail=(f"{source.row_count:,} rows · {source.operation}" if source else "Source required")))
         checks.extend((WorkflowCheck(label="Reporting period", status="error" if errors else "passed", detail=period),
             WorkflowCheck(label="Sales reps detected", status="passed" if prepared and prepared.reps else "error",
-                detail=f"{len(prepared.reps) if prepared else 0} workbooks"),
+                detail=f"{len(prepared.reps)} workbooks" if prepared else "Not checked until source errors are resolved"),
             WorkflowCheck(label="Historical comparisons", status="error" if not prepared else
                 "warning" if any(item.missing_months for item in coverage) else "passed",
-                detail="Unavailable R12 totals remain blank" if any(item.missing_months for item in coverage) else
+                detail="Not checked until source errors are resolved" if not prepared else
+                    "Unavailable R12 totals remain blank" if any(item.missing_months for item in coverage) else
                     "Calendar months present; source completeness still needs a spot-check")))
         ready = not errors
         expires = now() + VALIDATION_LIFETIME if ready else None

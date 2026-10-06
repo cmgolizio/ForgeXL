@@ -205,3 +205,27 @@ test("unsupported files fail clearly before sending any request", async () => {
   assert.equal(button("Generate reports").disabled, true);
   assert.equal(calls.some((item) => item.url.endsWith("/validate")), false);
 });
+
+test("conflicting master offers saved-month recovery without losing sample upload", async () => {
+  let attempts = 0;
+  handler = (url) => url.endsWith("/validate") ? ++attempts === 1 ? { ...review, ready: false, validation_id: null, reps: [],
+    errors: [{ code: "HISTORY_MONTH_CONFLICT", slot_id: "sales_history", message: "Saved August differs." }] } :
+    { ...review, warnings: [{ code: "HISTORY_DIFFERENCES_IGNORED", message: "Using saved sales months." }] } : null;
+  await mount(); await uploadBoth(); await click(button("Generate reports"));
+  assert.match(document.body.textContent, /Rep detection waits/);
+  await click(button("Use saved sales months"));
+  assert.match(document.body.textContent, /sales_history.csv/);
+  assert.match(document.body.textContent, /sample_history.csv/);
+  assert.equal(document.body.textContent.includes("Saved August differs"), false);
+  await click(button("Generate reports"));
+  const latest = calls.filter((item) => item.url.endsWith("/validate")).at(-1).options.body;
+  assert.equal(latest.get("sales_history.use_saved_months"), "true");
+  assert.equal(latest.has("sample_history.use_saved_months"), false);
+  assert.equal(latest.get("sample_history").name, "sample_history.csv");
+  assert.equal(button("Generate reports").disabled, true);
+  assert.equal(calls.some((item) => item.url.endsWith("/generate")), false);
+  // Replacing a selected file clears its previous reuse decision.
+  await upload(0, "corrected.csv");
+  await click(button("Generate reports"));
+  assert.equal(calls.filter((item) => item.url.endsWith("/validate")).at(-1).options.body.has("sales_history.use_saved_months"), false);
+});
