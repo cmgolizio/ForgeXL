@@ -97,10 +97,17 @@ def build_report_views(
     accounts = tables["account_performance"]
     current_complete = not missing_months(sales, rolling)
     prior_complete = not missing_months(sales, prior)
-    rolling_accounts = accounts.select(
-        REP_COLUMN, customer,
-        (pl.col("R12 Revenue") if current_complete else pl.lit(None, pl.Float64)).alias(NET_SALES),
-    ).sort([REP_COLUMN, NET_SALES, customer], descending=[False, True, False], nulls_last=True)
+    # The standalone current-R12 list contains accounts with activity in that
+    # window. The comparison includes prior-only accounts, but those must not
+    # leak into this list as artificial zero rows.
+    rolling_accounts = (
+        sales.filter(rolling.covers()).group_by([OWNER, customer])
+        .agg(pl.col(REVENUE).sum().round(MONEY_DECIMALS).alias(NET_SALES))
+        .rename({OWNER: REP_COLUMN})
+        .sort([REP_COLUMN, NET_SALES, customer], descending=[False, True, False], nulls_last=True)
+    )
+    if not current_complete:
+        rolling_accounts = rolling_accounts.with_columns(pl.lit(None, pl.Float64).alias(NET_SALES))
 
     # Include credit-only and net-zero suppliers when they have current-month
     # activity. Historical-only suppliers do not belong to this month's sheet.

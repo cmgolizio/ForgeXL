@@ -91,6 +91,8 @@ class CellFormat(str, Enum):
     CURRENCY_WHOLE = "currency_whole"
     PERCENT = "percent"
     PERCENT_DECIMAL = "percent_decimal"
+    PERCENT_TWO_DECIMALS = "percent_two_decimals"
+    CURRENCY_REFERENCE = "currency_reference"
     DATE = "date"
     MONTH = "month"
     DATETIME = "datetime"
@@ -110,6 +112,8 @@ NUMBER_FORMATS: dict[CellFormat, str] = {
     CellFormat.CURRENCY_WHOLE: "$#,##0;($#,##0)",
     CellFormat.PERCENT: "0%",
     CellFormat.PERCENT_DECIMAL: "0.0%",
+    CellFormat.PERCENT_TWO_DECIMALS: "0.00%",
+    CellFormat.CURRENCY_REFERENCE: '"$"#,##0.00',
     CellFormat.DATE: "yyyy-mm-dd",
     CellFormat.MONTH: "yyyy-mm",
     CellFormat.DATETIME: "yyyy-mm-dd hh:mm",
@@ -126,6 +130,8 @@ _FORMAT_WIDTHS: dict[CellFormat, int] = {
     CellFormat.CURRENCY_WHOLE: 14,
     CellFormat.PERCENT: 10,
     CellFormat.PERCENT_DECIMAL: 10,
+    CellFormat.PERCENT_TWO_DECIMALS: 10,
+    CellFormat.CURRENCY_REFERENCE: 16,
     CellFormat.DATE: 12,
     CellFormat.MONTH: 10,
     CellFormat.DATETIME: 18,
@@ -239,6 +245,19 @@ class Column:
 
 
 @dataclass(frozen=True)
+class ReferenceLayout:
+    """Presentation-only settings for the supplied rep-report reference.
+
+    Row roles arrive already calculated. Group rows carry literal subtotals;
+    the writer only applies indentation and Excel outline levels.
+    """
+
+    kind: str
+    row_roles: tuple[str, ...] = ()
+    header_prefix: tuple[tuple[str | None, ...], ...] = ()
+
+
+@dataclass(frozen=True)
 class Sheet:
     """One worksheet of a report.
 
@@ -297,6 +316,9 @@ class Sheet:
     #: Reader-facing source/coverage notes. Presentation only, no calculations.
     notes: tuple[str, ...] = ()
 
+    #: Opt-in reference presentation; ordinary reports retain their policy.
+    reference_layout: ReferenceLayout | None = None
+
     def resolved_columns(self) -> tuple[Column, ...]:
         """This sheet's columns, filled in from the frame when unstated."""
         if self.columns:
@@ -337,7 +359,13 @@ def render_workbook(sheets: Sequence[Sheet]) -> bytes:
     prepared = [(sheet, _prepare(sheet)) for sheet in entries]
 
     for sheet, frame in prepared:
-        heading_rows = int(bool(sheet.title)) + int(bool(sheet.subtitle)) + len(sheet.notes)
+        if sheet.reference_layout is not None:
+            heading_rows = int(bool(sheet.title)) + len((sheet.subtitle or "").splitlines()) + len(sheet.reference_layout.header_prefix)
+            if sheet.reference_layout.row_roles and len(sheet.reference_layout.row_roles) != frame.height:
+                raise ValueError(f"Sheet {sheet.name!r} has row roles that do not match its rows.")
+        else:
+            heading_rows = int(bool(sheet.title)) + int(bool(sheet.subtitle))
+        heading_rows += len(sheet.notes)
         extra_rows = (
             heading_rows + int(heading_rows > 0) + int(sheet.total_row is not None)
         )
@@ -485,6 +513,10 @@ def _render_sheet(
     frame: pl.DataFrame,
 ) -> None:
     """Write one worksheet: title, table, totals row, conditional formats."""
+    if sheet.reference_layout is not None:
+        from app.services.workbook_reference import render_reference_sheet
+        render_reference_sheet(workbook, name, table_name, sheet, frame)
+        return
     worksheet = workbook.add_worksheet(name)
     columns = sheet.resolved_columns()
 

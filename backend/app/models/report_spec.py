@@ -37,7 +37,7 @@ REPORT_ACTION_ID = "monthly_sales_rep_report"
 #: is specified by :data:`REPORT_RULES`, part of which is still provisional, so
 #: claiming 1.0.0 would assert a stability the definitions do not yet have.
 #: Raise it to 1.0.0 in the same change that clears :data:`PROVISIONAL_RULES`.
-REPORT_ACTION_VERSION = "0.3.0"
+REPORT_ACTION_VERSION = "0.4.0"
 
 
 # ---------------------------------------------------------------------------

@@ -134,18 +134,27 @@ def test_all_six_sheets_round_trip_every_data_and_total_value(completed, rep):
     assert workbook.sheetnames == SHEET_NAMES
     assert all(sheet.sheet_state == "visible" for sheet in workbook)
     for descriptor, sheet, view_id in zip(sheets, workbook, VIEW_IDS, strict=True):
-        expected = tables[view_id].filter(pl.col(REP_COLUMN) == rep).drop(REP_COLUMN)
-        # Header position includes title, period, notes and a spacer.
-        header_row = 4 + len(descriptor.notes)
-        assert [cell.value for cell in sheet[header_row]] == expected.columns
-        assert sheet.freeze_panes == f"A{header_row + 1}"
-        assert sheet.sheet_view.showGridLines is False
-        assert sheet.row_dimensions[header_row].height == 34
-        assert len(sheet.tables) == 1
-        table = next(iter(sheet.tables.values()))
-        assert table.autoFilter is not None
-        assert table.tableStyleInfo.name == "TableStyleMedium2"
+        columns = descriptor.resolved_columns()
+        expected = descriptor.frame.select([column.name for column in columns])
+        header_row = 4 if view_id in {"rolling_samples", "rolling_account_comparison"} else 3
+        assert [sheet.cell(header_row, index).value for index in range(1, len(columns) + 1)] == [column.heading for column in columns]
+        assert sheet.freeze_panes is None
+        assert sheet.sheet_view.showGridLines is not False
+        assert sheet.row_dimensions[1].height == 27
+        assert sheet.row_dimensions[2].height == 22
+        assert sheet["A1"].font.name == "Aptos Narrow"
+        assert sheet["A1"].font.sz == 20
+        assert sheet["A2"].font.sz == 16
+        is_table = view_id in {"rolling_account_sales", "monthly_supplier_sales", "rolling_account_comparison"}
+        assert len(sheet.tables) == int(is_table and expected.height > 0)
+        if sheet.tables:
+            table = next(iter(sheet.tables.values()))
+            assert table.autoFilter is not None
+            assert table.tableStyleInfo.name == ("TableStyleLight2" if view_id == "rolling_account_comparison" else "TableStyleLight4")
         assert all(sheet.column_dimensions[letter].width > 0 for letter in ["A", "B"])
+        assert abs(sheet.column_dimensions["A"].width - (columns[0].width or 0)) < 1 / 7
+        if view_id == "rolling_account_sales":
+            assert sheet["C4"].alignment.horizontal == "right"
         for offset, row in enumerate(expected.iter_rows(), start=header_row + 1):
             for column, value in enumerate(row, start=1):
                 cell = sheet.cell(offset, column)
@@ -158,9 +167,12 @@ def test_all_six_sheets_round_trip_every_data_and_total_value(completed, rep):
                     assert "%" in cell.number_format and cell.data_type == "n"
                 if expected.columns[column - 1] in (NET_SALES, REP_SALES, COMPANY_SALES, PRIOR_R12, CURRENT_R12, CHANGE) and value is not None:
                     assert "$" in cell.number_format and cell.data_type == "n"
-        totals = footer(tables, rep, view_id)
+        totals = descriptor.total_row
+        assert totals is not None
         total_row = header_row + expected.height + 1
-        assert sheet.cell(total_row, 1).value == "Total"
+        assert sheet.cell(total_row, 1).value == descriptor.total_label
+        if view_id in {"monthly_samples", "rolling_samples", "rolling_product_accounts"}:
+            assert sheet.cell(total_row, 1).font.bold
         for column, name in enumerate(expected.columns, start=1):
             if name in totals:
                 value = sheet.cell(total_row, column).value
@@ -169,6 +181,60 @@ def test_all_six_sheets_round_trip_every_data_and_total_value(completed, rep):
                 else:
                     assert value == pytest.approx(totals[name])
         assert all(cell.data_type != "f" for row in sheet for cell in row)
+
+
+def test_reference_grouped_display_has_independent_subtotals_and_indentation(completed):
+    prepared, tables = completed
+    sheets = report_sheets(prepared, tables, source.ALPHA)
+    monthly, rolling, _, supplier, products, comparison = sheets
+    assert monthly.frame.rows() == [(source.SUPPLIER_ONE, 0), ("Producer Élan | Blanc", 0)]
+    assert rolling.frame.rows() == [(source.SUPPLIER_ONE, *([1] * 7 + [0] + [1] * 4), 11),
+                                    ("Producer Élan | Blanc", *([1] * 7 + [0] + [1] * 4), 11)]
+    assert [column.heading for column in rolling.columns] == [
+        "Row Labels", "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December", "Grand Total",
+    ]
+    assert sorted(products.frame.rows()) == sorted([
+        ("Producer Deux | Red", 9), (source.TRANSFERRED, 9),
+        ("Producer Élan | Blanc", 12), (source.ACCOUNT, 12),
+    ])
+    workbook = openpyxl.load_workbook(io.BytesIO(render_workbook(sheets)))
+    assert workbook[monthly.name]["A4"].alignment.indent == 0
+    assert workbook[monthly.name]["A5"].alignment.indent == 1
+    assert workbook[monthly.name].row_dimensions[5].outlineLevel == 1
+    assert workbook[products.name]["B4"].font.bold
+    assert not workbook[products.name]["B5"].font.bold
+    assert supplier.columns[1].heading == "$ (Rep)"
+    assert comparison.frame[CHANGE].to_list() == [42.75, 0]
+
+
+def test_prior_only_accounts_stay_in_comparison_but_not_current_r12_list():
+    inputs = source.inputs()
+    inputs["sales_history"] = inputs["sales_history"].vstack(pl.DataFrame([
+        source.line("2025-01-03", source.ALPHA, "Prior Only", "OLD-1", 1, 9.25, 9.25)
+    ], schema=inputs["sales_history"].schema, orient="row"))
+    prepared = prepare(inputs["sales_history"], inputs["sample_history"])
+    tables = build_tables(prepared)
+    assert "Prior Only" not in tables["rolling_account_sales"][CUSTOMER].to_list()
+    row = only(tables["rolling_account_comparison"], **{REP_COLUMN: source.ALPHA, CUSTOMER: "Prior Only"})
+    assert (row[PRIOR_R12], row[CURRENT_R12], row[CHANGE], row["Status"]) == (9.25, 0, -9.25, "Lost / Inactive")
+
+
+def test_missing_months_propagate_to_group_subtotals_and_growth_display():
+    inputs = source.inputs()
+    inputs["sample_history"] = inputs["sample_history"].filter(~pl.col(DATE).str.starts_with("2026-04"))
+    prepared = prepare(inputs["sales_history"], inputs["sample_history"])
+    tables = build_tables(prepared)
+    rolling = report_sheets(prepared, tables, source.ALPHA)[1]
+    assert rolling.frame["Apr 2026"].to_list() == [None, None]
+    assert rolling.frame[R12_BOTTLES].to_list() == [None, None]
+    comparison = report_sheets(prepared, tables, source.ALPHA)[5]
+    assert comparison.frame[GROWTH].to_list() == [None, 0]
+    workbook = openpyxl.load_workbook(io.BytesIO(render_workbook((comparison,))))
+    assert workbook.active is not None
+    assert workbook.active["F5"].value is None
+    assert workbook.active["F6"].value == 0
+    assert workbook.active["F6"].number_format == "0%"
 
 
 def test_partial_r12_history_has_blank_totals_and_explicit_notes():

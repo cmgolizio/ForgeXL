@@ -1,6 +1,23 @@
 ````md
 # Local Data Workbench — Proof of Concept Build Plan
 
+## Reference workbook presentation correction — 2026-10-09
+
+The user requires each generated monthly worksheet to display data like the
+supplied example, excluding unrelated company/challenge tabs, and authorizes
+correct period labels. This supersedes the generic Phase 14 presentation:
+compact titles/periods, grouped supplier/product subtotals, indented details,
+calendar-month R12 columns, reference column order, fonts, widths, colors,
+formats and sorting. Keep signed-credit arithmetic, invoice rep attribution and
+coverage qualifications; do not reproduce erroneous cached/source values.
+Prior-only accounts belong in the comparison, not the current-R12 account list.
+
+This is a correction to the existing six-sheet contract (Action 0.4.0), not a
+new workflow or architecture. The flat calculation/preview tables remain stable.
+No proprietary workbook or transaction data may enter the public repository.
+See [monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) for the
+finished-report outline behavior and native PivotTable limitations.
+
 ## Saved-history recovery extension — 2026-10-06
 
 Monthly conflicts remain blocking by default. A deliberate per-source **Use saved

@@ -125,7 +125,7 @@ def test_old_three_source_receipt_replays_without_needing_its_snapshot(client):
     assert "ACTION_VERSION_CHANGED" in {issue["code"] for issue in review["warnings"]}
     assert set(legacy.selectors()) == {"sales_history", "sample_history"}
     repeated = generate(client, review)
-    assert repeated["manifest"]["action"]["version"] == "0.3.0"
+    assert repeated["manifest"]["action"]["version"] == "0.4.0"
     assert repeated["receipt"]["schema_version"] == 1
 
 

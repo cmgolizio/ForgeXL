@@ -1,3 +1,42 @@
+# Reference report presentation correction — 2026-10-09
+
+Implemented the authorized six-sheet reference presentation as Action 0.4.0.
+Monthly/R12 names and captions state the actual periods; grouped sample/product
+rows carry model-calculated subtotals and outline indentation; sales/account
+columns, sorting, fonts, sizes, table styles, widths and numeric formats follow
+the reference. Coverage notes remain below literal grand totals. Flat previews
+and exports retain their calculation schemas. Current-R12 account lists no
+longer include prior-only zero rows; the comparison retains those accounts.
+
+The rendering engine remains XlsxWriter behind the shared workbook service.
+Grouped report ranges are Excel outlines rather than native editable PivotTables.
+Column widths have the engine's pixel rounding. No reference workbook, company
+record or proprietary figure was added to the repository. The independent
+source/cached-workbook comparison and revised review output remain private.
+
+Verification passed: **2,415 backend tests, 33 frontend DOM tests, 5 helper
+tests**, Pyright 0 errors/warnings, ESLint and the production build. Production
+Next.js/FastAPI HTTP verification passed with all proof/CSV/monthly flows,
+consent/history controls, two six-sheet reports and exact restart/backup replay.
+Startup verification passed with zero business-data writes. Focused regressions
+verify every displayed value/total, grouping and indentation, independent
+subtotal controls, styles/widths, right-aligned account amounts, numeric growth,
+blank unavailable values, current-only account membership and version warnings.
+
+All six review sheets were rendered and inspected. Native Excel for Mac opening
+and pixel-identical native controls were not available for acceptance. An initial
+build failed on an external node_modules symlink; local dependencies resolved it.
+The first test run used an interpreter whose clean subprocesses lacked the
+backend packages; the configured venv resolved that. A future-version test and
+the current specification were updated for Action 0.4.0 before the passing run.
+The existing Starlette/httpx deprecation remains. No merge, deployment or host
+source-version replacement was performed.
+
+See [monthly-sales-rep-report-spec.md](monthly-sales-rep-report-spec.md) for the
+current display contract and [build-plan.md](build-plan.md) for its authorization.
+
+---
+
 # Monthly saved-history recovery — 2026-10-06
 
 Implemented per-source explicit reuse of differing saved months while retaining

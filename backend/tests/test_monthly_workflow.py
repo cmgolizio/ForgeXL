@@ -331,11 +331,11 @@ def test_a_saved_cycle_warns_when_the_report_action_version_changes(client, monk
     from app.models.report_spec import REPORT_ACTION_ID
     installed = registry.get_action(REPORT_ACTION_ID)
     assert installed is not None
-    monkeypatch.setattr(installed, "version", "0.4.0")
+    monkeypatch.setattr(installed, "version", "0.5.0")
     review = client.post(PREFIX + "/validate-saved", json={"period": PERIOD, "cycle_id": result["receipt"]["cycle_id"]}).json()
     assert review["ready"]
     assert "ACTION_VERSION_CHANGED" in {item["code"] for item in review["warnings"]}
-    assert review["action"]["version"] == "0.4.0"
+    assert review["action"]["version"] == "0.5.0"
 
 
 def test_library_write_failure_does_not_disclose_a_physical_path(client, monkeypatch, data_library):

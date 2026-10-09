@@ -155,7 +155,7 @@ every applicable rep, individual downloads and a monthly ZIP.
 | Field | Value |
 | --- | --- |
 | Action ID | `monthly_sales_rep_report` |
-| Version | `0.3.0` |
+| Version | `0.4.0` |
 | Inputs | `sales_history`, `sample_history` |
 | Results | Nineteen preview/export tables plus all six-sheet rep workbook artifacts. |
 
