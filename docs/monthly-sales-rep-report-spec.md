@@ -1,7 +1,7 @@
 # Monthly Sales Rep Report — Specification
 
 The authoritative calculation and workbook specification for Action
-`monthly_sales_rep_report`, version **`0.3.0`**. Phase 14 generates six
+`monthly_sales_rep_report`, version **`0.4.0`**. Phase 14 generates six
 worksheets for every applicable rep in one Run, with individual XLSX downloads
 and a reporting-month ZIP. Supplementary placement definitions remain
 **PARTLY PROVISIONAL**; they are not included in the six accepted worksheets.
@@ -11,7 +11,7 @@ Declarations live in
 Shared preparation and legacy previews live in `services/monthly_report.py`;
 accepted-view calculations and literal footer values live in
 `services/report_views.py`. Presentation is isolated in
-`services/report_workbooks.py` and the shared `services/workbook.py` renderer.
+`services/report_workbooks.py`, the calculation-side `services/report_presentation.py` adapter, and the shared `services/workbook.py` renderer.
 
 ## Report contract
 
@@ -23,7 +23,7 @@ behavior; private source findings and business acceptance evidence are retained
 in a separate private review document.
 
 Worksheet labels state the actual period. Rolling-year summaries are labeled
-R12, month buckets include the year, and the account comparison recalculates
+R12, month keys retain the year, and the account comparison recalculates
 both R12 periods directly from the selected sales history.
 
 ## Sources and exact replay
@@ -108,14 +108,21 @@ warning qualifies partial history. They are not the accepted R12 workbooks.
 All six worksheets are visible, in this order. The monthly sheet names change
 with the selected reporting period; the example uses August 2026.
 
-| # | Worksheet | Calculation table | Columns and grouping |
+| # | Worksheet | Calculation table | Display columns and grouping |
 | --- | --- | --- | --- |
-| 1 | `Samples August 2026` | `monthly_samples` | `Supplier`, `Producer \| Selection`, `Bottles`; net sample quantities by supplier/product in the reporting month. |
-| 2 | `Samples R12` | `rolling_samples` | Supplier/product, twelve chronological `Sep 2025` … `Aug 2026` columns, `R12 Bottles`. |
-| 3 | `Sales R12 by Account` | `rolling_account_sales` | `Customer`, `Net Sales`; current-R12 net sales by invoice rep/account. |
-| 4 | `Sales August 2026` | `monthly_supplier_sales` | `Supplier`, `Rep Net Sales`, `% of Rep Sales`, `Company Supplier Net Sales`, `% of Company Supplier Sales`. |
-| 5 | `Sales by Product and Account` | `rolling_product_accounts` | `Producer \| Selection`, `Customer`, `Bottles`; current-R12 net sales quantities. |
-| 6 | `Sales by Account R12` | `rolling_account_comparison` | `Customer`, `Prior R12`, `Current R12`, `$ Change`, `% Change`, `Status`. |
+| 1 | `Samples August 2026` | `monthly_samples` | `Row Labels`, `Sample Bottles`; supplier subtotal followed by indented products, both alphabetically ordered. |
+| 2 | `Samples R12` | `rolling_samples` | Supplier/product grouped rows; January–December columns and `Grand Total`; suppliers ordered by descending R12 quantity, products alphabetically. |
+| 3 | `Sales R12 by Account` | `rolling_account_sales` | `Customer`, `Sales Person`, `$`; current-R12 activity only, descending net sales. |
+| 4 | `Sales August 2026` | `monthly_supplier_sales` | `Supplier`, `$ (<rep first name>)`, `% of Rep Sales`, `$ (Company)`, `% of Company Sales`; descending rep sales. |
+| 5 | `Sales by Product and Account` | `rolling_product_accounts` | `Row Labels`, `Sum of Bottles`; product subtotals followed by indented customer detail, both alphabetically ordered. |
+| 6 | `Sales by Account R12` | `rolling_account_comparison` | `Customer`, `Sales Person`, `Prior R12`, `Current R12`, `$ Change`, `% Change`, `Status`; descending dollar change. |
+
+These display schemas follow the supplied reference. Flat browser/CSV tables
+retain their original field names and chronological month headings. The display
+adapter calculates grouped literal subtotals from those verified views; the
+renderer only formats them. Group and detail rows represent the same quantities,
+so consumers must not add both levels. Grand totals come from `workbook_totals`,
+never a sum of duplicated display rows.
 
 `Producer | Selection` is this report's combined product display
 identity. It deliberately aggregates across SKU/vintage/volume variants sharing
@@ -128,7 +135,10 @@ credit-only and net-zero activity, and exclude historical-only suppliers.
 
 Rows sort deterministically, with descending measures and name tie-breakers.
 Samples group within supplier; product/account detail groups within product.
-Month headings include the year to prevent combining different Januaries.
+The R12 calculation keys include the year; the workbook maps each to its unique
+calendar month and states the exact year-bearing range in the subtitle. No
+months from different years are combined. The product/account subtitle describes
+R12, correcting the reference's misleading monthly caption.
 
 ## Calculations and totals
 
@@ -164,11 +174,21 @@ note. Incomplete R12 footers remain blank even for idle reps.
 
 ## Shared formatting, filenames and delivery (14B–14E)
 
-One rendering policy applies to every rep: title, exact period, source/coverage
-notes, consistent table style and widths, wrapped headers, numeric currency
-and percentage formats, fractional quantities, frozen headers, filters, literal
-footer values and hidden gridlines. Negative currency/percentage values have
-red conditional formatting. Heading notes count toward Excel capacity limits.
+One reference rendering policy applies to every rep: Aptos Narrow 12-point body,
+20-point centered bold title, 16-point centered period captions, matching column
+widths (within XlsxWriter's pixel rounding), 16-point default row height, visible
+gridlines and no frozen panes. Notes remain below the literal grand totals.
+Grouped sample/product ranges use green headers and Excel outline levels;
+sales tables use Light4 green bands, and account comparisons use Light2 blue
+bands. Comparison dollar-change cells show positive/negative/zero colors across
+all data rows. Currency retains two decimals; sample quantities retain fractions;
+rep mix uses 0.00%, supplier share 0.0%, and growth 0% from numeric fractions.
+New-account growth is blank. Rep-mix and growth footer cells are blank to match
+the reference; their calculated values remain available in the model.
+
+The grouped ranges provide collapsible finished report rows. They are not native
+editable PivotTables or connected Power Query tables. No reference workbook or
+proprietary record is embedded in application source or required at runtime.
 No hidden raw-data or unrelated challenge worksheets are included.
 
 Each artifact is named `<rep> - <Month Year>.xlsx`; the ZIP is
@@ -201,7 +221,7 @@ The remaining provisional rules are:
 | `sample_period` | Existing behavior fails when nonempty sample history ends before the reporting month; an explicit representation of a genuinely zero company sample month remains unresolved. |
 
 `PROVISIONAL_REPORT_RULES` remains in Data Quality and Run metrics while these
-rules remain open; version `0.3.0` deliberately stays below 1.0.0. Passing synthetic
+rules remain open; version `0.4.0` deliberately stays below 1.0.0. Passing synthetic
 tests verifies the contract; it does not establish completeness or business
 acceptance of a production export.
 
@@ -215,4 +235,4 @@ block generation until the user chooses saved data or an explicit single-month
 correction. New months after the chosen report month may be saved, but are
 excluded from that report’s pinned version set. Receipts survive restart; old
 schema-v1 receipts retain their recorded sales/sample sources and explicitly
-warn that report Action 0.3.0 differs from their original version.
+warn that report Action 0.4.0 differs from their original version.

@@ -7,6 +7,7 @@ One shared sheet policy serves every dynamically discovered rep.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date
 
 import polars as pl
 
@@ -14,13 +15,11 @@ from app.models.artifact import (
     Artifact, MAX_ARTIFACT_FILENAME_BYTES, MAX_ARTIFACT_FILENAME_LENGTH,
     artifact_filename, artifact_ids, check_artifact_filename,
 )
-from app.models.report_spec import REP_COLUMN, TRANSACTION_COLUMNS, WindowKey
+from app.models.report_spec import REP_COLUMN, WindowKey
 from app.services.monthly_report import PreparedReport, missing_months
-from app.services.report_views import (
-    BOTTLES, CHANGE, COMPANY_SALES, COMPANY_SHARE, CURRENT_R12, GROWTH,
-    NET_SALES, PRIOR_R12, PRODUCT, REP_SALES, REP_SHARE, R12_BOTTLES, VIEW_IDS,
-)
-from app.services.workbook import CellFormat, Column, ConditionalFormat, ConditionalRule, Sheet, render_workbook
+from app.services.report_views import VIEW_IDS
+from app.services.workbook import Sheet, render_workbook
+from app.services.report_presentation import reference_display
 
 
 def workbook_names(reps: Sequence[str], period_label: str) -> tuple[str, ...]:
@@ -44,17 +43,6 @@ def workbook_names(reps: Sequence[str], period_label: str) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _format(name: str, dtype: pl.DataType) -> CellFormat:
-    if name in (REP_SHARE, COMPANY_SHARE, GROWTH):
-        return CellFormat.PERCENT_DECIMAL
-    if name in (NET_SALES, REP_SALES, COMPANY_SALES, PRIOR_R12, CURRENT_R12, CHANGE):
-        return CellFormat.CURRENCY
-    if dtype.is_numeric():
-        # Quantities remain numeric and retain fractional source units.
-        return CellFormat.GENERAL
-    return CellFormat.TEXT
-
-
 def report_sheets(
     prepared: PreparedReport, tables: Mapping[str, pl.DataFrame], rep: str,
 ) -> tuple[Sheet, ...]:
@@ -62,12 +50,12 @@ def report_sheets(
     rolling = period.window(WindowKey.ROLLING_YEAR)
     prior = period.window(WindowKey.PRIOR_ROLLING_YEAR)
     definitions = (
-        (VIEW_IDS[0], f"Samples {period.label}", "Samples by supplier and product", period.label),
-        (VIEW_IDS[1], "Samples R12", "Samples by supplier, product and month", f"{rolling.start:%b %d, %Y} to {rolling.end:%b %d, %Y}"),
-        (VIEW_IDS[2], "Sales R12 by Account", "Net sales by account", f"{rolling.start:%b %d, %Y} to {rolling.end:%b %d, %Y}"),
-        (VIEW_IDS[3], f"Sales {period.label}", "Net sales by supplier", period.label),
-        (VIEW_IDS[4], "Sales by Product and Account", "Net bottles by product and account", f"{rolling.start:%b %d, %Y} to {rolling.end:%b %d, %Y}"),
-        (VIEW_IDS[5], "Sales by Account R12", "Account performance: current versus prior R12", f"Prior: {prior.start:%b %Y} to {prior.end:%b %Y}. Current: {rolling.start:%b %Y} to {rolling.end:%b %Y}."),
+        (VIEW_IDS[0], f"Samples {period.label}", "Samples by Supplier / Selection", f"Data from Month of {period.label}"),
+        (VIEW_IDS[1], "Samples R12", "Samples by Supplier / Selection", f"Data from {rolling.start:%B} 1st, {rolling.start:%Y}-{rolling.end:%B} {_ordinal(rolling.end.day)}, {rolling.end:%Y}"),
+        (VIEW_IDS[2], "Sales R12 by Account", "Sales by Account", f"Data from {rolling.start:%b}. 1st, {rolling.start:%Y}-{rolling.end:%b}. {_ordinal(rolling.end.day)}, {rolling.end:%Y}"),
+        (VIEW_IDS[3], f"Sales {period.label}", "Sales by Supplier", f"Data from {period.label}"),
+        (VIEW_IDS[4], "Sales by Product and Account", "Sales, by Producer/Selection, and Account", f"Data from {rolling.start:%B} 1st, {rolling.start:%Y}-{rolling.end:%B} {_ordinal(rolling.end.day)}, {rolling.end:%Y}"),
+        (VIEW_IDS[5], "Sales by Account R12", "Sales by Account", f"Prior R12: {_short_date(prior.start)}-{_short_date(prior.end)}\nCurrent R12: {_short_date(rolling.start)}-{_short_date(rolling.end)}"),
     )
     notes = ["Activity follows the salesperson on the invoice. Sales and sample credits use their signed values."]
     for issue in prepared.warnings:
@@ -76,7 +64,6 @@ def report_sheets(
     result = []
     for view_id, name, title, subtitle in definitions:
         frame = tables[view_id].filter(pl.col(REP_COLUMN) == rep).drop(REP_COLUMN)
-        columns = tuple(Column(name=column, format=_format(column, dtype)) for column, dtype in frame.schema.items())
         totals = dict(tables["workbook_totals"].filter(
             (pl.col(REP_COLUMN) == rep) & (pl.col("Section") == view_id)
         ).select("Measure", "Value").iter_rows())
@@ -96,14 +83,24 @@ def report_sheets(
             view_notes.append("No sample records were supplied. Zero totals describe the supplied rows; they do not establish a complete zero-sample month.")
         if frame.height == 0:
             view_notes.append("No activity in the supplied rows for this section.")
+        display, columns, display_totals, layout = reference_display(view_id, frame, totals, rep)
         result.append(Sheet(
-            name=name, frame=frame, columns=columns, title=f"{rep} | {title}", subtitle=subtitle,
-            notes=tuple(view_notes), total_row=totals, hide_gridlines=True,
-            header_height=34, table_style="Table Style Medium 2",
-            conditional_formats=tuple(ConditionalFormat(column.name, ConditionalRule.NEGATIVE_RED)
-                                      for column in columns if column.format in {CellFormat.CURRENCY, CellFormat.PERCENT_DECIMAL}),
+            name=name, frame=display, columns=columns, title=f"{rep} | {title}", subtitle=subtitle,
+            notes=tuple(view_notes), total_row=display_totals,
+            total_label="Grand Totals" if view_id in {"monthly_supplier_sales", "rolling_account_comparison"} else "Grand Total",
+            hide_gridlines=False, freeze_header=False, header_height=16,
+            reference_layout=layout,
         ))
     return tuple(result)
+
+
+def _ordinal(day: int) -> str:
+    suffix = "th" if 10 <= day % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def _short_date(day: date) -> str:
+    return f"{day.month}/{day.day:02d}/{day.year}"
 
 
 def render_rep_workbooks(

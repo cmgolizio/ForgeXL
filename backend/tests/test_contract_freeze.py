@@ -337,7 +337,7 @@ FROZEN_ACTIONS: tuple[dict[str, Any], ...] = (
     # the specification rather than about the code (build plan 13A).
     {
         "id": "monthly_sales_rep_report",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "name": "Monthly Sales Rep Report",
         "inputs": (
             {
